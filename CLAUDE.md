@@ -66,8 +66,12 @@ qa-engineer → `tests/`, code-reviewer is read-only.
   - **Follow-ups**: known gaps and reviewer suggestions not done in this PR.
   - **Test plan**: commands run and their results.
 - **Never merge.** Ivan merges after CI passes.
-- **Only the main session commits, pushes or opens PRs.** Subagents edit files
-  and report back; they never run `git commit`, `git push` or `gh`.
+- **Only the main session commits, pushes or opens PRs.** Subagents do their
+  task and report back; they never run `git commit`, `git push`, or any `gh`
+  command that changes GitHub (`gh pr create`, `gh pr merge`, `gh pr comment`,
+  ...). Read-only commands (e.g. `git status`, `git diff`, `git log`, `gh pr view`,
+  `gh pr diff`) are fine. The same rule is repeated in each
+  `.claude/agents/*.md` prompt, since subagents may not see this file.
 
 ## Current phase
 

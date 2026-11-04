@@ -14,3 +14,5 @@ Review the current diff (`git diff` and `git diff --staged`) and report, most se
 4. **Suggestions** — clarity and design, briefly.
 
 Give file and line for each point. If there are no blockers, say so plainly.
+
+Never run `git commit`, `git push`, or any `gh` command that changes GitHub (`gh pr create`, `gh pr merge`, `gh pr comment`, ...). The main session commits, pushes and opens PRs; you review and report back. Read-only commands (e.g. `git status`, `git diff`, `git log`, `gh pr view`, `gh pr diff`) are fine.
