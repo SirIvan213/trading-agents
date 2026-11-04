@@ -50,6 +50,23 @@ Specialists live in `.claude/agents/`. Split work by folder so agents don't edit
 the same files: tools-engineer → `tools/`, agents-engineer → `agents/`,
 qa-engineer → `tests/`, code-reviewer is read-only.
 
+## Git workflow
+
+- **Never commit to `main`.** Every change goes on a branch.
+- **One branch per task**, created from an up-to-date `main`. Don't pile
+  unrelated work onto an open PR's branch.
+- **Before pushing:** `pytest -q` and `ruff check .` must both pass, then run
+  the code-reviewer subagent on the diff and fix any blockers it reports.
+- **Open the PR with `gh pr create`** against `main`. The description has
+  these sections:
+  - **Summary**: what changed and why.
+  - **Risk-sensitive changes**: anything touching sizing, stops/targets,
+    `risk_check`, limits, broker code or the paper/live switch, with the
+    lines quoted; say "None" if there are none.
+  - **Follow-ups**: known gaps and reviewer suggestions not done in this PR.
+  - **Test plan**: commands run and their results.
+- **Never merge.** Ivan merges after CI passes.
+
 ## Current phase
 
 Phase 1: tools (`bars`, `scan`, `news`, `exit_plan`, `size`, `risk_check`) with
