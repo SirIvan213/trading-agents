@@ -1,0 +1,60 @@
+{
+  "news": [
+    {
+      "id": 1008,
+      "headline": "ABCD Announces $50 Million Public Offering of Common Stock!",
+      "summary": "Duplicate wire copy with different case and punctuation.",
+      "author": "Wire",
+      "source": "globenewswire",
+      "url": "https://example.test/news/1008",
+      "symbols": ["ABCD"],
+      "created_at": "2026-11-03T16:45:00Z",
+      "updated_at": "2026-11-03T16:45:00Z"
+    },
+    {
+      "id": 1005,
+      "headline": "ABCD to be acquired in $2B merger",
+      "summary": "Timestamped in the future relative to the scan clock.",
+      "author": "Wire",
+      "source": "benzinga",
+      "url": "https://example.test/news/1005",
+      "symbols": ["ABCD"],
+      "created_at": "2026-11-03T17:30:00Z",
+      "updated_at": "2026-11-03T17:30:00Z"
+    },
+    {
+      "id": 1002,
+      "headline": "Trading halted in ABCD pending news",
+      "summary": "Exchange halt.",
+      "author": "Desk",
+      "source": "benzinga",
+      "url": "https://example.test/news/1002",
+      "symbols": ["ABCD"],
+      "created_at": "2026-11-03T15:10:00Z",
+      "updated_at": "2026-11-03T15:10:00Z"
+    },
+    {
+      "id": 1004,
+      "headline": "Other Corp posts earnings beat",
+      "summary": "Different company.",
+      "author": "Desk",
+      "source": "benzinga",
+      "url": "https://example.test/news/1004",
+      "symbols": ["OTHR"],
+      "created_at": "2026-11-03T14:30:00Z",
+      "updated_at": "2026-11-03T14:30:00Z"
+    },
+    {
+      "id": 1003,
+      "headline": "ABCD receives FDA approval for lead drug",
+      "summary": "Regulatory news.",
+      "author": "Desk",
+      "source": "benzinga",
+      "url": "https://example.test/news/1003",
+      "symbols": ["ABCD", "BIOX"],
+      "created_at": "2026-11-03T14:05:00Z",
+      "updated_at": "2026-11-03T14:05:00Z"
+    }
+  ],
+  "next_page_token": "TOKEN-PAGE-2"
+}
