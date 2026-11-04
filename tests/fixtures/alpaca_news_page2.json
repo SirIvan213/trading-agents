@@ -1,0 +1,82 @@
+{
+  "news": [
+    {
+      "id": 1001,
+      "headline": "ABCD announces $50 million public offering of common stock",
+      "summary": "Original release, earlier than the duplicate on page 1.",
+      "author": "Wire",
+      "source": "globenewswire",
+      "url": "https://example.test/news/1001",
+      "symbols": ["ABCD"],
+      "created_at": "2026-11-03T16:30:00Z",
+      "updated_at": "2026-11-03T16:30:00Z"
+    },
+    {
+      "id": 1006,
+      "headline": "ABCD reports quarterly results, EPS tops estimates",
+      "summary": "Earnings.",
+      "author": "Desk",
+      "source": "benzinga",
+      "url": "https://example.test/news/1006",
+      "symbols": ["ABCD"],
+      "created_at": "2026-11-03T13:00:00Z",
+      "updated_at": "2026-11-03T13:00:00Z"
+    },
+    {
+      "id": 1007,
+      "headline": "ABCD agrees to acquire WidgetCo",
+      "summary": "M&A.",
+      "author": "Desk",
+      "source": "benzinga",
+      "url": "https://example.test/news/1007",
+      "symbols": ["ABCD"],
+      "created_at": "2026-11-03T12:00:00Z",
+      "updated_at": "2026-11-03T12:00:00Z"
+    },
+    {
+      "id": 1012,
+      "headline": "ABCD halter top recall; thalt study update",
+      "summary": "Near-miss words only.",
+      "author": "Desk",
+      "source": "benzinga",
+      "url": "https://example.test/news/1012",
+      "symbols": ["ABCD"],
+      "created_at": "2026-11-03T11:00:00Z",
+      "updated_at": "2026-11-03T11:00:00Z"
+    },
+    {
+      "id": 1011,
+      "headline": "ABCD item with a broken timestamp",
+      "summary": "Malformed created_at.",
+      "author": "Desk",
+      "source": "benzinga",
+      "url": "https://example.test/news/1011",
+      "symbols": ["ABCD"],
+      "created_at": "not-a-date",
+      "updated_at": "2026-11-03T10:00:00Z"
+    },
+    {
+      "id": 1010,
+      "headline": "ABCD exactly at window start update",
+      "summary": "Created exactly 24h before the scan clock.",
+      "author": "Desk",
+      "source": "benzinga",
+      "url": "https://example.test/news/1010",
+      "symbols": ["ABCD"],
+      "created_at": "2026-11-02T17:00:00Z",
+      "updated_at": "2026-11-02T17:00:00Z"
+    },
+    {
+      "id": 1009,
+      "headline": "ABCD guidance reiterated",
+      "summary": "One minute outside the 24h window.",
+      "author": "Desk",
+      "source": "benzinga",
+      "url": "https://example.test/news/1009",
+      "symbols": ["ABCD"],
+      "created_at": "2026-11-02T16:59:00Z",
+      "updated_at": "2026-11-02T16:59:00Z"
+    }
+  ],
+  "next_page_token": null
+}
