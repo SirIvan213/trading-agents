@@ -1,0 +1,167 @@
+"""Exit plan: stop, target and time exit for a long entry.
+
+The stop sits just below structure (opening-range low or a named level),
+optionally padded by a fraction of ATR. Agents never compute these numbers;
+this function is the source of truth. Stops round down, targets round up.
+"""
+from __future__ import annotations
+
+from datetime import time
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+
+from tools.config import Limits
+from tools.size import Plan
+
+CENT = Decimal("0.01")
+MIN_R = Decimal("1.0")
+SETUPS = ("orb", "level")
+
+
+def _refuse(reason: str) -> dict:
+    return {"ok": False, "reason": reason}
+
+
+def _dec(value: object, name: str) -> tuple[Decimal | None, str | None]:
+    """Convert to a finite Decimal, or return (None, refusal reason naming `name`)."""
+    if isinstance(value, bool):
+        return None, f"{name} is not a number"
+    try:
+        d = Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return None, f"{name} is not a number"
+    if not d.is_finite():
+        return None, f"{name} must be a finite number"
+    return d, None
+
+
+def exit_plan(
+    setup: str,
+    entry: Decimal,
+    limits: Limits,
+    *,
+    opening_range: dict | None = None,
+    level: Decimal | None = None,
+    atr: Decimal | None = None,
+    reward_multiple: Decimal | None = None,
+    buffer_atr: Decimal = Decimal("0.10"),
+) -> dict:
+    """Return {"ok", "setup", "entry", "stop", "target", "risk_per_share",
+    "reward_to_risk", "time_exit", "notes"} or {"ok": False, "reason"}.
+
+    Long only. "orb": structure is opening_range["low"] and the range must be
+    complete (opening_range["complete"] is True); "level": structure is `level`.
+    Entry must be a whole number of cents. The ATR timeframe should match the
+    setup (e.g. 1-minute ATR for an opening-range breakout).
+    Stop = floor_cent(structure - buffer_atr * atr). Target = ceil_cent(entry + R * risk),
+    where R = max(reward_multiple or min_reward_to_risk, min_reward_to_risk, 1.0).
+    reward_multiple must be positive and at most limits.max_reward_multiple.
+    """
+    if setup not in SETUPS:
+        return _refuse(f"unknown setup {setup!r}")
+
+    if setup == "orb":
+        if not opening_range or "low" not in opening_range:
+            return _refuse("orb setup needs opening_range with a low")
+        if opening_range.get("complete") is not True:
+            return _refuse("opening range incomplete")
+        structure, err = _dec(opening_range["low"], "opening_range low")
+        if err:
+            return _refuse(err)
+    else:
+        if level is None:
+            return _refuse("level setup needs a level")
+        structure, err = _dec(level, "level")
+        if err:
+            return _refuse(err)
+
+    entry, err = _dec(entry, "entry")
+    if err:
+        return _refuse(err)
+    if entry <= 0:
+        return _refuse("entry must be positive")
+    if entry % CENT != 0:
+        return _refuse("entry must be a whole number of cents")
+    if entry <= structure:
+        return _refuse("entry must be above structure (long only)")
+    atr_d: Decimal | None = None
+    if atr is not None:
+        atr_d, err = _dec(atr, "atr")
+        if err:
+            return _refuse(err)
+        if atr_d < 0:
+            return _refuse("atr must not be negative")
+    buffer_atr, err = _dec(buffer_atr, "buffer_atr")
+    if err:
+        return _refuse(err)
+    if buffer_atr < 0:
+        return _refuse("buffer_atr must not be negative")
+
+    notes: list[str] = []
+    buffer = buffer_atr * atr_d if atr_d is not None else Decimal("0")
+    stop = (structure - buffer).quantize(CENT, rounding=ROUND_FLOOR)
+    if stop <= 0:
+        return _refuse("stop would be zero or negative")
+    if stop >= entry:  # unreachable given checks above, kept as a guard
+        return _refuse("stop must be below entry")
+
+    if reward_multiple is None:
+        r = limits.min_reward_to_risk
+    else:
+        r, err = _dec(reward_multiple, "reward_multiple")
+        if err:
+            return _refuse(err)
+        if r <= 0:
+            return _refuse("reward_multiple must be positive")
+        if r > limits.max_reward_multiple:
+            return _refuse(
+                f"reward_multiple {r} exceeds max_reward_multiple {limits.max_reward_multiple}"
+            )
+    if r < limits.min_reward_to_risk:
+        notes.append(
+            f"reward_multiple {r} below limit; using min_reward_to_risk {limits.min_reward_to_risk}"
+        )
+        r = limits.min_reward_to_risk
+    if r < MIN_R:
+        notes.append(f"reward multiple {r} floored to {MIN_R}")
+        r = MIN_R
+    if r > limits.max_reward_multiple:
+        return _refuse(
+            f"config error: effective reward multiple {r} exceeds "
+            f"max_reward_multiple {limits.max_reward_multiple}"
+        )
+
+    risk = entry - stop
+    target = (entry + r * risk).quantize(CENT, rounding=ROUND_CEILING)
+    # Rounded down so the reported ratio never overstates the real one.
+    rr = ((target - entry) / risk).quantize(CENT, rounding=ROUND_FLOOR)
+
+    if atr is None and setup == "orb":
+        notes.append("no atr given; stop has no volatility buffer")
+    notes.append(
+        f"stop = {setup} structure {structure} minus buffer {buffer}, rounded down to the cent"
+    )
+
+    flat_by: time = limits.flat_by
+    return {
+        "ok": True,
+        "setup": setup,
+        "entry": str(entry),
+        "stop": str(stop),
+        "target": str(target),
+        "risk_per_share": str(risk),
+        "reward_to_risk": str(rr),
+        "time_exit": f"{flat_by:%H:%M}",
+        "notes": notes,
+    }
+
+
+def to_plan(result: dict, symbol: str) -> Plan:
+    """Convert a successful exit_plan result into a tools.size.Plan."""
+    if not result.get("ok"):
+        raise ValueError(f"cannot build a Plan from a refused exit plan: {result.get('reason')}")
+    return Plan(
+        symbol=symbol.upper(),
+        entry=Decimal(result["entry"]),
+        stop=Decimal(result["stop"]),
+        target=Decimal(result["target"]),
+    )
