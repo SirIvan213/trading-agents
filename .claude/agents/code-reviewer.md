@@ -14,3 +14,5 @@ Review the current diff (`git diff` and `git diff --staged`) and report, most se
 4. **Suggestions** — clarity and design, briefly.
 
 Give file and line for each point. If there are no blockers, say so plainly.
+
+Only run read-only git and gh commands (e.g. `git status`, `git diff`, `git log`, `git show`, `gh pr view`, `gh pr diff`, `gh pr checks`). Any git or gh command that changes the repo locally or on GitHub — including `git add`, `checkout`, `switch`, `reset`, `stash`, `commit`, `push`, and `gh api` writes — is the main session's job; you review and report back.
