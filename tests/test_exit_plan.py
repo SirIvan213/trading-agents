@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tools import bars as B
-from tools.config import CONFIG_DIR, load_limits
+from tools.config import CONFIG_DIR, limits_from_dict, load_limits
 from tools.exit_plan import exit_plan, to_plan
 from tools.risk_check import DayState, check_order
 from tools.size import Plan, size_position
@@ -17,7 +17,7 @@ from tools.size import Plan, size_position
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
 FIX = Path(__file__).parent / "fixtures"
 NY = ZoneInfo("America/New_York")
-OR = {"high": "102.00", "low": "99.70"}
+OR = {"high": "102.00", "low": "99.70", "complete": True}
 
 
 # ---------- happy paths ----------
@@ -147,7 +147,7 @@ def test_refuse_orb_missing_opening_range():
 
 
 def test_refuse_orb_non_numeric_low():
-    refused("orb", D("100"), LIMITS, opening_range={"low": "abc"})
+    refused("orb", D("100"), LIMITS, opening_range={"low": "abc", "complete": True})
 
 
 def test_refuse_level_missing():
@@ -271,7 +271,8 @@ def _call_with(field, bad):
         entry = bad
     elif field == "opening_range low":
         setup = "orb"
-        kw = dict(opening_range={"low": bad}, atr=D("0.5"), reward_multiple=D("2"))
+        orr = {"low": bad, "complete": True}
+        kw = dict(opening_range=orr, atr=D("0.5"), reward_multiple=D("2"))
     elif field == "buffer_atr":
         kw["buffer_atr"] = bad
     else:
@@ -287,3 +288,122 @@ def test_non_numeric_or_non_finite_is_refused_not_raised(field, bad):
     r = _call_with(field, bad)
     assert r["ok"] is False
     assert field in r["reason"]
+
+
+# ---------- item 1: opening range must be complete ----------
+
+def test_orb_refused_when_incomplete():
+    cases = (
+        {"low": "99.70", "complete": False},
+        {"low": "99.70"},
+        {"low": "99.70", "complete": "yes"},
+    )
+    for orr in cases:
+        r = refused("orb", D("102.50"), LIMITS, opening_range=orr, atr=D("0.8"))
+        assert "opening range incomplete" in r["reason"]
+
+
+def test_orb_passes_when_complete_from_fixture_chain():
+    s = B.summarize(fixture_bars())
+    assert s["opening_range"]["complete"] is True
+    assert exit_plan("orb", D("102.50"), LIMITS, opening_range=s["opening_range"])["ok"]
+
+
+def test_orb_refused_on_truncated_fixture():
+    cut = [b for b in fixture_bars() if b.ts.astimezone(NY).strftime("%H:%M") < "09:45"]
+    orr = B.summarize(cut)["opening_range"]
+    assert orr["complete"] is False
+    r = refused("orb", D("102.50"), LIMITS, opening_range=orr)
+    assert "incomplete" in r["reason"]
+
+
+def test_level_setup_ignores_completeness():
+    assert exit_plan("level", D("52.00"), LIMITS, level=D("50.00"))["ok"]
+
+
+# ---------- item 2: entry in whole cents ----------
+
+def test_entry_whole_cents_passes():
+    for e in ("52.00", "52.01", "52", "52.0100"):
+        assert exit_plan("level", D(e), LIMITS, level=D("50.00"))["ok"], e
+
+
+@pytest.mark.parametrize("e", ["52.005", "52.001", "52.0099", "50.005"])
+def test_sub_penny_entry_refused(e):
+    r = refused("level", D(e), LIMITS, level=D("50.00"))
+    assert "whole number of cents" in r["reason"]
+
+
+def test_sub_penny_entry_refused_for_orb():
+    r = refused("orb", D("102.505"), LIMITS, opening_range=OR)
+    assert "whole number of cents" in r["reason"]
+
+
+# ---------- item 3: reward multiple cap ----------
+
+def test_reward_multiple_exactly_at_cap_passes():
+    assert LIMITS.max_reward_multiple == D("5")
+    r = exit_plan("level", D("52.00"), LIMITS, level=D("50.00"), reward_multiple=D("5"))
+    assert r["ok"] and r["target"] == "62.00" and r["reward_to_risk"] == "5.00"
+
+
+def test_reward_multiple_just_over_cap_refused():
+    r = refused("level", D("52.00"), LIMITS, level=D("50.00"), reward_multiple=D("5.01"))
+    assert "exceeds max_reward_multiple" in r["reason"]
+
+
+@pytest.mark.parametrize("m", ["0", "-1", "-0.01"])
+def test_reward_multiple_non_positive_refused(m):
+    r = refused("level", D("52.00"), LIMITS, level=D("50.00"), reward_multiple=D(m))
+    assert "must be positive" in r["reason"]
+
+
+def test_custom_cap_respected():
+    tight = replace(LIMITS, max_reward_multiple=D("2"))
+    assert exit_plan("level", D("52.00"), tight, level=D("50"), reward_multiple=D("2"))["ok"]
+    r = refused("level", D("52.00"), tight, level=D("50"), reward_multiple=D("2.01"))
+    assert "exceeds max_reward_multiple" in r["reason"]
+
+
+def test_config_error_when_min_floor_exceeds_cap():
+    bad = replace(LIMITS, min_reward_to_risk=D("6"), max_reward_multiple=D("5"))
+    for m in (None, D("3")):
+        r = refused("level", D("52.00"), bad, level=D("50"), reward_multiple=m)
+        assert "config error" in r["reason"]
+
+
+def test_min_equal_to_cap_is_fine():
+    ok = replace(LIMITS, min_reward_to_risk=D("5"), max_reward_multiple=D("5"))
+    assert exit_plan("level", D("52.00"), ok, level=D("50"))["ok"]
+
+
+def test_floor_note_when_limit_below_one():
+    low = replace(LIMITS, min_reward_to_risk=D("0.5"))
+    r = exit_plan("level", D("52.00"), low, level=D("50"))
+    assert any("floored to 1.0" in n for n in r["notes"])
+    assert r["target"] == "54.00"
+    normal = exit_plan("level", D("52"), LIMITS, level=D("50"))
+    assert not any("floored" in n for n in normal["notes"])
+
+
+# ---------- limits_from_dict: max_reward_multiple ----------
+
+def _limits_dict():
+    return json.loads((CONFIG_DIR / "limits.example.json").read_text())
+
+
+def test_example_config_has_cap_of_five():
+    assert "max_reward_multiple" in _limits_dict()
+    assert LIMITS.max_reward_multiple == D("5")
+
+
+def test_limits_from_dict_defaults_cap_when_absent():
+    d = _limits_dict()
+    del d["max_reward_multiple"]
+    assert limits_from_dict(d).max_reward_multiple == D("5")
+
+
+def test_limits_from_dict_reads_cap_when_present():
+    d = _limits_dict()
+    d["max_reward_multiple"] = "3.5"
+    assert limits_from_dict(d).max_reward_multiple == D("3.5")

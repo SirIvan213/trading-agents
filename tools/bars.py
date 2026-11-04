@@ -117,7 +117,13 @@ def regular_session(bars: list[Bar], day: date | None = None) -> list[Bar]:
 
 
 def opening_range(bars: list[Bar], minutes: int = 15) -> dict | None:
-    """High/low of the first `minutes` of the first regular session day, or None."""
+    """High/low of the first `minutes` of the first regular session day, or None.
+
+    Also returns "complete" (True only if at least one regular-session bar on that
+    day has ts >= the window end, i.e. the window has fully elapsed) and
+    "missing_minutes" (whole minutes in [09:30, end) with no bar; informational,
+    assumes 1-minute bars).
+    """
     session = regular_session(bars)
     if not session:
         return None
@@ -127,12 +133,21 @@ def opening_range(bars: list[Bar], minutes: int = 15) -> dict | None:
     window = [b for b in session if b.ts.astimezone(NY).date() == first_day and b.ts < end]
     if not window:
         return None
+    present = {b.ts.astimezone(NY).replace(second=0, microsecond=0) for b in window}
+    missing = sum(
+        1 for i in range(minutes) if (start + timedelta(minutes=i)) not in present
+    )
+    complete = any(
+        b.ts >= end and b.ts.astimezone(NY).date() == first_day for b in session
+    )
     return {
         "high": str(max(b.high for b in window)),
         "low": str(min(b.low for b in window)),
         "start": start.isoformat(),
         "end": end.isoformat(),
         "bars": len(window),
+        "complete": complete,
+        "missing_minutes": missing,
     }
 
 

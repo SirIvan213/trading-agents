@@ -48,9 +48,13 @@ def exit_plan(
     """Return {"ok", "setup", "entry", "stop", "target", "risk_per_share",
     "reward_to_risk", "time_exit", "notes"} or {"ok": False, "reason"}.
 
-    Long only. "orb": structure is opening_range["low"]; "level": structure is `level`.
+    Long only. "orb": structure is opening_range["low"] and the range must be
+    complete (opening_range["complete"] is True); "level": structure is `level`.
+    Entry must be a whole number of cents. The ATR timeframe should match the
+    setup (e.g. 1-minute ATR for an opening-range breakout).
     Stop = floor_cent(structure - buffer_atr * atr). Target = ceil_cent(entry + R * risk),
     where R = max(reward_multiple or min_reward_to_risk, min_reward_to_risk, 1.0).
+    reward_multiple must be positive and at most limits.max_reward_multiple.
     """
     if setup not in SETUPS:
         return _refuse(f"unknown setup {setup!r}")
@@ -58,6 +62,8 @@ def exit_plan(
     if setup == "orb":
         if not opening_range or "low" not in opening_range:
             return _refuse("orb setup needs opening_range with a low")
+        if opening_range.get("complete") is not True:
+            return _refuse("opening range incomplete")
         structure, err = _dec(opening_range["low"], "opening_range low")
         if err:
             return _refuse(err)
@@ -73,6 +79,8 @@ def exit_plan(
         return _refuse(err)
     if entry <= 0:
         return _refuse("entry must be positive")
+    if entry % CENT != 0:
+        return _refuse("entry must be a whole number of cents")
     if entry <= structure:
         return _refuse("entry must be above structure (long only)")
     atr_d: Decimal | None = None
@@ -102,13 +110,25 @@ def exit_plan(
         r, err = _dec(reward_multiple, "reward_multiple")
         if err:
             return _refuse(err)
+        if r <= 0:
+            return _refuse("reward_multiple must be positive")
+        if r > limits.max_reward_multiple:
+            return _refuse(
+                f"reward_multiple {r} exceeds max_reward_multiple {limits.max_reward_multiple}"
+            )
     if r < limits.min_reward_to_risk:
         notes.append(
             f"reward_multiple {r} below limit; using min_reward_to_risk {limits.min_reward_to_risk}"
         )
         r = limits.min_reward_to_risk
     if r < MIN_R:
+        notes.append(f"reward multiple {r} floored to {MIN_R}")
         r = MIN_R
+    if r > limits.max_reward_multiple:
+        return _refuse(
+            f"config error: effective reward multiple {r} exceeds "
+            f"max_reward_multiple {limits.max_reward_multiple}"
+        )
 
     risk = entry - stop
     target = (entry + r * risk).quantize(CENT, rounding=ROUND_CEILING)

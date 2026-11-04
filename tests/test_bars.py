@@ -443,3 +443,69 @@ def test_fetch_pagination_loop_guard(keys):
 def test_fetch_null_bars_page(keys):
     op = FakeOpener([{"bars": None, "next_page_token": None}])
     assert B.fetch_bars("AAPL", START, END, opener=op)["bars"] == []
+
+
+# ---------- opening_range completeness (regression for item 1) ----------
+
+def test_opening_range_complete_on_full_fixture():
+    orr = B.opening_range(ALL)
+    assert orr["complete"] is True
+    assert orr["missing_minutes"] == 0
+
+
+def test_opening_range_incomplete_when_truncated_before_0945():
+    cut = [b for b in ALL if b.ts.astimezone(NY).strftime("%H:%M") < "09:45"]
+    orr = B.opening_range(cut)
+    assert orr["complete"] is False
+    assert orr["bars"] == 15 and orr["missing_minutes"] == 0
+
+
+def test_opening_range_incomplete_when_cut_mid_window():
+    cut = [b for b in ALL if b.ts.astimezone(NY).strftime("%H:%M") < "09:40"]
+    orr = B.opening_range(cut)
+    assert orr["complete"] is False
+    assert orr["bars"] == 10 and orr["missing_minutes"] == 5
+
+
+def test_opening_range_missing_minutes_one_removed():
+    sliced = [b for b in ALL if b.ts.astimezone(NY).strftime("%H:%M") != "09:35"]
+    orr = B.opening_range(sliced)
+    assert orr["missing_minutes"] == 1
+    assert orr["bars"] == 14
+    assert orr["complete"] is True  # later bars exist, window elapsed
+
+
+def test_opening_range_complete_needs_same_day_bar():
+    # first day has only 09:30; a bar on the next day does not complete day one's window
+    items = [raw_bar("2026-11-03T14:30:00Z"), raw_bar("2026-11-04T15:00:00Z")]
+    orr = B.opening_range(B.parse_bars({"bars": items}))
+    assert orr["complete"] is False
+
+
+def test_opening_range_bar_exactly_at_end_completes():
+    items = [raw_bar("2026-11-03T14:30:00Z"), raw_bar("2026-11-03T14:45:00Z")]
+    assert B.opening_range(B.parse_bars({"bars": items}))["complete"] is True
+
+
+def test_summarize_exposes_completeness():
+    assert B.summarize(REG)["opening_range"]["complete"] is True
+    short = B.summarize(REG[:5])["opening_range"]
+    assert short["complete"] is False and short["missing_minutes"] == 10
+
+
+# ---------- network guard (item 5) ----------
+
+def test_fetch_without_opener_hits_guard_not_network(keys):
+    with pytest.raises(RuntimeError, match="network access in tests"):
+        B.fetch_bars("AAPL", START, END)
+
+
+def test_socket_connect_is_blocked():
+    import socket
+
+    s = socket.socket()
+    try:
+        with pytest.raises(RuntimeError, match="network access in tests"):
+            s.connect(("127.0.0.1", 9))
+    finally:
+        s.close()

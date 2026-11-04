@@ -37,12 +37,25 @@ pytest -q
 ## Status
 
 - [x] Phase 0: repo, rules, subagents, CI
-- [ ] Phase 1: tools (`bars`, `scan`, `news`, `exit_plan`, `size` ✅, `risk_check` ✅)
+- [ ] Phase 1: tools (`bars` ✅, `scan`, `news`, `exit_plan` ✅, `size` ✅, `risk_check` ✅)
 - [ ] Phase 2: first agent (Technical Analyst)
 - [ ] Phase 3: parallel analysts + orchestrator
 - [ ] Phase 4: bull/bear debate + trader
 - [ ] Phase 5: paper trading, scheduling, decision journal
 - [ ] Phase 6: evaluation and optimization
+
+## TODO
+
+- [ ] **ATR smoothing test**: check `tools.bars.atr` against a hand-computed
+  Wilder value (n+1 or more bars, uneven true ranges, a gap bar where the
+  previous close sets the true range) instead of a re-implementation.
+- [ ] **`summarize` session filter**: filter to the regular session inside
+  `summarize`, or rename the fields; today pre-market and after-hours bars leak
+  into session high/low, VWAP and ATR if callers don't filter first.
+- [ ] **Half-day closes and holidays** in `regular_session` (13:00 ET early
+  closes). **Needed before Phase 5** (paper trading).
+- [ ] **`fetch_bars` bad responses**: raise a clear error on API error payloads
+  (e.g. `{"message": "forbidden"}`), non-JSON bodies and HTTP errors.
 
 ## Working on it with Claude Code
 

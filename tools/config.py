@@ -25,6 +25,7 @@ class Limits:
     entry_end: time
     flat_by: time
     blocked_symbols: frozenset[str] = field(default_factory=frozenset)
+    max_reward_multiple: Decimal = Decimal("5")
 
 
 def _hhmm(s: str) -> time:
@@ -47,6 +48,7 @@ def limits_from_dict(d: dict) -> Limits:
         entry_end=_hhmm(end),
         flat_by=_hhmm(d["flat_by"]),
         blocked_symbols=frozenset(s.upper() for s in d.get("blocked_symbols", [])),
+        max_reward_multiple=Decimal(str(d.get("max_reward_multiple", "5"))),
     )
 
 
