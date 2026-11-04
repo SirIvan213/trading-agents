@@ -28,6 +28,9 @@ def _floor_shares(amount: Decimal, per_share: Decimal) -> int:
 
 def size_position(plan: Plan, limits: Limits) -> dict:
     """Return {"ok", "shares", "decided_by", "risk_per_share", "max_loss", "order"} or a refusal."""
+    symbol = plan.symbol.strip().upper() if isinstance(plan.symbol, str) else ""
+    if not symbol:
+        return {"ok": False, "reason": "symbol is required"}
     if plan.entry <= 0 or plan.stop <= 0:
         return {"ok": False, "reason": "entry and stop must be positive"}
     if plan.stop >= plan.entry:
@@ -61,7 +64,7 @@ def size_position(plan: Plan, limits: Limits) -> dict:
         "risk_per_share": str(risk_per_share),
         "max_loss": str(max_loss),
         "order": {
-            "symbol": plan.symbol.upper(),
+            "symbol": symbol,
             "side": "buy",
             "qty": shares,
             "type": "market",

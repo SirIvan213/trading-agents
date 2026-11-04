@@ -509,3 +509,124 @@ def test_socket_connect_is_blocked():
             s.connect(("127.0.0.1", 9))
     finally:
         s.close()
+
+
+# ---------- fetch_bars through the shared safe-error helper (issue #8) ----------
+
+SENTINEL_KEY = "SENTINEL-KEY-123"
+SENTINEL_SECRET = "SENTINEL-SECRET-456"
+
+
+@pytest.fixture
+def sentinel_keys(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", SENTINEL_KEY)
+    monkeypatch.setenv("ALPACA_SECRET_KEY", SENTINEL_SECRET)
+
+
+class RawOpener:
+    """Returns raw bytes for each request."""
+
+    def __init__(self, bodies):
+        self.bodies = list(bodies)
+        self.requests = []
+
+    def __call__(self, req, timeout=None):
+        self.requests.append(req)
+        body = self.bodies.pop(0)
+        return FakeResp(body) if not isinstance(body, bytes) else RawResp(body)
+
+
+class RawResp:
+    def __init__(self, b):
+        self._b = b
+
+    def read(self):
+        return self._b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def assert_path_only(exc_info):
+    msg = str(exc_info.value)
+    for secret in (SENTINEL_KEY, SENTINEL_SECRET, "timeframe", "adjustment", "limit=", "start="):
+        assert secret not in msg, secret
+    assert "/AAPL/bars" in msg
+
+
+def test_fetch_error_payload_raises_runtime_error_with_path_only(sentinel_keys):
+    op = FakeOpener([{"message": "forbidden"}])
+    with pytest.raises(RuntimeError, match="error payload") as ei:
+        B.fetch_bars("AAPL", START, END, opener=op)
+    assert "forbidden" in str(ei.value)
+    assert_path_only(ei)
+
+
+def test_fetch_non_json_body_raises_runtime_error(sentinel_keys):
+    with pytest.raises(RuntimeError, match="non-JSON") as ei:
+        B.fetch_bars("AAPL", START, END, opener=RawOpener([b"<html>Bad gateway</html>"]))
+    assert_path_only(ei)
+
+
+def test_fetch_http_403_raises_runtime_error(sentinel_keys):
+    import urllib.error
+
+    def op(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+    with pytest.raises(RuntimeError, match="HTTP 403") as ei:
+        B.fetch_bars("AAPL", START, END, opener=op)
+    assert_path_only(ei)
+
+
+def test_fetch_error_on_second_page_raises(sentinel_keys):
+    p1 = load("alpaca_bars_page1.json")
+    op = FakeOpener([p1, {"message": "rate limit exceeded"}])
+    with pytest.raises(RuntimeError, match="error payload"):
+        B.fetch_bars("AAPL", START, END, opener=op)
+    assert len(op.requests) == 2
+
+
+def test_fetch_page_with_bars_key_and_message_is_not_an_error(sentinel_keys):
+    op = FakeOpener([{"message": "note", "bars": [], "next_page_token": None}])
+    assert B.fetch_bars("AAPL", START, END, opener=op)["bars"] == []
+
+
+def test_fetch_pagination_still_merges_29_bars_through_get_json(sentinel_keys):
+    op = FakeOpener([load("alpaca_bars_page1.json"), load("alpaca_bars_page2.json")])
+    out = B.fetch_bars("AAPL", START, END, opener=op)
+    assert len(op.requests) == 2 and len(out["bars"]) == 29
+    token = load("alpaca_bars_page1.json")["next_page_token"]
+    assert query(op.requests[1])["page_token"] == [token]
+    h = {k.lower(): v for k, v in op.requests[1].header_items()}
+    assert h["apca-api-key-id"] == SENTINEL_KEY  # still sent on every page
+
+
+def test_fetch_multi_symbol_dict_shape_is_unwrapped(sentinel_keys):
+    page = {"bars": {"AAPL": [raw_bar()]}, "next_page_token": None}
+    out = B.fetch_bars("aapl", START, END, opener=FakeOpener([page]))
+    assert out["bars"] == [raw_bar()]
+
+
+def test_fetch_list_body_rejected(sentinel_keys):
+    with pytest.raises(RuntimeError, match="unexpected"):
+        B.fetch_bars("AAPL", START, END, opener=FakeOpener([[1, 2]]))
+
+
+def test_fetch_bars_string_bars_value_rejected(sentinel_keys):
+    with pytest.raises(RuntimeError, match="unexpected bars response shape"):
+        B.fetch_bars("AAPL", START, END, opener=FakeOpener([{"bars": "abc"}]))
+
+
+@pytest.mark.parametrize("bad", [5, True, 1.5])
+def test_fetch_bars_other_non_container_bars_values_rejected(sentinel_keys, bad):
+    with pytest.raises(RuntimeError, match="unexpected bars response shape"):
+        B.fetch_bars("AAPL", START, END, opener=FakeOpener([{"bars": bad}]))
+
+
+def test_fetch_bars_list_bars_value_accepted(sentinel_keys):
+    out = B.fetch_bars("AAPL", START, END, opener=FakeOpener([{"bars": [raw_bar()]}]))
+    assert out["bars"] == [raw_bar()]
