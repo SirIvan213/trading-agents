@@ -1,10 +1,16 @@
 from dataclasses import replace
+from datetime import datetime
 from decimal import Decimal as D
+from zoneinfo import ZoneInfo
 
-from tools.config import load_limits
+import pytest
+
+from tools.config import CONFIG_DIR, load_limits
+from tools.risk_check import DayState, check_order
 from tools.size import Plan, size_position
 
-LIMITS = load_limits()  # config/limits.example.json: $5,000 account, $50 max loss
+# Example config: $5,000 account, $50 max loss (explicit path, never a local limits.json).
+LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
 TSLA = Plan("tsla", entry=D("364.18"), stop=D("358.32"), target=D("370.04"))
 
 
@@ -38,3 +44,33 @@ def test_rejects_stop_at_or_above_entry():
 
 def test_rejects_target_at_or_below_entry():
     assert not size_position(replace(TSLA, target=D("364.18")), LIMITS)["ok"]
+
+
+# ---------- symbol handling (issue #5) ----------
+
+def test_plan_symbol_is_stripped_and_uppercased():
+    r = size_position(Plan(" gme ", D("20.00"), D("19.00"), D("21.00")), LIMITS)
+    assert r["ok"] and r["order"]["symbol"] == "GME"
+
+
+@pytest.mark.parametrize("symbol", ["", "   ", "\n", None, 5, ["AAPL"]], ids=repr)
+def test_missing_or_non_string_symbol_is_refused(symbol):
+    r = size_position(Plan(symbol, D("20.00"), D("19.00"), D("21.00")), LIMITS)
+    assert r == {"ok": False, "reason": "symbol is required"}
+
+
+def test_padded_symbol_chain_is_blocked_by_risk_check():
+    limits = replace(LIMITS, blocked_symbols=frozenset({"GME"}))
+    sized = size_position(Plan(" gme ", D("20.00"), D("19.00"), D("21.00")), limits)
+    assert sized["ok"]
+    now = datetime(2026, 10, 19, 10, 15, tzinfo=ZoneInfo("America/New_York"))
+    r = check_order(sized["order"], limits, DayState(), now)
+    assert r == {"verdict": "BLOCK", "reasons": ["GME is on the blocked list"]}
+
+
+def test_padded_other_symbol_chain_passes():
+    limits = replace(LIMITS, blocked_symbols=frozenset({"GME"}))
+    sized = size_position(Plan(" aapl ", D("20.00"), D("19.00"), D("21.00")), limits)
+    now = datetime(2026, 10, 19, 10, 15, tzinfo=ZoneInfo("America/New_York"))
+    assert check_order(sized["order"], limits, DayState(), now) == {
+        "verdict": "PASS", "reasons": []}

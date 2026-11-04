@@ -12,6 +12,32 @@ import urllib.request
 from collections.abc import Callable, Iterable
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect so API-key headers are never forwarded to another URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None  # urllib then raises HTTPError for the 3xx response
+
+
+def _default_open(req, timeout):  # noqa: ANN001
+    """Default opener, built at call time: urllib's OpenerDirector without redirects."""
+    return urllib.request.build_opener(_NoRedirect()).open(req, timeout=timeout)
+
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """(scheme, hostname, port) with the scheme's default port filled in."""
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port
+    except ValueError:
+        port = -1
+    return scheme, (parts.hostname or "").lower(), port or _DEFAULT_PORTS.get(scheme)
+
+
 def _path(url: str) -> str:
     return urllib.parse.urlsplit(url).path or "/"
 
@@ -26,7 +52,7 @@ def get_json(
 ) -> dict | list:
     """GET `url` and return the decoded JSON body (a dict or a list).
 
-    `opener` defaults to urllib.request.urlopen, resolved at call time; it is
+    `opener` defaults to an OpenerDirector that refuses redirects, built at call time; it is
     called as opener(request, timeout=timeout) and must return a context manager
     whose value has .read().
 
@@ -34,13 +60,18 @@ def get_json(
     body that is not valid JSON, and a JSON error payload, meaning a dict that
     has "message" or "error" and none of `expect_keys`.
     """
-    open_fn = opener or urllib.request.urlopen
+    open_fn = opener or _default_open
     path = _path(url)
     req = urllib.request.Request(url, headers=dict(headers))
     try:
         with open_fn(req, timeout=timeout) as resp:
+            final = resp.geturl() if hasattr(resp, "geturl") else None
+            if isinstance(final, str) and _origin(final) != _origin(url):
+                raise RuntimeError(f"response came from a different origin (requested {path})")
             raw = resp.read()
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise RuntimeError(f"redirect refused (HTTP {exc.code}) from {path}") from None
         raise RuntimeError(f"HTTP {exc.code} from {path}") from None
     except TimeoutError:
         raise RuntimeError(f"request to {path} timed out") from None

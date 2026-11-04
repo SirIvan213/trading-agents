@@ -5,19 +5,18 @@ network code is `fetch_bars`, which accepts an injectable opener.
 """
 from __future__ import annotations
 
-import json
 import os
 import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from tools.config import MARKET_CLOSE, MARKET_OPEN
+from tools.http import get_json
+
 NY = ZoneInfo("America/New_York")
-MARKET_OPEN = time(9, 30)
-MARKET_CLOSE = time(16, 0)
 BASE_URL = "https://data.alpaca.markets/v2/stocks"
 MAX_PAGES = 100
 
@@ -226,7 +225,6 @@ def fetch_bars(
     secret = os.environ.get("ALPACA_SECRET_KEY")
     if not key or not secret:
         raise RuntimeError("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in the environment")
-    open_fn = opener or urllib.request.urlopen
     sym = symbol.upper()
     base_params = {
         "timeframe": timeframe,
@@ -244,10 +242,12 @@ def fetch_bars(
         if token:
             params["page_token"] = token
         url = f"{BASE_URL}/{urllib.parse.quote(sym)}/bars?{urllib.parse.urlencode(params)}"
-        req = urllib.request.Request(url, headers=headers)
-        with open_fn(req, timeout=10) as resp:
-            page = json.loads(resp.read().decode("utf-8"))
+        page = get_json(url, headers, opener=opener, expect_keys=["bars"])
+        if not isinstance(page, dict):
+            raise RuntimeError("unexpected bars response shape")
         items = page.get("bars") or []
+        if not isinstance(items, (list, dict)):
+            raise RuntimeError("unexpected bars response shape")
         if isinstance(items, dict):
             items = items.get(sym, [])
         merged.extend(items)

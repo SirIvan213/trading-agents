@@ -6,15 +6,13 @@ with every reason. No agent can override a BLOCK.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from tools.config import Limits
+from tools.config import MARKET_CLOSE, MARKET_OPEN, Limits, validate_limits
 
 NY = ZoneInfo("America/New_York")
-MARKET_OPEN = time(9, 30)
-MARKET_CLOSE = time(16, 0)
 
 
 @dataclass(frozen=True)
@@ -28,14 +26,24 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
 
     `order` is the bracket order written by tools.size.size_position.
     `now` must be timezone-aware; it is converted to New York time.
+    An early BLOCK (invalid limits, or bad prices) returns without evaluating later rules.
     """
     reasons: list[str] = []
     ny = now.astimezone(NY)
 
-    if not limits.paper:
+    if limits.paper is not True:
         reasons.append("live trading is disabled in this phase (paper must be true)")
 
-    symbol = str(order.get("symbol", "")).upper()
+    # Fail closed: hand-built limits (NaN, Infinity, floats...) must never pass an order.
+    try:
+        validate_limits(limits)
+    except ValueError as exc:
+        msg = str(exc).removeprefix("invalid limits: ")
+        reasons.append(f"limits invalid: {msg}")
+        return {"verdict": "BLOCK", "reasons": reasons}
+
+    raw_symbol = order.get("symbol")
+    symbol = raw_symbol.strip().upper() if isinstance(raw_symbol, str) else ""
     if not symbol:
         reasons.append("order has no symbol")
     if symbol in limits.blocked_symbols:
@@ -44,18 +52,56 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
         reasons.append("long entries only in this phase")
 
     qty = order.get("qty")
-    if not isinstance(qty, int) or qty < 1:
+    if isinstance(qty, bool) or not isinstance(qty, int) or qty < 1:
         reasons.append("quantity must be a whole number of at least 1")
         qty = 0
 
     try:
-        entry = Decimal(order["entry"])
-        stop = Decimal(order["stop_loss"])
-        target = Decimal(order["take_profit"])
-    except (KeyError, TypeError, ArithmeticError):
+        raw = (order["entry"], order["stop_loss"], order["take_profit"])
+        if any(isinstance(v, bool) for v in raw):
+            raise TypeError("bool price")
+        entry, stop, target = (Decimal(v) for v in raw)
+    except (KeyError, TypeError, ValueError, ArithmeticError):
         reasons.append("order needs entry, stop_loss and take_profit")
         return {"verdict": "BLOCK", "reasons": reasons}
+    if not (entry.is_finite() and stop.is_finite() and target.is_finite()):
+        reasons.append("order prices must be finite numbers")
+        return {"verdict": "BLOCK", "reasons": reasons}
+    if entry <= 0 or stop <= 0:
+        reasons.append("entry and stop must be positive")
+        return {"verdict": "BLOCK", "reasons": reasons}
 
+    try:
+        _numeric_rules(entry, stop, target, qty, limits, state, reasons)
+    except ArithmeticError:
+        reasons.append("order arithmetic failed")
+        return {"verdict": "BLOCK", "reasons": reasons}
+
+    if state.trades_today >= limits.max_trades_per_day:
+        reasons.append(
+            f"already {state.trades_today} trades today (max {limits.max_trades_per_day})"
+        )
+
+    if ny.weekday() >= 5 or not (MARKET_OPEN <= ny.time() < MARKET_CLOSE):
+        reasons.append("market is closed")
+    elif not (limits.entry_start <= ny.time() <= limits.entry_end):
+        reasons.append(
+            f"outside entry window {limits.entry_start:%H:%M}-{limits.entry_end:%H:%M} ET"
+        )
+
+    return {"verdict": "BLOCK" if reasons else "PASS", "reasons": reasons}
+
+
+def _numeric_rules(
+    entry: Decimal,
+    stop: Decimal,
+    target: Decimal,
+    qty: int,
+    limits: Limits,
+    state: DayState,
+    reasons: list[str],
+) -> None:
+    """Price/size rules, in their original order. May raise ArithmeticError."""
     if stop >= entry:
         reasons.append("stop must be below entry")
     if target <= entry:
@@ -82,16 +128,11 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
         if entry * qty > limits.max_position_value:
             reasons.append(f"position value {entry * qty:.2f} over cap {limits.max_position_value}")
 
-    if state.trades_today >= limits.max_trades_per_day:
-        reasons.append(
-            f"already {state.trades_today} trades today (max {limits.max_trades_per_day})"
-        )
-
-    if ny.weekday() >= 5 or not (MARKET_OPEN <= ny.time() < MARKET_CLOSE):
-        reasons.append("market is closed")
-    elif not (limits.entry_start <= ny.time() <= limits.entry_end):
-        reasons.append(
-            f"outside entry window {limits.entry_start:%H:%M}-{limits.entry_end:%H:%M} ET"
-        )
-
-    return {"verdict": "BLOCK" if reasons else "PASS", "reasons": reasons}
+    if risk_per_share > 0:
+        reward = target - entry
+        if reward > limits.max_reward_multiple * risk_per_share + Decimal("0.01"):
+            rr = reward / risk_per_share
+            reasons.append(
+                f"reward:risk {rr:.2f} over cap {limits.max_reward_multiple} "
+                f"(beyond one-cent rounding tolerance)"
+            )
