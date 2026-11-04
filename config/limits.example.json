@@ -1,0 +1,13 @@
+{
+  "paper": true,
+  "account_cash": "5000.00",
+  "cash_buffer_pct": "10",
+  "max_loss_per_trade": "50.00",
+  "max_position_value": "3000.00",
+  "daily_loss_limit": "150.00",
+  "max_trades_per_day": 3,
+  "min_reward_to_risk": "1.0",
+  "entry_window": ["09:45", "15:30"],
+  "flat_by": "15:55",
+  "blocked_symbols": []
+}

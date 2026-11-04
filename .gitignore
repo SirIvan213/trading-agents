@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# secrets and real config
+.env
+config/*.json
+!config/*.example.json
+
+# runtime data
+journal/*.db
+journal/*.sqlite
+trader/
