@@ -66,6 +66,8 @@ qa-engineer → `tests/`, code-reviewer is read-only.
   - **Follow-ups**: known gaps and reviewer suggestions not done in this PR.
   - **Test plan**: commands run and their results.
 - **Never merge.** Ivan merges after CI passes.
+- **Only the main session commits, pushes or opens PRs.** Subagents edit files
+  and report back; they never run `git commit`, `git push` or `gh`.
 
 ## Current phase
 
