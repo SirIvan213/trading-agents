@@ -44,23 +44,17 @@ pytest -q
 - [ ] Phase 5: paper trading, scheduling, decision journal
 - [ ] Phase 6: evaluation and optimization
 
-## TODO
+## Follow-ups and known gaps
 
-- [ ] **ATR smoothing test**: check `tools.bars.atr` against a hand-computed
-  Wilder value (n+1 or more bars, uneven true ranges, a gap bar where the
-  previous close sets the true range) instead of a re-implementation.
-- [ ] **`summarize` session filter**: filter to the regular session inside
-  `summarize`, or rename the fields; today pre-market and after-hours bars leak
-  into session high/low, VWAP and ATR if callers don't filter first.
-- [ ] **Half-day closes and holidays** in `regular_session` (13:00 ET early
-  closes). **Needed before Phase 5** (paper trading).
-- [ ] **`fetch_bars` bad responses**: raise a clear error on API error payloads
-  (e.g. `{"message": "forbidden"}`), non-JSON bodies and HTTP errors. Can
-  reuse `tools.http.get_json`.
-- [ ] **Scan freshness**: the pipeline must pass `today` to `tools.scan.scan`
-  (without it a pre-market scan uses yesterday's daily bar), and scan should
-  also reject stale `latestTrade`/`latestQuote` timestamps (halted names).
-  **Needed before Phase 5.**
+Tracked as [GitHub issues](https://github.com/SirIvan213/trading-agents/issues), labeled by when they must be done:
+
+- [`before-phase-2`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Abefore-phase-2): fix before the agents build on the tools ([Phase 2 milestone](https://github.com/SirIvan213/trading-agents/milestone/1))
+- [`before-phase-5`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Abefore-phase-5): fix before any paper trading ([Phase 5 milestone](https://github.com/SirIvan213/trading-agents/milestone/2))
+- [`hardening`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Ahardening): real but low risk; fix anytime
+- [`docs`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Adocs): wording only
+
+Issues that touch sizing, stops, `risk_check`, limits or the broker also carry
+[`risk-sensitive`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Arisk-sensitive).
 
 ## Working on it with Claude Code
 
