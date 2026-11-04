@@ -66,6 +66,15 @@ qa-engineer → `tests/`, code-reviewer is read-only.
   - **Follow-ups**: known gaps and reviewer suggestions not done in this PR.
   - **Test plan**: commands run and their results.
 - **Never merge.** Ivan merges after CI passes.
+- **Follow-ups become issues.** Right after opening a PR, file each item in its
+  Follow-ups section as a GitHub issue with `gh issue create`, labeled
+  `before-phase-N` (put it in that phase's milestone), `hardening` or `docs`,
+  plus `risk-sensitive` when it touches sizing, stops/targets, `risk_check`,
+  limits, broker code or the paper/live switch. List the new issue numbers in
+  the PR. A PR that fixes an issue says `Fixes #N` in its description.
+- **Phase gate.** Before starting phase N, check
+  `gh issue list --label before-phase-N --state open`. If any are open, fix
+  them first or tell Ivan which ones remain.
 - **Only the main session changes the repo or GitHub.** Subagents may only run
   read-only git and gh commands (e.g. `git status`, `git diff`, `git log`,
   `git show`, `gh pr view`, `gh pr diff`, `gh pr checks`). Any git or gh command
@@ -77,5 +86,5 @@ qa-engineer → `tests/`, code-reviewer is read-only.
 
 ## Current phase
 
-Phase 1: tools (`bars`, `scan`, `news`, `exit_plan`, `size`, `risk_check`) with
-fixture tests. `size` and `risk_check` exist as a starting pattern.
+Phase 1 is done. Phase 2 (the Technical Analyst agent) is next. Its blockers are
+the open issues labeled `before-phase-2`.
