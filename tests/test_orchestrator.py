@@ -311,7 +311,7 @@ def test_news_failure_fails_only_the_sentiment_analyst():
     assert_ok(packet, "technical", "fundamentals")
     assert packet.runs["sentiment"].ok is False
     assert packet.runs["sentiment"].reason == (
-        "evidence source get_news is not a tool that returned data in this run")
+        "evidence source get_news is not a tool that answered in this run")
 
 
 # ---------------- no secrets ----------------

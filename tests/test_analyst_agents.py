@@ -123,7 +123,7 @@ def test_sentiment_report_citing_a_failed_tool_is_rejected_even_without_catalyst
         rep("sentiment", evidence=[{"point": "p", "source": "get_news"}])]
     run = sent_agent.run_sentiment("ABCD", NOON, d, client=FakeClient(q))
     assert run.ok is False
-    assert run.reason == "evidence source get_news is not a tool that returned data in this run"
+    assert run.reason == "evidence source get_news is not a tool that answered in this run"
 
 
 def test_sentiment_survives_an_sec_failure():
@@ -224,7 +224,7 @@ def test_fundamentals_no_cik_is_error_and_catalyst_citation_rejected():
     assert run.ok is False and "get_fundamentals" in run.reason
 
 
-def test_fundamentals_ok_false_result_cannot_back_a_catalyst():
+def test_fundamentals_ok_false_result_may_back_evidence_but_not_a_catalyst():
     from datetime import datetime
     from zoneinfo import ZoneInfo
     early = datetime(2025, 1, 1, 12, tzinfo=ZoneInfo("America/New_York"))  # nothing filed yet
@@ -239,11 +239,12 @@ def test_fundamentals_ok_false_result_cannot_back_a_catalyst():
     run = fund_agent.run_fundamentals("ABCD", early, FakeFilingsData(), client=client)
     res, payload = tool_result(client)
     assert res["is_error"] is False and payload["ok"] is False
-    # an ok:false result is not data: neither the catalyst nor the evidence can cite the tool
-    assert run.ok is False
-    assert run.reason == (
-        "evidence source get_fundamentals is not a tool that returned data in this run")
+    # evidence may cite a tool that answered ok:false; a catalyst may not (it is not data)
+    assert run.ok is True and run.report.catalysts == []   # valid after the catalyst-free retry
     assert len(client.calls) == 3
+    retry = client.calls[2]["messages"][-1]["content"]
+    msg = next(b["text"] for b in retry if b["type"] == "text")
+    assert "catalyst source get_fundamentals is not a tool that returned data" in msg
 
 
 def test_fundamentals_config_from_env(monkeypatch):

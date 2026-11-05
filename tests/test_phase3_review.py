@@ -444,3 +444,85 @@ def test_fundamentals_may_not_use_a_sentiment_catalyst_name():
                  catalysts=fcat("halt"))
     run, _ = fund_run(fcat("halt"), "sec_companyfacts_abcd.json", extra=[bad])
     assert run.ok is False and run.reason == "catalyst halt is not in get_fundamentals's output"
+
+
+# ---------------- evidence may cite any tool that answered (ok:false included) ----------------
+
+def test_technical_evidence_may_cite_a_refused_plan_exit():
+    # orb entry equal to the structure low is refused by exit_plan with {"ok": False, ...}
+    data = FakeMarketData()
+    q = [
+        response([tool_use("b", "get_bars", {"symbol": "AAPL"})], "tool_use"),
+        response([tool_use("p", "plan_exit", {"setup": "orb", "entry": "99.7"})], "tool_use"),
+        response([text(report_json(
+            stance="neutral", confidence=0.2,
+            evidence=[{"point": "orb plan refused: entry must be above structure",
+                       "source": "plan_exit"}]))], "end_turn"),
+    ]
+    client = FakeClient(q)
+    run = tech_agent.run_technical("AAPL", NOON, data, client=client)
+    (res,) = client.calls[2]["messages"][-1]["content"]
+    import json
+    payload = json.loads(res["content"])
+    assert res["is_error"] is False and payload["ok"] is False
+    assert run.ok is True and len(client.calls) == 3          # no retry
+    assert run.report.evidence[0].source == "plan_exit"
+
+
+def test_technical_catalyst_citing_the_refused_plan_exit_is_invalid():
+    cat = [{"name": "x", "source": "plan_exit"}]
+    bad = response([text(report_json(
+        evidence=[{"point": "p", "source": "plan_exit"}], catalysts=cat))], "end_turn")
+    q = [response([tool_use("b", "get_bars", {"symbol": "AAPL"})], "tool_use"),
+         response([tool_use("p", "plan_exit", {"setup": "orb", "entry": "99.7"})], "tool_use"),
+         bad, bad]
+    run = tech_agent.run_technical("AAPL", NOON, FakeMarketData(), client=FakeClient(q))
+    assert run.ok is False and run.reason.startswith("catalyst source plan_exit")
+
+
+class NoTenQ(FakeFilingsData):
+    def company_facts(self, symbol):
+        self.calls.append(("company_facts", symbol))
+        return {"cik": 12345, "entityName": "ABCD Holdings Inc", "facts": {"us-gaap": {}}}
+
+
+def test_fundamentals_with_ok_false_facts_is_ok_with_zero_confidence_and_no_retry():
+    ev = [{"point": "no 10-Q data available", "source": "get_fundamentals"}]
+    q = [response([tool_use("f1", "get_fundamentals", {"symbol": "ABCD"})], "tool_use"),
+         report(agent="fundamentals", stance="neutral", confidence=0.0, evidence=ev)]
+    client = FakeClient(q)
+    run = fund_agent.run_fundamentals("ABCD", NOON, NoTenQ(), client=client)
+    (res,) = client.calls[1]["messages"][-1]["content"]
+    import json
+    assert res["is_error"] is False
+    assert json.loads(res["content"])["ok"] is False
+    assert run.ok is True and run.reason is None
+    assert run.report.confidence == 0.0 and run.report.evidence[0].source == "get_fundamentals"
+    assert len(client.calls) == 2 and client.queue == []      # no retry
+
+
+def test_all_ok_unaffected_by_ok_false_facts():
+    from tests.test_orchestrator import TOOL, first, good
+
+    data = FakeAllData()
+    data.company_facts = lambda symbol: {"cik": 12345, "facts": {"us-gaap": {}}}
+    clients = {a: FakeClient([first(a), good(a)]) for a in AGENTS}
+    packet = asyncio.run(orch.run_analysts(
+        "ABCD", NOON, data=data, clients=clients, timeout_s=5))
+    assert packet.all_ok is True
+    assert packet.runs["fundamentals"].ok is True
+    assert TOOL["fundamentals"] == "get_fundamentals"
+
+
+def test_evidence_from_errored_or_never_called_tool_is_still_invalid():
+    errored = Session()
+    errored.execute = lambda name, tool_input: ({"error": "boom"}, True)
+    bad = report()
+    run = run_analyst(SPEC, "ABCD", NOON, errored, client=FakeClient([news_call(), bad, bad]),
+                      config=CFG)
+    assert run.ok is False
+    assert run.reason == "evidence source get_news is not a tool that answered in this run"
+    never = report(evidence=[{"point": "p", "source": "get_fundamentals"}])
+    run = run_analyst(SPEC, "ABCD", NOON, Session(),
+                      client=FakeClient([news_call(), never, never]), config=CFG)
+    assert run.reason == "evidence source get_fundamentals is not a tool that answered in this run"

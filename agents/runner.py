@@ -184,6 +184,7 @@ class _Tracked:
         self.inner = inner
         self.cancel = cancel
         self.ok_tools: set[str] = set()
+        self.answered_tools: set[str] = set()  # is_error False, including ok:false results
         self.allowed: dict[str, set[str]] = {}
 
     def check_cancel(self) -> None:
@@ -195,6 +196,8 @@ class _Tracked:
         self.check_cancel()
         result, is_error = self.inner.execute(name, tool_input)
         refusal = isinstance(result, dict) and result.get("ok") is False
+        if not is_error:
+            self.answered_tools.add(name)
         if not is_error and not refusal:
             self.ok_tools.add(name)
             names = self.allowed.setdefault(name, set())
@@ -282,8 +285,8 @@ def _parse(
         return None, f"symbol must be {symbol}"
     ok_tools = tracked.ok_tools
     for ev in report.evidence:
-        if ev.source not in ok_tools:
-            return None, f"evidence source {ev.source} is not a tool that returned data in this run"
+        if ev.source not in tracked.answered_tools:
+            return None, f"evidence source {ev.source} is not a tool that answered in this run"
     for cat in report.catalysts:
         if cat.source not in ok_tools:
             return None, (

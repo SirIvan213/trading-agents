@@ -255,7 +255,7 @@ def test_evidence_citing_the_neutral_source_is_invalid():
     run, _ = go([call_news(), bad, bad])
     assert run.ok is False
     assert run.reason == (
-        f"evidence source {NEUTRAL_SOURCE} is not a tool that returned data in this run")
+        f"evidence source {NEUTRAL_SOURCE} is not a tool that answered in this run")
 
 
 def test_too_many_tool_rounds_is_not_ok():
@@ -473,7 +473,7 @@ def test_evidence_source_never_called_is_invalid():
     bad = end(evidence=evid("get_fundamentals"))
     run, _ = go([call_news(), bad, bad])
     assert reason_of(run) == (
-        "evidence source get_fundamentals is not a tool that returned data in this run")
+        "evidence source get_fundamentals is not a tool that answered in this run")
 
 
 def test_evidence_source_of_errored_tool_is_invalid():
@@ -482,10 +482,23 @@ def test_evidence_source_of_errored_tool_is_invalid():
     assert reason_of(run).startswith("evidence source get_news is not a tool")
 
 
-def test_evidence_source_of_ok_false_tool_is_invalid():
+def test_evidence_source_of_ok_false_tool_is_valid():
     s = sess({"ok": False, "reason": "none"})
-    run, _ = go([call_news(), end(), end()], session=s)
-    assert reason_of(run).startswith("evidence source get_news is not a tool")
+    run, client = go([call_news(), end()], session=s)
+    assert run.ok is True and len(client.calls) == 2
+
+
+def test_catalyst_citing_an_ok_false_tool_is_still_invalid():
+    s = sess({"ok": False, "reason": "none", "catalysts": ["earnings"]})
+    run, client = go([call_news(), end(catalysts=CAT), end(catalysts=CAT)], session=s)
+    assert reason_of(run) == "catalyst source get_news is not a tool that returned data in this run"
+    assert len(client.calls) == 3
+
+
+def test_ok_false_evidence_with_no_catalysts_has_no_retry():
+    s = sess({"ok": False, "reason": "none"})
+    run, client = go([call_news(), end(confidence=0.0, stance="neutral")], session=s)
+    assert run.ok is True and run.report.confidence == 0.0 and len(client.calls) == 2
 
 
 def test_evidence_source_neutral_marker_is_invalid():
@@ -498,7 +511,7 @@ def test_every_evidence_item_is_checked():
     ev = [{"point": "a", "source": "get_news"}, {"point": "b", "source": "made_up"}]
     bad = end(evidence=ev)
     run, _ = go([call_news(), bad, bad])
-    assert reason_of(run) == "evidence source made_up is not a tool that returned data in this run"
+    assert reason_of(run) == "evidence source made_up is not a tool that answered in this run"
 
 
 def test_no_tool_called_means_no_valid_report():
