@@ -289,7 +289,7 @@ def test_two_failures_one_success(monkeypatch):
 
 
 def test_failed_analyst_returned_run_not_ok_makes_all_ok_false(monkeypatch):
-    def not_ok(symbol, now, data, *, client, config, calls_sink, cancel=None):
+    def not_ok(symbol, now, data, *, client, config, calls_sink, cancel=None, limits=None):
         from agents.runner import neutral_report
         return AnalystRun(neutral_report("technical", symbol, "r"), False, "r", [], 1)
 

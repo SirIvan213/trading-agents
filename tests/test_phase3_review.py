@@ -186,7 +186,7 @@ def test_each_agent_gets_its_own_event(monkeypatch):
     seen = {}
 
     def spy(name):
-        def fn(symbol, now, data, *, client, config, calls_sink, cancel=None):
+        def fn(symbol, now, data, *, client, config, calls_sink, cancel=None, limits=None):
             seen[name] = cancel
             from agents.runner import AnalystRun, neutral_report
             return AnalystRun(neutral_report(name, symbol, "spy"), False, "spy", [], 0)
@@ -204,7 +204,7 @@ def test_cancelling_run_analysts_sets_the_events(monkeypatch):
     started, finished = threading.Event(), threading.Event()
     seen = {}
 
-    def hung(symbol, now, data, *, client, config, calls_sink, cancel=None):
+    def hung(symbol, now, data, *, client, config, calls_sink, cancel=None, limits=None):
         started.set()
         seen["observed"] = cancel.wait(timeout=10)
         finished.set()
@@ -336,15 +336,87 @@ def test_explicit_limits_skip_load_limits(monkeypatch):
     assert run.ok is True
 
 
-def test_orchestrator_technical_fails_others_ok_when_limits_are_broken(monkeypatch):
+def _no_analyst_may_start(monkeypatch):
+    """Make starting any analyst (or the worker pool) fail the test; return the call log."""
+    started: list[str] = []
+
+    def spy(name):
+        def fn(*a, **kw):
+            started.append(name)
+            raise AssertionError(f"{name} analyst must not start")
+        return fn
+
+    for a in AGENTS:
+        monkeypatch.setitem(orch._RUNNERS, a, spy(a))
+
+    def no_pool(*a, **kw):
+        started.append("executor")
+        raise AssertionError("worker pool must not be created")
+
+    monkeypatch.setattr(orch, "ThreadPoolExecutor", no_pool)
+    return started
+
+
+def test_orchestrator_raises_on_invalid_limits_config_before_any_analyst_starts(monkeypatch):
+    # A broken limits file must stop the whole run, not become a quiet neutral report.
+    started = _no_analyst_may_start(monkeypatch)
+    monkeypatch.setattr(orch, "load_limits", boom_limits)
+    client = RouterClient()
+    with pytest.raises(ValueError) as ei:
+        asyncio.run(orch.run_analysts("ABCD", NOON, data=FakeAllData(), clients=client))
+    assert str(ei.value) == "limits config is invalid"
+    assert SECRET not in str(ei.value) and SECRET not in repr(ei.value)
+    assert ei.value.__cause__ is None and ei.value.__suppress_context__ is True
+    assert started == []                                  # no analyst, no worker pool
+
+
+@pytest.mark.parametrize("field,value", [
+    ("max_reward_multiple", "NaN"),
+    ("max_loss_per_trade", "-1"),
+    ("daily_loss_limit", "0"),
+])
+def test_orchestrator_raises_on_invalid_hand_built_limits(monkeypatch, field, value):
+    from dataclasses import replace
+    from decimal import Decimal
+
+    from tools.config import CONFIG_DIR, load_limits
+    bad = replace(load_limits(CONFIG_DIR / "limits.example.json"), **{field: Decimal(value)})
+    started = _no_analyst_may_start(monkeypatch)
+    with pytest.raises(ValueError, match="^limits config is invalid$"):
+        asyncio.run(orch.run_analysts(
+            "ABCD", NOON, data=FakeAllData(), clients=RouterClient(), limits=bad))
+    assert started == []
+
+
+def test_orchestrator_loads_limits_once_and_passes_them_to_technical_only(monkeypatch):
+    from tools.config import CONFIG_DIR, load_limits
+    example = load_limits(CONFIG_DIR / "limits.example.json")
+    loads: list[int] = []
+
+    def counting_load(*a, **kw):
+        loads.append(1)
+        return example
+
+    monkeypatch.setattr(orch, "load_limits", counting_load)
+    # The technical analyst must not read the config itself any more.
     monkeypatch.setattr(tech_agent, "load_limits", boom_limits)
+    seen: dict[str, dict] = {}
+    real = dict(orch._RUNNERS)
+
+    def spy(name):
+        def fn(*a, **kw):
+            seen[name] = kw
+            return real[name](*a, **kw)
+        return fn
+
+    for a in AGENTS:
+        monkeypatch.setitem(orch._RUNNERS, a, spy(a))
     packet = asyncio.run(orch.run_analysts(
         "ABCD", NOON, data=FakeAllData(), clients=RouterClient(), timeout_s=5))
-    assert packet.all_ok is False
-    assert_neutral_failure(packet, "technical", "failed (ValueError)")
-    assert_ok(packet, "sentiment", "fundamentals")
-    assert SECRET not in packet.model_dump_json()
-    assert packet.runs["technical"].calls == []
+    assert loads == [1]                                   # loaded exactly once
+    assert seen["technical"]["limits"] is example         # the checked object, passed through
+    assert "limits" not in seen["sentiment"] and "limits" not in seen["fundamentals"]
+    assert_ok(packet, *AGENTS)
 
 
 # ---------------- B. strict catalyst names end to end ----------------

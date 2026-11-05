@@ -19,6 +19,7 @@ from agents.schemas import AgentRunRecord, CallRecord, DecisionPacket
 from agents.sentiment import run_sentiment
 from agents.technical import run_technical
 from pipeline.market import NY, ny_today
+from tools.config import Limits, load_limits, validate_limits
 from tools.scan import validate_symbols
 
 AGENTS = ("technical", "sentiment", "fundamentals")
@@ -35,6 +36,28 @@ def _client_for(clients: dict[str, Any] | Any, agent: str) -> Any:
     return clients.get(agent) if isinstance(clients, dict) else clients
 
 
+def load_checked_limits(limits: Limits | None = None) -> Limits:
+    """Load (if not given) and validate the risk limits, or raise.
+
+    Raises ValueError("limits config is invalid") - never the file contents - for an
+    unreadable, malformed or invalid config, or for invalid hand-built `limits`. Called once
+    by run_analysts before any analyst starts, so a broken risk config stops the run instead
+    of becoming a quiet neutral report inside one analyst.
+    """
+    try:
+        loaded = load_limits() if limits is None else limits
+        validate_limits(loaded)
+    except Exception:  # noqa: BLE001 - message must not echo config contents
+        raise ValueError("limits config is invalid") from None
+    return loaded
+
+
+# Extra keyword arguments per analyst. Only the technical analyst's tools (plan_exit, scan)
+# read risk limits; sentiment and fundamentals take none.
+def _extra_kwargs(agent: str, limits: Limits) -> dict[str, Any]:
+    return {"limits": limits} if agent == "technical" else {}
+
+
 async def _one(
     agent: str,
     symbol: str,
@@ -45,6 +68,7 @@ async def _one(
     timeout_s: float,
     executor: ThreadPoolExecutor,
     cancel: threading.Event,
+    extra: dict[str, Any],
 ) -> tuple[Any, AgentRunRecord]:
     """Run one analyst; any exception or timeout becomes a neutral report, never a raise."""
     calls: list[CallRecord] = []
@@ -56,7 +80,7 @@ async def _one(
                 executor,
                 lambda: _RUNNERS[agent](
                     symbol, now, data, client=client, config=config, calls_sink=calls,
-                    cancel=cancel,
+                    cancel=cancel, **extra,
                 ),
             ),
             timeout=timeout_s,
@@ -88,11 +112,15 @@ async def run_analysts(
     clients: dict[str, Any] | Any,
     configs: dict[str, AgentConfig] | None = None,
     timeout_s: float = 300,
+    limits: Limits | None = None,
 ) -> DecisionPacket:
     """Run the technical, sentiment and fundamentals analysts concurrently.
 
     `clients` is one client shared by all three, or a dict keyed by agent name. `configs`
-    defaults to config_for(agent). Each analyst runs in its own worker thread under
+    defaults to config_for(agent). Risk limits are loaded (unless `limits` is given) and
+    validated ONCE, before any analyst starts; an invalid config raises
+    ValueError("limits config is invalid") and no analyst runs. The checked limits are passed
+    to the analysts that use them (technical). Each analyst runs in its own worker thread under
     `timeout_s`. If one raises or times out it gets a neutral report (evidence source
     NEUTRAL_SOURCE) and a run record with ok=False and reason "failed (<Type>)" or "timeout";
     the others still complete.
@@ -101,8 +129,8 @@ async def run_analysts(
     on cancellation of this coroutine); the worker checks it before every API request and tool
     call and then stops, but an in-flight request is not interrupted, so it may finish in the
     background with its result discarded. AgentConfig.request_timeout_s (per API request) should
-    be below `timeout_s` to bound that. Raises ValueError for a naive `now` or an
-    invalid symbol.
+    be below `timeout_s` to bound that. Raises ValueError for a naive `now`, an invalid
+    symbol, a bad agent config, or an invalid limits config - all before any analyst starts.
     """
     ny_today(now)  # ValueError for naive now
     try:
@@ -111,13 +139,14 @@ async def run_analysts(
         raise ValueError("symbol must be a valid ticker") from None
     sym = symbol.strip().upper()
     cfgs = {a: (configs or {}).get(a) or config_for(a) for a in AGENTS}
+    checked = load_checked_limits(limits)  # raises before the worker pool exists
 
     cancels = {a: threading.Event() for a in AGENTS}
     executor = ThreadPoolExecutor(max_workers=len(AGENTS), thread_name_prefix="analyst")
     try:
         results = await asyncio.gather(*(
             _one(a, sym, now, data, _client_for(clients, a), cfgs[a], timeout_s, executor,
-                 cancels[a])
+                 cancels[a], _extra_kwargs(a, checked))
             for a in AGENTS
         ))
     finally:
