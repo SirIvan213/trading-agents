@@ -162,5 +162,7 @@ async def run_analysts(
         reports=reports,
         runs=runs,
         all_ok=all(rec.ok for rec in runs.values()),
-        exit_plans=plans["technical"] if runs["technical"].ok else [],
+        exit_plans=(
+            [p for p in plans["technical"] if p.symbol == sym] if runs["technical"].ok else []
+        ),
     )

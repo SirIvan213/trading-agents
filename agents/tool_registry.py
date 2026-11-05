@@ -136,6 +136,9 @@ def price_levels(summary: dict) -> dict[str, str]:
 
     session_low, session_high, last_close, vwap, and or_low / or_high when an opening range
     exists. Values that are None are skipped.
+
+    or_low and or_high are included even when the opening range is incomplete, and are valid
+    only as `level` values: the orb setup itself requires a complete range in exit_plan.
     """
     opening = summary.get("opening_range")
     raw = {

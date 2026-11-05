@@ -372,6 +372,24 @@ def test_analyst_run_exit_plans_empty_when_neutral_fallback():
     assert run.exit_plans == []
 
 
+def test_plan_survives_when_first_report_rejected_and_retry_validates():
+    """Retry policy: plan-1 was made by the tool on attempt 1; only the REPORT was rejected.
+    The retry validates, the run is ok, and the tool-made plan stays in exit_plans."""
+    rejected = response([text(report_json(stance="sideways"))], "end_turn")
+    run = run_tech([*bars_then_plan(), rejected, good_report()])
+    assert run.ok is True and run.reason is None
+    assert [p.plan_id for p in run.exit_plans] == ["plan-1"]
+    assert run.exit_plans[0].entry == "102.00"
+
+
+def test_plan_survives_when_first_report_has_invalid_catalyst_and_retry_validates():
+    rejected = response([text(report_json(
+        catalysts=[{"name": "earnings", "source": "get_news"}]))], "end_turn")
+    run = run_tech([*bars_then_plan(), rejected, good_report()])
+    assert run.ok is True
+    assert [p.plan_id for p in run.exit_plans] == ["plan-1"]
+
+
 def test_analyst_run_exit_plans_empty_when_run_raised():
     run = run_tech([*bars_then_plan(), RuntimeError("boom")])
     assert run.ok is False and run.reason == "RuntimeError"
@@ -563,6 +581,12 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
     assert all(t in dumped for t in FAKE_TEXT)
     assert not any(t in clean.model_dump_json() for t in FAKE_TEXT)
 
+    # A TraderDecision whose free text carries the fake prices is also in play. The Trader
+    # agent does not exist yet; the end-to-end Trader proof is a Phase 4 follow-up.
+    decision = TraderDecision(
+        symbol="TSLA", action="BUY", confidence=0.99, setup=rec.setup,
+        reasoning="; ".join(FAKE_TEXT))
+    assert decision.symbol == dirty.symbol and decision.action == "BUY"
     o_clean = build_order(select_plan(clean, "plan-1"), LIMITS)
     o_dirty = build_order(select_plan(dirty, "plan-1"), LIMITS)
     assert o_clean == o_dirty
@@ -785,8 +809,10 @@ def test_extra_field_added_to_other_reasons_not_replacing():
 
 
 @pytest.mark.parametrize("field", sorted(ORDER_FIELDS))
-def test_each_known_field_alone_is_not_flagged_as_unexpected(field):
-    r = check(dict(ORDER))
+def test_known_field_removed_is_never_flagged_as_unexpected(field):
+    order = {k: v for k, v in ORDER.items() if k != field}
+    assert field not in order and len(order) == len(ORDER_FIELDS) - 1
+    r = check(order)  # may block for missing data; must not call a known field unexpected
     assert not any("unexpected field" in x for x in r["reasons"]), field
 
 
@@ -816,16 +842,30 @@ def test_non_dict_order_with_invalid_limits_reports_limits_first():
 # ===================== #50: confidence cannot change the order =====================
 
 def test_two_confidences_same_plan_same_order():
+    # NOTE: the Trader agent does not exist yet. The end-to-end proof (a real Trader run feeding
+    # select_plan -> build_order) is a Phase 4 follow-up; here each decision is carried
+    # alongside its packet and the order is built in that decision's context.
     rec = plan_record()
     lo = packet_with([rec], fake=False, confidence=0.1, stance="bearish")
     hi = packet_with([rec], fake=False, confidence=0.99, stance="bullish")
     assert lo.reports["technical"].confidence == 0.1
     assert hi.reports["technical"].confidence == 0.99
-    d_lo = TraderDecision(symbol="TSLA", action="BUY", confidence=0.1, reasoning="r", setup="orb")
-    d_hi = TraderDecision(symbol="TSLA", action="BUY", confidence=0.99, reasoning="r", setup="orb")
+    d_lo = TraderDecision(
+        symbol="TSLA", action="BUY", confidence=0.1, reasoning="r", setup=rec.setup)
+    d_hi = TraderDecision(
+        symbol="TSLA", action="BUY", confidence=0.99, reasoning="r", setup=rec.setup)
     assert d_lo.confidence != d_hi.confidence
-    o_lo = build_order(select_plan(lo, "plan-1"), LIMITS)
-    o_hi = build_order(select_plan(hi, "plan-1"), LIMITS)
+    for d in (d_lo, d_hi):  # the decision matches the plan it will be executed with
+        assert d.action == "BUY" and d.symbol == rec.symbol and d.setup == rec.setup
+
+    def order_for(decision, packet):
+        assert decision.symbol == packet.symbol
+        return build_order(select_plan(packet, "plan-1"), LIMITS)
+
+    o_lo = order_for(d_lo, lo)
+    o_hi = order_for(d_hi, hi)
+    # swapping which decision goes with which packet changes nothing either
+    assert order_for(d_hi, lo) == order_for(d_lo, hi) == o_lo
     assert o_lo == o_hi and o_lo["ok"] is True
     assert (o_lo["order"]["qty"], o_lo["order"]["stop_loss"], o_lo["order"]["take_profit"]) == (
         o_hi["order"]["qty"], o_hi["order"]["stop_loss"], o_hi["order"]["take_profit"])
@@ -877,3 +917,113 @@ def test_wiring_guard_would_catch_an_extra_argument(monkeypatch):
         leaky_build(plan_record(), LIMITS)
     with pytest.raises(AssertionError):
         strict(Plan("T", D("1"), D("1"), D("2")), LIMITS, confidence=0.5)
+
+
+# ===================== ExitPlanRecord shape =====================
+
+def test_exit_plan_record_fields_pinned():
+    assert tuple(ExitPlanRecord.model_fields) == (
+        "plan_id", "symbol", "setup", "entry", "stop", "target", "risk_per_share",
+        "reward_to_risk", "time_exit", "entry_level", "structure_level", "as_of")
+
+
+def test_exit_plan_record_is_frozen():
+    rec = plan_record()
+    for field, value in (("stop", "1.00"), ("entry", "0.01"), ("symbol", "AAPL")):
+        with pytest.raises(ValueError):  # pydantic ValidationError subclasses ValueError
+            setattr(rec, field, value)
+    assert rec.stop == "358.32" and rec.entry == "364.18"
+
+
+def test_exit_plan_record_forbids_extra_fields():
+    with pytest.raises(ValueError):
+        plan_record(confidence=0.9)
+    with pytest.raises(ValueError):
+        plan_record(qty=10_000)
+
+
+# ===================== build_order re-validation =====================
+
+@pytest.fixture
+def size_spy(monkeypatch):
+    calls = []
+    real = orders.size_position
+
+    def _spy(*a, **k):
+        calls.append((a, k))
+        return real(*a, **k)
+
+    monkeypatch.setattr(orders, "size_position", _spy)
+    return calls
+
+
+def raw_plan(**over) -> ExitPlanRecord:
+    """Built with model_construct so validation is bypassed, like a record mutated later."""
+    d = plan_record().model_dump()
+    d.update(over)
+    return ExitPlanRecord.model_construct(**d)
+
+
+BAD_PRICE = "plan prices must be finite whole cents"
+BAD_ORDER = "plan must have stop < entry < target"
+BAD_RISK = "plan risk_per_share does not match entry - stop"
+BAD_SYMBOL = "plan symbol is not a valid ticker"
+
+REFUSALS = [
+    # mutated-looking records (as the AAPL ledger would have produced: entry 102.00)
+    pytest.param(dict(symbol="AAPL", entry="102.00", stop="101.99", target="102.02",
+                      risk_per_share="2.39"), BAD_RISK, id="mutated-stop-target-risk-stale"),
+    pytest.param(dict(entry="364.18", risk_per_share="5.00"), BAD_RISK, id="risk-mismatch"),
+    pytest.param(dict(risk_per_share="abc"), BAD_RISK, id="risk-not-a-number"),
+    pytest.param(dict(risk_per_share="NaN"), BAD_RISK, id="risk-nan"),
+    pytest.param(dict(symbol="not a ticker!"), BAD_SYMBOL, id="bad-symbol"),
+    pytest.param(dict(symbol=""), BAD_SYMBOL, id="empty-symbol"),
+    pytest.param(dict(symbol="TOOLONGSYMBOL"), BAD_SYMBOL, id="long-symbol"),
+    pytest.param(dict(entry="abc"), BAD_PRICE, id="entry-abc"),
+    pytest.param(dict(stop="NaN"), BAD_PRICE, id="stop-nan"),
+    pytest.param(dict(target="sNaN"), BAD_PRICE, id="target-snan"),
+    pytest.param(dict(entry="Infinity"), BAD_PRICE, id="entry-inf"),
+    pytest.param(dict(entry="364.185"), BAD_PRICE, id="entry-subcent"),
+    pytest.param(dict(stop="358.321"), BAD_PRICE, id="stop-subcent"),
+    pytest.param(dict(target="370.0401"), BAD_PRICE, id="target-subcent"),
+    pytest.param(dict(entry="0"), BAD_PRICE, id="entry-zero"),
+    pytest.param(dict(stop="-1.00"), BAD_PRICE, id="stop-negative"),
+    pytest.param(dict(stop="364.18", risk_per_share="0.00"), BAD_ORDER, id="stop-equals-entry"),
+    pytest.param(dict(stop="365.00", risk_per_share="-0.82"), BAD_ORDER, id="stop-above-entry"),
+    pytest.param(dict(target="364.18"), BAD_ORDER, id="target-equals-entry"),
+    pytest.param(dict(target="360.00"), BAD_ORDER, id="target-below-entry"),
+]
+
+
+@pytest.mark.parametrize(("over", "reason"), REFUSALS)
+def test_build_order_refuses_invalid_plan_without_sizing(size_spy, over, reason):
+    out = build_order(raw_plan(**over), LIMITS)
+    assert out == {"ok": False, "reason": reason}
+    assert size_spy == []  # size_position was never reached
+
+
+def test_build_order_valid_record_still_sizes_exactly_as_before(size_spy):
+    out = build_order(plan_record(), LIMITS)
+    direct = size_position(REAL_PLAN, LIMITS)
+    assert out == direct and out["ok"] is True
+    assert len(size_spy) == 1
+    assert check(out["order"]) == {"verdict": "PASS", "reasons": []}
+
+
+def test_build_order_model_construct_valid_record_also_sizes(size_spy):
+    assert build_order(raw_plan(), LIMITS) == size_position(REAL_PLAN, LIMITS)
+    assert len(size_spy) == 1
+
+
+# ===================== select_plan symbol check =====================
+
+def test_select_plan_symbol_mismatch_raises_keyerror():
+    aapl_packet = packet_with([plan_record(symbol="TSLA")], fake=False)
+    aapl_packet = aapl_packet.model_copy(update={"symbol": "AAPL"})
+    with pytest.raises(KeyError, match="plan symbol does not match packet"):
+        select_plan(aapl_packet, "plan-1")
+
+
+def test_select_plan_matching_symbol_still_returned():
+    packet = packet_with([plan_record(symbol="TSLA")], fake=False)
+    assert select_plan(packet, "plan-1").symbol == "TSLA"

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Evidence(BaseModel):
@@ -95,6 +95,8 @@ class ExitPlanRecord(BaseModel):
     The ONLY sanctioned source of order prices. Produced by the plan_exit executor from tool
     output, never by a model and never parsed from report text.
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     plan_id: str
     symbol: str

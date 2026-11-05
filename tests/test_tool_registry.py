@@ -123,12 +123,18 @@ def test_junk_entry_refused(spy, bad):
     assert spy == []
 
 
-@pytest.mark.parametrize("bad", ["abc", "NaN", "-Infinity", 100])
-def test_junk_level_refused(spy, bad):
+@pytest.mark.parametrize(("bad", "error"), [
+    ("abc", "level is not a number"),
+    ("NaN", "level must be finite"),
+    ("-Infinity", "level must be finite"),
+    (100, "level must be a decimal string"),
+])
+def test_junk_level_refused(spy, bad, error):
     s = make()
     s.execute("get_bars", {"symbol": "AAPL"})
-    res, err = s.execute("plan_exit", {"setup": "level", "entry": "102.50", "level": bad})
-    assert err is True and "error" in res
+    # entry 103.10 is a returned price, so only the level path can refuse
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": bad})
+    assert (res, err) == ({"error": error}, True)
     assert spy == []
 
 
