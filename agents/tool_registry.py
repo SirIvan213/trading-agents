@@ -7,13 +7,14 @@ get_bars summary, which is built from bars fetched by the pipeline.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
+from agents.schemas import ExitPlanRecord
 from pipeline.data import MarketData, session_window
-from pipeline.market import ny_today, run_scan
+from pipeline.market import NY, ny_today, run_scan
 from tools.bars import parse_bars, regular_session, summarize
 from tools.config import Limits
 from tools.exit_plan import exit_plan
@@ -27,8 +28,8 @@ TOOLS: list[dict[str, Any]] = [
         "name": "get_bars",
         "description": (
             "Fetch today's 1-minute bars for the symbol and return a regular-session "
-            "summary: last_close, session_high/low, volume, vwap, atr, opening_range. "
-            "Call this first."
+            "summary: last_close, session_high/low, volume, vwap, atr, opening_range, "
+            "and price_levels (the only prices plan_exit accepts). Call this first."
         ),
         "strict": True,
         "input_schema": {
@@ -43,6 +44,7 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Compute stop, target and reward:risk for a long entry. Opening range and ATR "
             "come from get_bars automatically; do not supply them. Requires get_bars first. "
+            "entry and level must be copied exactly from get_bars price_levels. "
             "Returns {ok: false, reason} if the setup is refused."
         ),
         "strict": True,
@@ -50,11 +52,12 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "setup": {"type": "string", "enum": ["orb", "level"]},
-                "entry": {"type": "string", "description": "Entry price as a decimal string"},
+                "entry": {"type": "string", "description": "Entry price: copy exactly one value "
+                    "from get_bars price_levels"},
                 "level": {
                     "type": "string",
-                    "description": "Support level as a decimal string (setup 'level' only); "
-                    "must lie within today's session range",
+                    "description": "Support level (setup 'level' only): copy exactly one "
+                    "value from get_bars price_levels",
                 },
             },
             "required": ["setup", "entry"],
@@ -94,6 +97,7 @@ class ToolSession:
     limits: Limits
     criteria: ScanCriteria
     summary: dict | None = None
+    exit_plans: list[ExitPlanRecord] = field(default_factory=list)
 
     def execute(self, name: str, tool_input: Any) -> tuple[dict, bool]:
         """Run a tool; return (result, is_error). Never raises."""
@@ -124,6 +128,40 @@ def _err(msg: str) -> tuple[dict, bool]:
     return {"error": msg}, True
 
 
+CENT = Decimal("0.01")
+
+
+def price_levels(summary: dict) -> dict[str, str]:
+    """The exact prices plan_exit may use, as strings with 2 decimals (rounded down).
+
+    session_low, session_high, last_close, vwap, and or_low / or_high when an opening range
+    exists. Values that are None are skipped.
+
+    or_low and or_high are included even when the opening range is incomplete, and are valid
+    only as `level` values: the orb setup itself requires a complete range in exit_plan.
+    """
+    opening = summary.get("opening_range")
+    raw = {
+        "session_low": summary.get("session_low"),
+        "session_high": summary.get("session_high"),
+        "last_close": summary.get("last_close"),
+        "or_low": opening.get("low") if isinstance(opening, dict) else None,
+        "or_high": opening.get("high") if isinstance(opening, dict) else None,
+        "vwap": summary.get("vwap"),
+    }
+    return {
+        name: str(Decimal(str(v)).quantize(CENT, ROUND_FLOOR))
+        for name, v in raw.items() if v is not None
+    }
+
+
+def _level_name(levels: dict[str, str], value: Decimal) -> str | None:
+    for name, text in levels.items():
+        if Decimal(text) == value:
+            return name
+    return None
+
+
 def _get_bars(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     sym = inp.get("symbol")
     if not isinstance(sym, str) or sym.strip().upper() != s.symbol:
@@ -131,8 +169,10 @@ def _get_bars(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     start, end = session_window(s.now)
     raw = s.data.bars(s.symbol, start, end)
     bars = regular_session(parse_bars(raw), day=ny_today(s.now))
-    s.summary = summarize(bars)
-    return s.summary, False
+    summary = summarize(bars)
+    summary["price_levels"] = price_levels(summary)
+    s.summary = summary
+    return summary, False
 
 
 def _decimal(value: Any, name: str) -> Decimal:
@@ -160,21 +200,49 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     setup = inp.get("setup")
     if setup not in ("orb", "level"):
         return _err("setup must be 'orb' or 'level'")
+    levels: dict[str, str] = s.summary.get("price_levels") or {}
+    names = ", ".join(levels)
     entry = _decimal(inp.get("entry"), "entry")
-    lo, hi = s.summary.get("session_low"), s.summary.get("session_high")
-    if lo is None or hi is None or not (Decimal(lo) <= entry <= Decimal(hi)):
-        return _err("entry must be within today's session range")
+    entry_level = _level_name(levels, entry)
+    if entry_level is None:
+        return _err(f"entry must be one of get_bars price_levels: {names}")
+    # Use the canonical 2-decimal string get_bars returned, not the model's spelling
+    # ("102" -> "102.00"), so plan records and orders always carry cent prices.
+    entry = Decimal(levels[entry_level])
     atr = _summary_atr(s.summary)
+    structure_level: str | None
     if setup == "orb":
-        return exit_plan(
+        structure_level = "or_low"
+        result = exit_plan(
             "orb", entry, s.limits, opening_range=s.summary.get("opening_range"), atr=atr
-        ), False
-    if inp.get("level") is None:
-        return _err("level setup needs a level")
-    level = _decimal(inp["level"], "level")
-    if not (Decimal(lo) <= level <= Decimal(hi)):
-        return _err("level must be within today's session range")
-    return exit_plan("level", entry, s.limits, level=level, atr=atr), False
+        )
+    else:
+        if inp.get("level") is None:
+            return _err("level setup needs a level")
+        level = _decimal(inp["level"], "level")
+        structure_level = _level_name(levels, level)
+        if structure_level is None:
+            return _err(f"level must be one of get_bars price_levels: {names}")
+        level = Decimal(levels[structure_level])
+        result = exit_plan("level", entry, s.limits, level=level, atr=atr)
+    if result.get("ok") is True:
+        record = ExitPlanRecord(
+            plan_id=f"plan-{len(s.exit_plans) + 1}",
+            symbol=s.symbol,
+            setup=setup,
+            entry=result["entry"],
+            stop=result["stop"],
+            target=result["target"],
+            risk_per_share=result["risk_per_share"],
+            reward_to_risk=result["reward_to_risk"],
+            time_exit=result["time_exit"],
+            entry_level=entry_level,
+            structure_level=structure_level,
+            as_of=s.now.astimezone(NY).isoformat(),
+        )
+        s.exit_plans.append(record)
+        result = {**result, "plan_id": record.plan_id}
+    return result, False
 
 
 def _scan(s: ToolSession, inp: dict) -> tuple[dict, bool]:

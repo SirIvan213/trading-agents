@@ -14,6 +14,11 @@ from tools.config import MARKET_CLOSE, MARKET_OPEN, Limits, validate_limits
 
 NY = ZoneInfo("America/New_York")
 
+# Exactly the keys of tools.size.size_position's "order" dict.
+ORDER_FIELDS = frozenset(
+    {"symbol", "side", "qty", "type", "order_class", "entry", "stop_loss", "take_profit"}
+)
+
 
 @dataclass(frozen=True)
 class DayState:
@@ -26,7 +31,12 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
 
     `order` is the bracket order written by tools.size.size_position.
     `now` must be timezone-aware; it is converted to New York time.
-    An early BLOCK (invalid limits, or bad prices) returns without evaluating later rules.
+    Only the 8 fields in ORDER_FIELDS are accepted (symbol, side, qty, type,
+    order_class, entry, stop_loss, take_profit). Any other key adds a BLOCK reason, and a
+    non-dict order is blocked outright. Analyst confidence and other analyst output must
+    never reach the gate or influence money decisions (CLAUDE.md rule 2).
+    An early BLOCK (invalid limits, non-dict order, or bad prices) returns without
+    evaluating later rules.
     """
     reasons: list[str] = []
     ny = now.astimezone(NY)
@@ -41,6 +51,13 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
         msg = str(exc).removeprefix("invalid limits: ")
         reasons.append(f"limits invalid: {msg}")
         return {"verdict": "BLOCK", "reasons": reasons}
+
+    if not isinstance(order, dict):
+        reasons.append("order must be an object")
+        return {"verdict": "BLOCK", "reasons": reasons}
+    extra = sorted(str(k) for k in order if k not in ORDER_FIELDS)
+    if extra:
+        reasons.append(f"order has unexpected field(s): {', '.join(extra)}")
 
     raw_symbol = order.get("symbol")
     symbol = raw_symbol.strip().upper() if isinstance(raw_symbol, str) else ""

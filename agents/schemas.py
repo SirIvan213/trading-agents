@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Evidence(BaseModel):
@@ -89,6 +89,31 @@ class AgentRunRecord(BaseModel):
     calls: list[CallRecord] = Field(default_factory=list)
 
 
+class ExitPlanRecord(BaseModel):
+    """One successful exit_plan result, stored by the plan_exit executor.
+
+    The ONLY sanctioned source of order prices. Produced by the plan_exit executor from tool
+    output, never by a model and never parsed from report text.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    plan_id: str
+    symbol: str
+    setup: Literal["orb", "level"]
+    entry: str
+    stop: str
+    target: str
+    risk_per_share: str
+    reward_to_risk: str
+    time_exit: str
+    entry_level: str = Field(description="price_levels name that entry matched")
+    structure_level: str | None = Field(
+        description='price_levels name used as level, or "or_low" for orb'
+    )
+    as_of: str = Field(description="New York ISO timestamp")
+
+
 class DecisionPacket(BaseModel):
     """The three analyst reports for one symbol plus their run records."""
 
@@ -99,3 +124,7 @@ class DecisionPacket(BaseModel):
     )
     runs: dict[str, AgentRunRecord]
     all_ok: bool
+    exit_plans: list[ExitPlanRecord] = Field(
+        default_factory=list,
+        description="Technical run's plans; only when that run's report validated",
+    )

@@ -15,7 +15,7 @@ from typing import Any
 from agents.fundamentals import run_fundamentals
 from agents.llm import AgentConfig, config_for
 from agents.runner import NEUTRAL_SOURCE, AnalystRun, neutral_report
-from agents.schemas import AgentRunRecord, CallRecord, DecisionPacket
+from agents.schemas import AgentRunRecord, CallRecord, DecisionPacket, ExitPlanRecord
 from agents.sentiment import run_sentiment
 from agents.technical import run_technical
 from pipeline.market import NY, ny_today
@@ -69,7 +69,7 @@ async def _one(
     executor: ThreadPoolExecutor,
     cancel: threading.Event,
     extra: dict[str, Any],
-) -> tuple[Any, AgentRunRecord]:
+) -> tuple[Any, AgentRunRecord, list[ExitPlanRecord]]:
     """Run one analyst; any exception or timeout becomes a neutral report, never a raise."""
     calls: list[CallRecord] = []
     started = time.monotonic()
@@ -89,7 +89,7 @@ async def _one(
             agent=agent, requested_model=config.model, effort=config.effort, ok=run.ok,
             reason=run.reason, duration_ms=run.duration_ms, calls=run.calls,
         )
-        return run.report, record
+        return run.report, record, (list(run.exit_plans) if run.ok else [])
     except asyncio.CancelledError:
         cancel.set()  # the orchestrator itself was cancelled: stop the worker cooperatively
         raise
@@ -101,7 +101,7 @@ async def _one(
             reason=reason, duration_ms=int((time.monotonic() - started) * 1000),
             calls=list(calls),
         )
-        return neutral_report(agent, symbol, reason), record
+        return neutral_report(agent, symbol, reason), record, []
 
 
 async def run_analysts(
@@ -153,12 +153,16 @@ async def run_analysts(
         for ev in cancels.values():  # also covers cancellation of run_analysts itself
             ev.set()
         executor.shutdown(wait=False)  # never block on a timed-out worker
-    reports = {a: r for a, (r, _) in zip(AGENTS, results, strict=True)}
-    runs = {a: rec for a, (_, rec) in zip(AGENTS, results, strict=True)}
+    reports = {a: r for a, (r, _, _) in zip(AGENTS, results, strict=True)}
+    runs = {a: rec for a, (_, rec, _) in zip(AGENTS, results, strict=True)}
+    plans = {a: p for a, (_, _, p) in zip(AGENTS, results, strict=True)}
     return DecisionPacket(
         symbol=sym,
         as_of=now.astimezone(NY).isoformat(),
         reports=reports,
         runs=runs,
         all_ok=all(rec.ok for rec in runs.values()),
+        exit_plans=(
+            [p for p in plans["technical"] if p.symbol == sym] if runs["technical"].ok else []
+        ),
     )

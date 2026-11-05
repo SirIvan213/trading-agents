@@ -12,6 +12,12 @@ checks it against hard risk limits, and asks a human before anything reaches a
    explicit `--live` flag AND `paper: false` in config.
 2. **Agents never do arithmetic that decides money.** Position size, stops,
    targets and risk verdicts come from functions in `tools/`, never from an LLM.
+   Orders are built only through `pipeline/orders.py` from tool-produced
+   `ExitPlanRecord`s. Prices, stops, targets and sizes are never parsed from
+   analyst or trader text, and analyst or trader `confidence` never reaches
+   `size_position`, `risk_check` or the limits passed to them. The model picks
+   among tool-produced plans; it never supplies or adjusts a price, stop, target
+   or size.
 3. **Never weaken a risk limit to make something pass.** If a test or a trade
    fails `risk_check`, fix the cause. Any diff touching `tools/risk_check.py`,
    `tools/size.py`, broker code, or the paper/live switch must be called out in
