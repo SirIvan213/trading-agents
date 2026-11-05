@@ -5,17 +5,39 @@ import os
 from dataclasses import dataclass
 
 EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+DEFAULT_MODELS: dict[str, str] = {
+    "technical": "claude-sonnet-5-5",
+    "sentiment": "claude-sonnet-5-5",
+    "fundamentals": "claude-sonnet-5-5",
+}
 
 
 @dataclass(frozen=True)
 class AgentConfig:
     """Settings for one agent run."""
 
-    model: str = "claude-opus-5-5"
+    model: str = "claude-sonnet-5-5"
     effort: str = "high"
     max_tokens: int = 16000
     max_tool_rounds: int = 8
+    request_timeout_s: float = 120.0  # per API request; keep below the orchestrator timeout_s
     fallbacks: bool = True  # server-side refusal fallback (beta header + fallbacks="default")
+
+
+def _env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    if not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value.strip()
+
+
+def _valid_effort(name: str, value: str) -> str:
+    value = value.lower()
+    if value not in EFFORTS:
+        raise ValueError(f"{name} must be one of {sorted(EFFORTS)}")
+    return value
 
 
 def config_from_env() -> AgentConfig:
@@ -24,17 +46,34 @@ def config_from_env() -> AgentConfig:
     Raises ValueError for an unknown effort or a blank model.
     """
     kwargs: dict[str, str] = {}
-    model = os.environ.get("TRADING_AGENTS_MODEL")
+    model = _env("TRADING_AGENTS_MODEL")
     if model is not None:
-        if not model.strip():
-            raise ValueError("TRADING_AGENTS_MODEL must be a non-empty string")
-        kwargs["model"] = model.strip()
-    effort = os.environ.get("TRADING_AGENTS_EFFORT")
+        kwargs["model"] = model
+    effort = _env("TRADING_AGENTS_EFFORT")
     if effort is not None:
-        effort = effort.strip().lower()
-        if effort not in EFFORTS:
-            raise ValueError(f"TRADING_AGENTS_EFFORT must be one of {sorted(EFFORTS)}")
-        kwargs["effort"] = effort
+        kwargs["effort"] = _valid_effort("TRADING_AGENTS_EFFORT", effort)
+    return AgentConfig(**kwargs)
+
+
+def config_for(agent: str) -> AgentConfig:
+    """AgentConfig for one agent ("technical", "sentiment" or "fundamentals").
+
+    Priority: TRADING_AGENTS_<AGENT>_MODEL / _EFFORT, then TRADING_AGENTS_MODEL / _EFFORT,
+    then DEFAULT_MODELS / the AgentConfig default effort. Raises ValueError for an unknown
+    agent, a blank model or an unknown effort.
+    """
+    if agent not in DEFAULT_MODELS:
+        raise ValueError(f"unknown agent {agent!r}")
+    up = agent.upper()
+    model = _env(f"TRADING_AGENTS_{up}_MODEL") or _env("TRADING_AGENTS_MODEL")
+    effort_name = f"TRADING_AGENTS_{up}_EFFORT"
+    effort = _env(effort_name)
+    if effort is None:
+        effort_name = "TRADING_AGENTS_EFFORT"
+        effort = _env(effort_name)
+    kwargs: dict[str, str] = {"model": model or DEFAULT_MODELS[agent]}
+    if effort is not None:
+        kwargs["effort"] = _valid_effort(effort_name, effort)
     return AgentConfig(**kwargs)
 
 

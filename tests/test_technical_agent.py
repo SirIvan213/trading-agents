@@ -6,7 +6,8 @@ import anthropic
 import pytest
 
 import agents.technical as tech
-from agents.llm import AgentConfig, config_from_env, make_client
+from agents.llm import DEFAULT_MODELS, AgentConfig, config_from_env, make_client
+from agents.runner import NEUTRAL_SOURCE
 from agents.schemas import AnalystReport
 from agents.tool_registry import TOOLS
 from pipeline.technical import run_technical
@@ -39,7 +40,7 @@ def assert_neutral(report, symbol="AAPL"):
     assert report.stance == "neutral"
     assert report.confidence == 0.0
     assert len(report.evidence) == 1
-    assert report.evidence[0].source == "technical_analyst"
+    assert report.evidence[0].source == NEUTRAL_SOURCE
     assert report.evidence[0].point.startswith("technical analysis unavailable: ")
 
 
@@ -49,6 +50,11 @@ def good(**over):
 
 def bad():
     return response([text("not json")], "end_turn")
+
+
+def bars_call(id_="b0"):
+    """A successful get_bars round, so a following report may cite get_bars as evidence."""
+    return response([tool_use(id_, "get_bars", {"symbol": "AAPL"})], "tool_use")
 
 
 # ---- happy path ----
@@ -76,7 +82,7 @@ def test_happy_path_report():
 def test_happy_path_request_kwargs():
     _, client = run(happy_queue())
     for kw in client.calls:
-        assert kw["model"] == "claude-opus-5-5"
+        assert kw["model"] == DEFAULT_MODELS["technical"] == "claude-sonnet-5-5"
         assert kw["max_tokens"] == 16000
         assert kw["output_config"]["effort"] == "high"
         assert kw["output_config"]["format"]["type"] == "json_schema"
@@ -184,17 +190,18 @@ def test_model_supplied_opening_range_is_refused_in_next_request():
 # ---- retry and neutral ----
 
 def test_retry_once_then_valid():
-    report, client = run([bad(), good()])
+    report, client = run([bars_call(), bad(), good()])
     assert report.stance == "bullish"
-    assert len(client.calls) == 2
-    last = client.calls[1]["messages"][-1]
+    assert len(client.calls) == 3
+    last = client.calls[2]["messages"][-1]
     assert last["role"] == "user"
     assert any(
         b["type"] == "text" and "Your previous attempt failed" in b["text"]
         for b in last["content"]
     )
     # the failed assistant turn is preserved before the retry message
-    assert [m["role"] for m in client.calls[1]["messages"]] == ["user", "assistant", "user"]
+    assert [m["role"] for m in client.calls[2]["messages"]] == [
+        "user", "assistant", "user", "assistant", "user"]
 
 
 def test_invalid_twice_is_neutral_no_third_call():
@@ -219,14 +226,14 @@ def test_invalid_reports_are_neutral(payload):
 
 
 def test_wrong_symbol_first_then_right_is_retried():
-    report, client = run([good(symbol="MSFT"), good()])
+    report, client = run([bars_call(), good(symbol="MSFT"), good()])
     assert report.symbol == "AAPL" and report.stance == "bullish"
-    assert len(client.calls) == 2
+    assert len(client.calls) == 3
 
 
 def test_boundary_confidences_valid():
     for c in (0, 1):
-        report, _ = run([good(confidence=c)])
+        report, _ = run([bars_call(), good(confidence=c)])
         assert report.confidence == c
 
 
@@ -242,9 +249,9 @@ def test_bad_stop_reason_is_neutral(stop):
 def test_refusal_with_tool_use_blocks_gets_tool_results_not_executed():
     data = FakeMarketData()
     r = response([tool_use("x", "get_bars", {"symbol": "AAPL"})], "refusal")
-    report, client = run([r, good()], data=data)
+    report, client = run([r, bars_call(), good()], data=data)
     assert report.stance == "bullish"  # retry succeeded
-    assert data.calls == []  # tool never executed on a refusal
+    assert [c[0] for c in data.calls] == ["bars"]  # only the retry's call ran, not the refused one
     last = client.calls[1]["messages"][-1]["content"]
     assert last[0]["type"] == "tool_result" and last[0]["tool_use_id"] == "x"
     assert last[0]["is_error"] is True
@@ -297,9 +304,16 @@ def test_neutral_reason_never_contains_api_key(monkeypatch):
 
 
 def test_tool_failure_does_not_abort_run():
-    data = FakeMarketData(raises=RuntimeError("down"))
-    q = [response([tool_use("t", "get_bars", {"symbol": "AAPL"})], "tool_use"), good()]
-    report, client = run(q, data=data)
+    class BarsDown(FakeMarketData):
+        def bars(self, symbol, start, end):
+            raise RuntimeError("down")
+
+    q = [
+        response([tool_use("t", "get_bars", {"symbol": "AAPL"})], "tool_use"),
+        response([tool_use("s", "scan", {"symbols": ["GAPA"]})], "tool_use"),
+        good(evidence=[{"point": "gapa passes", "source": "scan"}]),
+    ]
+    report, client = run(q, data=BarsDown())
     assert report.stance == "bullish"
     (res,) = client.calls[1]["messages"][-1]["content"]
     assert res["is_error"] is True
@@ -313,19 +327,19 @@ def test_naive_now_raises():
 
 
 def test_pause_turn_is_continued():
-    q = [response([text("thinking...")], "pause_turn"), good()]
+    q = [bars_call(), response([text("thinking...")], "pause_turn"), good()]
     report, client = run(q)
     assert report.stance == "bullish"
-    assert len(client.calls) == 2
-    msgs = client.calls[1]["messages"]
-    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert len(client.calls) == 3
+    msgs = client.calls[2]["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
 
 
 # ---- config ----
 
 def test_defaults():
     c = AgentConfig()
-    assert (c.model, c.effort, c.fallbacks) == ("claude-opus-5-5", "high", True)
+    assert (c.model, c.effort, c.fallbacks) == ("claude-sonnet-5-5", "high", True)
 
 
 def test_config_from_env_changes_request(monkeypatch):

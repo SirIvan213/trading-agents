@@ -12,6 +12,6 @@ Rules:
 - Every evidence item states one concrete observation in `point` and the tool it came from in `source` (get_bars, plan_exit or scan).
 - `stance` is bullish, bearish or neutral. `confidence` is between 0 and 1.
 - `agent` is "technical" and `symbol` is the requested symbol, upper case.
-- Put events that could matter inside the trade (earnings, halts) in `catalysts`, otherwise use an empty list.
+- `catalysts` is a list of objects `{"name", "source"}`. Include one ONLY if a tool result shows it, with `source` set to that tool's name (get_bars, plan_exit or scan). The technical tools return no catalyst lists, so `catalysts` is normally empty. Never invent a catalyst.
 
 Return only the JSON object, no other text.

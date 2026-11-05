@@ -38,8 +38,8 @@ pytest -q
 
 - [x] Phase 0: repo, rules, subagents, CI
 - [x] Phase 1: tools (`bars`, `scan`, `news`, `exit_plan`, `size`, `risk_check`)
-- [ ] Phase 2: first agent (Technical Analyst)
-- [ ] Phase 3: parallel analysts + orchestrator
+- [x] Phase 2: first agent (Technical Analyst)
+- [x] Phase 3: parallel analysts + orchestrator
 - [ ] Phase 4: bull/bear debate + trader
 - [ ] Phase 5: paper trading, scheduling, decision journal
 - [ ] Phase 6: evaluation and optimization
@@ -49,6 +49,7 @@ pytest -q
 Tracked as [GitHub issues](https://github.com/SirIvan213/trading-agents/issues), labeled by when they must be done:
 
 - [`before-phase-2`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Abefore-phase-2): fix before the agents build on the tools ([Phase 2 milestone](https://github.com/SirIvan213/trading-agents/milestone/1))
+- [`before-phase-4`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Abefore-phase-4): fix before the trader consumes analyst output ([Phase 4 milestone](https://github.com/SirIvan213/trading-agents/milestone/3))
 - [`before-phase-5`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Abefore-phase-5): fix before any paper trading ([Phase 5 milestone](https://github.com/SirIvan213/trading-agents/milestone/2))
 - [`hardening`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Ahardening): real but low risk; fix anytime
 - [`docs`](https://github.com/SirIvan213/trading-agents/issues?q=is%3Aopen+label%3Adocs): wording only

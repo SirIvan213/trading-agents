@@ -86,5 +86,9 @@ qa-engineer → `tests/`, code-reviewer is read-only.
 
 ## Current phase
 
-Phase 1 is done. Phase 2 (the Technical Analyst agent) is next. Its blockers are
-the open issues labeled `before-phase-2`.
+Phases 1–3 are done: the tools, the Technical, Sentiment and Fundamentals
+analysts, and the orchestrator that runs them in parallel and returns a
+`DecisionPacket`. Phase 4 (bull/bear debate + trader) is next. It is gated by
+the open issues labeled `before-phase-4` (Phase 4 milestone): check
+`gh issue list --label before-phase-4 --state open` and fix them first or tell
+Ivan which remain.

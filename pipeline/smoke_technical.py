@@ -30,8 +30,9 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from agents.llm import EFFORTS, AgentConfig, make_client
-from agents.technical import run_technical_analyst
+from agents.llm import EFFORTS, AgentConfig, config_for, make_client
+from agents.schemas import CallRecord
+from agents.technical import run_technical
 from agents.tool_registry import ToolSession
 from tools.bars import parse_bars
 
@@ -41,7 +42,6 @@ BARS_FIXTURE = FIXTURES / "alpaca_bars_tsla.json"
 SNAPSHOT_FIXTURE = FIXTURES / "alpaca_snapshot_tsla.json"
 SYMBOL = "TSLA"
 NY = ZoneInfo("America/New_York")
-NEUTRAL_SOURCE = "technical_analyst"  # evidence source used by the agent's neutral fallback
 PREVIEW = 600
 
 
@@ -129,33 +129,14 @@ class RecordingClient:
         self.beta.messages = _RecordingMessages(inner.beta.messages, rec)
 
 
-def _iterations(response: Any) -> list[Any]:
-    return list(getattr(getattr(response, "usage", None), "iterations", None) or [])
-
-
-def serving_model(response: Any) -> str:
-    """The model that produced the final output of this response.
-
-    On a fallback turn that is the `model` of the last `fallback_message` usage iteration (the
-    SDK's documented served-by signal); otherwise `response.model`.
-    """
-    for it in reversed(_iterations(response)):
-        if getattr(it, "type", "") == "fallback_message" and getattr(it, "model", None):
-            return str(it.model)
-    return str(getattr(response, "model", "?"))
-
-
 def fallback_notes(response: Any) -> list[str]:
-    """Human-readable fallback hops for one response; empty if no fallback ran."""
+    """Human-readable fallback hops from the `fallback` content blocks of one response."""
     notes = []
     for block in getattr(response, "content", []) or []:
         if getattr(block, "type", "") == "fallback":
             src = getattr(getattr(block, "from_", None), "model", "?")
             dst = getattr(getattr(block, "to", None), "model", "?")
             notes.append(f"{src} declined -> {dst} continued")
-    iters = _iterations(response)
-    if not notes and any(getattr(it, "type", "") == "fallback_message" for it in iters):
-        notes.append(f"served by fallback model {serving_model(response)}")
     return notes
 
 
@@ -163,18 +144,13 @@ TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
               "cache_read_input_tokens")
 
 
-def token_totals(responses: list[Any]) -> dict[str, int]:
-    """Sum of the top-level usage fields across all responses."""
+def token_totals(calls: list[CallRecord]) -> dict[str, int]:
+    """Sum of the top-level usage fields across all call records."""
     totals = dict.fromkeys(TOKEN_KEYS, 0)
-    for r in responses:
-        usage = getattr(r, "usage", None)
+    for c in calls:
         for k in TOKEN_KEYS:
-            totals[k] += int(getattr(usage, k, 0) or 0)
+            totals[k] += getattr(c.usage, k)
     return totals
-
-
-def _is_neutral_fallback(report: Any) -> bool:
-    return report.confidence == 0.0 and any(e.source == NEUTRAL_SOURCE for e in report.evidence)
 
 
 def main(argv: list[str] | None = None, *, client: Any = None) -> int:
@@ -182,19 +158,25 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         description="Run the Technical Analyst once on saved TSLA fixtures against the real "
                     "Claude API (billed; no Alpaca calls)."
     )
-    parser.add_argument("--model", default="claude-opus-5-5",
-                        help="Claude model ID (default: claude-opus-5-5; e.g. claude-sonnet-5-5)")
-    parser.add_argument("--effort", default="high", choices=sorted(EFFORTS))
-    parser.add_argument("--no-fallbacks", action="store_true",
-                        help="turn off server-side refusal fallback")
-    args = parser.parse_args(argv)
-
-    if client is None:
+    if client is None:  # .env first: it may hold TRADING_AGENTS_* defaults
         try:
             load_dotenv(ROOT / ".env")
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+    try:
+        defaults = config_for("technical")
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    parser.add_argument("--model", default=defaults.model,
+                        help=f"Claude model ID (default: {defaults.model})")
+    parser.add_argument("--effort", default=defaults.effort, choices=sorted(EFFORTS))
+    parser.add_argument("--no-fallbacks", action="store_true",
+                        help="turn off server-side refusal fallback")
+    args = parser.parse_args(argv)
+
+    if client is None:
         try:
             client = make_client()
         except RuntimeError as exc:
@@ -216,10 +198,11 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
 
     ToolSession.execute = recording_execute  # type: ignore[method-assign]
     try:
-        report = run_technical_analyst(SYMBOL, now, data, client=RecordingClient(client, rec),
-                                       config=config)
+        run = run_technical(SYMBOL, now, data, client=RecordingClient(client, rec),
+                            config=config)
     finally:
         ToolSession.execute = original_execute  # type: ignore[method-assign]
+    report = run.report
 
     print(f"== Technical Analyst smoke run: {SYMBOL} as of {now.isoformat()} ==")
     print(f"requested model: {config.model}  effort: {config.effort}  "
@@ -235,24 +218,28 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         print(f"{i}. {name}({json.dumps(tool_input)}) -> {status}")
         print("   " + (body if len(body) <= PREVIEW else body[:PREVIEW] + " ...(truncated)"))
 
-    print(f"\n-- API calls ({len(rec.responses)}) --")
-    for i, r in enumerate(rec.responses, 1):
-        fb = fallback_notes(r)
-        line = f"{i}. served by {serving_model(r)}  stop_reason={getattr(r, 'stop_reason', '?')}"
+    print(f"\n-- API calls ({len(run.calls)}) --")
+    for i, c in enumerate(run.calls, 1):
+        fb = fallback_notes(rec.responses[i - 1]) if i <= len(rec.responses) else []
+        line = f"{i}. served by {c.serving_model}  stop_reason={c.stop_reason}"
+        if c.refusal_category:
+            line += f"  refusal_category={c.refusal_category}"
         print(line + (f"  fallback: {'; '.join(fb)}" if fb else ""))
-    served = sorted({serving_model(r) for r in rec.responses})
+        for it in c.iterations:
+            print(f"   iteration {it.type} model={it.model} "
+                  f"in={it.usage.input_tokens} out={it.usage.output_tokens}")
+    served = sorted({c.serving_model for c in run.calls})
     print(f"serving model(s): {', '.join(served) or 'none (no API response)'}")
-    print(f"fallback ran: {'yes' if any(fallback_notes(r) for r in rec.responses) else 'no'}")
+    print(f"fallback ran: {'yes' if any(c.fallback_ran for c in run.calls) else 'no'}")
 
-    t = token_totals(rec.responses)
+    t = token_totals(run.calls)
     print("\n-- Tokens (sum over all API calls) --")
     print(f"input {t['input_tokens']}  output {t['output_tokens']}  "
           f"cache write {t['cache_creation_input_tokens']}  "
           f"cache read {t['cache_read_input_tokens']}  total processed {sum(t.values())}")
 
-    if not rec.responses or _is_neutral_fallback(report):
-        reason = report.evidence[0].point if report.evidence else "no API response"
-        print(f"\nsmoke run FAILED: {reason}", file=sys.stderr)
+    if not run.calls or not run.ok:
+        print(f"\nsmoke run FAILED: {run.reason or 'no API response'}", file=sys.stderr)
         return 1
     return 0
 
