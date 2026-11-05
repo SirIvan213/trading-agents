@@ -414,3 +414,76 @@ def test_every_refusal_never_reaches_size_position(size_spy):
 def test_refusal_reasons_carry_no_plan_text(size_spy):
     out = build_order(plan_record(as_of="sk-ant-SENTINEL"), LIMITS, MADE)
     assert "SENTINEL" not in json.dumps(out)
+
+
+# ===================== #67: DST edges =====================
+
+def test_fall_back_hour_counts_real_elapsed_seconds(size_spy):
+    # 01:30 EDT (05:30Z) to 01:31 EST (06:31Z) is 3,660 real seconds, not 60
+    plan = plan_record(as_of="2026-11-01T01:30:00-04:00")
+    now = datetime(2026, 11, 1, 1, 31, tzinfo=NY, fold=1)  # the second 01:31, EST
+    assert now.utcoffset() == timedelta(hours=-5)
+    refused("plan is 3660s old (max 300s)", now, size_spy, plan=plan)
+
+
+def test_fall_back_first_occurrence_is_fresh(size_spy):
+    plan = plan_record(as_of="2026-11-01T01:30:00-04:00")
+    now = datetime(2026, 11, 1, 1, 31, tzinfo=NY, fold=0)  # first 01:31, still EDT
+    assert now.utcoffset() == timedelta(hours=-4)
+    assert build_order(plan, LIMITS, now)["ok"] is True  # 60 s
+
+
+def test_spring_forward_gap_counts_real_elapsed_seconds(size_spy):
+    # 01:59:30 EST (06:59:30Z) to 03:00:30 EDT (07:00:30Z) is 60 s of real time, not 1 h 1 min
+    plan = plan_record(as_of="2026-03-08T01:59:30-05:00")
+    now = datetime(2026, 3, 8, 3, 0, 30, tzinfo=NY)
+    assert now.utcoffset() == timedelta(hours=-4)
+    assert build_order(plan, LIMITS, now)["ok"] is True
+    late = datetime(2026, 3, 8, 3, 5, 31, tzinfo=NY)  # 361 s of real time
+    refused("plan is 361s old (max 300s)", late, size_spy, plan=plan)
+
+
+# ===================== #66: no ATR (fewer than 14 bars) =====================
+
+class FewBars(FakeMarketData):
+    def bars(self, symbol, start, end):
+        out = super().bars(symbol, start, end)
+        out["bars"] = out["bars"][:10]
+        return out
+
+
+def few_bars_session() -> ToolSession:
+    s = ToolSession(symbol="AAPL", now=NOW, data=FewBars(), limits=load_limits(),
+                    criteria=ScanCriteria())
+    _, err = s.execute("get_bars", {"symbol": "AAPL"})
+    assert err is False
+    assert s.summary["atr"] is None and s.summary["bars"] < 14
+    # same ATR-less summary, price levels chosen to sit 0.09 and 0.10 below last_close
+    s.summary["price_levels"] = {
+        "session_low": "99.90", "session_high": "100.50", "last_close": "100.00",
+        "vwap": "99.91",
+    }
+    return s
+
+
+def test_no_atr_only_the_absolute_floor_applies_refused_at_009():
+    s = few_bars_session()
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": "100.00", "level": "99.91"})
+    assert err is False
+    assert res == {"ok": False,
+                   "reason": "risk per share 0.09 is below min_risk_per_share 0.10"}
+    assert s.exit_plans == []
+
+
+def test_no_atr_only_the_absolute_floor_applies_passes_at_010():
+    s = few_bars_session()
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": "100.00", "level": "99.90"})
+    assert err is False and res["ok"] is True and res["risk_per_share"] == "0.10"
+    assert res["plan_id"] == "plan-1" and len(s.exit_plans) == 1
+
+
+def test_no_atr_large_multiple_does_not_matter():
+    s = few_bars_session()
+    s.limits = replace(s.limits, min_risk_atr_multiple=D("50"))
+    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "100.00", "level": "99.90"})
+    assert res["ok"] is True  # there is no ATR to multiply

@@ -197,6 +197,33 @@ def test_exit_plan_at_the_cap_always_passes_the_cap_rule(limits, multiple):
     assert checked == 80
 
 
+# Lowest production-reachable risks (the #66 floor is 0.10): ATR None or tiny, so the plan
+# is not refused and the cap rule is still exercised near the minimum.
+NEAR_MIN_OFFSETS = [D("0.10"), D("0.12"), D("0.15")]
+NEAR_MIN_ATRS = [None, D("0.01")]
+
+
+@pytest.mark.parametrize("limits,multiple", [(CAP5, D("5")), (CAP2, D("2"))])
+def test_exit_plan_near_minimum_risk_always_passes_the_cap_rule(limits, multiple):
+    checked = 0
+    for entry in GRID_ENTRIES:
+        for off in NEAR_MIN_OFFSETS:
+            for atr in NEAR_MIN_ATRS:
+                level = D(entry) - off
+                plan = exit_plan("level", D(entry), limits, level=level, atr=atr,
+                                 reward_multiple=multiple)
+                assert plan["ok"], (entry, off, atr, plan)
+                assert D(plan["risk_per_share"]) >= D("0.10")
+                order = cap_order(plan["target"], entry=plan["entry"], stop=plan["stop"], qty=1)
+                r = check(order=order, limits=limits)
+                assert cap_reasons(r) == [], (entry, off, atr, plan, r)
+                risk = D(plan["entry"]) - D(plan["stop"])
+                reward = D(plan["target"]) - D(plan["entry"])
+                assert reward <= multiple * risk + D("0.01")
+                checked += 1
+    assert checked == 30
+
+
 def test_exit_plan_above_cap_is_refused_before_risk_check_is_needed():
     plan = exit_plan("level", D("100.00"), CAP5, level=D("99.00"), reward_multiple=D("5.01"))
     assert plan["ok"] is False and "exceeds max_reward_multiple" in plan["reason"]

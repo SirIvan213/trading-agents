@@ -923,3 +923,205 @@ def test_derived_q4_on_realistic_fixture():
 def test_derived_result_is_json_serialisable():
     import json
     json.dumps(E.earnings_facts(synth(), date(2026, 3, 1)))
+
+
+# ---------------- #54 follow-ups: recast guard, non-positive revenue, odd shapes ----------------
+
+def recast_note(metric, end):
+    return (
+        f"Q4 not derived for {metric} ending {end}: full-year figures were recast; "
+        "9-month and full-year values may be on different bases"
+    )
+
+
+def fyq(start, end, val, filed, form="10-K", fy=2025, fp="FY"):
+    return q(start, end, val, filed, form=form, fy=fy, fp=fp)
+
+
+def test_discontinued_ops_recast_blocks_derivation_and_uses_real_quarters():
+    # FY2025 10-K (filed 2026-02-15) moves a business to discontinued ops: FY2025 is reported
+    # as 1,005 and the FY2024 comparative is recast from 1,220 to 915. The 9M 2025 figure
+    # (990) is still on the OLD basis, so 1,005 - 990 = 15 would be nonsense (true Q4 is ~263).
+    rev = [
+        q("2024-01-01", "2024-09-30", 900, "2024-11-01", fy=2024, fp="Q3"),
+        q("2024-07-01", "2024-09-30", 300, "2024-11-01", fy=2024, fp="Q3"),
+        fyq("2024-01-01", "2024-12-31", 1220, "2025-02-15", fy=2024),
+        q("2025-01-01", "2025-03-31", 330, "2025-05-01", fy=2025, fp="Q1"),
+        q("2025-04-01", "2025-06-30", 330, "2025-08-01", fy=2025, fp="Q2"),
+        q("2025-07-01", "2025-09-30", 330, "2025-11-01", fy=2025, fp="Q3"),
+        q("2025-01-01", "2025-09-30", 990, "2025-11-01", fy=2025, fp="Q3"),
+        q("2024-01-01", "2024-09-30", 900, "2025-11-01", fy=2025, fp="Q3"),
+        fyq("2025-01-01", "2025-12-31", 1005, "2026-02-15"),
+        fyq("2024-01-01", "2024-12-31", 915, "2026-02-15"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 2, 20), quarters=4)
+    assert not any(r["derived"] for r in out["quarters"])
+    assert [r["end"] for r in out["quarters"]] == [
+        "2025-09-30", "2025-06-30", "2025-03-31", "2024-09-30"]
+    assert recast_note("revenue", "2025-12-31") in out["notes"]
+    # newest row and growth come from real quarters: Q3 2025 330 vs Q3 2024 300 -> 10.00%
+    assert out["quarters"][0]["revenue"] == "330"
+    assert out["growth"]["revenue_yoy_pct"] == "10.00"
+
+
+def test_recast_guard_rule_a_changed_full_year_value_blocks():
+    # the 10-K/A changes FY2025 from 1,300 to 1,310: two distinct FY values -> no derivation
+    rev = [
+        q("2025-07-01", "2025-09-30", 330, "2025-11-01"),
+        q("2025-01-01", "2025-09-30", 990, "2025-11-01"),
+        fyq("2025-01-01", "2025-12-31", 1300, "2026-02-15"),
+        fyq("2025-01-01", "2025-12-31", 1310, "2026-03-15", form="10-K/A"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 3, 20))
+    assert [r["end"] for r in out["quarters"]] == ["2025-09-30"]
+    assert recast_note("revenue", "2025-12-31") in out["notes"]
+
+
+def test_recast_guard_rule_a_same_value_10ka_still_derives():
+    # the 10-K/A repeats FY2025 = 1,300 unchanged: one distinct value, so Q4 = 1,300 - 990 = 310
+    rev = [
+        q("2025-07-01", "2025-09-30", 330, "2025-11-01"),
+        q("2025-01-01", "2025-09-30", 990, "2025-11-01"),
+        fyq("2025-01-01", "2025-12-31", 1300, "2026-02-15"),
+        fyq("2025-01-01", "2025-12-31", 1300, "2026-03-15", form="10-K/A"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 3, 20))
+    row = out["quarters"][0]
+    assert (row["end"], row["revenue"], row["derived"]) == ("2025-12-31", "310", True)
+    assert not any("not derived for revenue" in n for n in out["notes"])
+    assert "restatement" in out["catalysts"]  # a /A filing supplied the full-year value
+
+
+def test_recast_guard_rule_b_prior_year_recast_in_the_10k_blocks():
+    # FY2025 is unchanged at 1,300, but the same 10-K recasts FY2024 from 1,200 to 1,100:
+    # the 10-K is on a new basis, the 9M (990, old 10-Q) may not be -> no derivation
+    rev = [
+        fyq("2024-01-01", "2024-12-31", 1200, "2025-02-15", fy=2024),
+        q("2025-07-01", "2025-09-30", 330, "2025-11-01"),
+        q("2025-01-01", "2025-09-30", 990, "2025-11-01"),
+        fyq("2025-01-01", "2025-12-31", 1300, "2026-02-15"),
+        fyq("2024-01-01", "2024-12-31", 1100, "2026-02-15"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 2, 20))
+    assert [r["end"] for r in out["quarters"]] == ["2025-09-30"]
+    assert recast_note("revenue", "2025-12-31") in out["notes"]
+
+
+def test_recast_guard_clean_company_still_derives():
+    # no recast anywhere: FY2024 stays 1,200; Q4 2025 = 1,300 - 990 = 310
+    rev = [
+        fyq("2024-01-01", "2024-12-31", 1200, "2025-02-15", fy=2024),
+        q("2025-07-01", "2025-09-30", 330, "2025-11-01"),
+        q("2025-01-01", "2025-09-30", 990, "2025-11-01"),
+        fyq("2025-01-01", "2025-12-31", 1300, "2026-02-15"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 2, 20))
+    assert out["quarters"][0]["revenue"] == "310" and out["quarters"][0]["derived"] is True
+    assert not any("not derived for revenue" in n for n in out["notes"])
+
+
+def test_recast_guard_point_in_time_before_the_recasting_10k():
+    # a day before the 10-K (filed 2026-02-15) there is no FY2025: nothing derived, no note
+    rev = [
+        fyq("2024-01-01", "2024-12-31", 1200, "2025-02-15", fy=2024),
+        q("2025-07-01", "2025-09-30", 330, "2025-11-01"),
+        q("2025-01-01", "2025-09-30", 990, "2025-11-01"),
+        fyq("2025-01-01", "2025-12-31", 1300, "2026-02-15"),
+        fyq("2024-01-01", "2024-12-31", 1100, "2026-02-15"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 2, 14))
+    assert not any("not derived" in n and "revenue" in n for n in out["notes"])
+    assert not any(r["derived"] for r in out["quarters"])
+
+
+def test_recast_note_names_the_metric():
+    ni = [
+        q("2025-07-01", "2025-09-30", 33, "2025-11-01"),
+        q("2025-01-01", "2025-09-30", 99, "2025-11-01"),
+        fyq("2025-01-01", "2025-12-31", 130, "2026-02-15"),
+        fyq("2025-01-01", "2025-12-31", 125, "2026-03-15", form="10-K/A"),
+    ]
+    out = E.earnings_facts(build(net_income=ni), date(2026, 3, 20))
+    assert recast_note("net_income", "2025-12-31") in out["notes"]
+    assert not any(r["derived"] for r in out["quarters"])
+
+
+# ---- F3: non-positive derived revenue ----
+
+def f3_data(fy_rev, fy_ni=60):
+    rev = [
+        q("2025-07-01", "2025-09-30", 330, "2025-11-01"),
+        q("2025-01-01", "2025-09-30", 990, "2025-11-01"),
+        fyq("2025-01-01", "2025-12-31", fy_rev, "2026-02-15"),
+    ]
+    ni = [
+        q("2025-07-01", "2025-09-30", 33, "2025-11-01"),
+        q("2025-01-01", "2025-09-30", 99, "2025-11-01"),
+        fyq("2025-01-01", "2025-12-31", fy_ni, "2026-02-15"),
+    ]
+    return build(revenue=rev, net_income=ni)
+
+
+def test_nine_months_above_full_year_gives_no_revenue_q4():
+    # 900 (FY) - 990 (9M) = -90 revenue: impossible, so it is not emitted
+    out = E.earnings_facts(f3_data(900), date(2026, 2, 20))
+    row = out["quarters"][0]
+    assert row["end"] == "2025-12-31"          # the row exists only because net income derived
+    assert row["revenue"] is None
+    assert "revenue" not in row["derived_metrics"]
+    assert "Q4 revenue not derived for 2025-12-31: result would be -90" in out["notes"]
+
+
+def test_zero_derived_revenue_is_not_emitted():
+    out = E.earnings_facts(f3_data(990), date(2026, 2, 20))  # 990 - 990 = 0
+    assert out["quarters"][0]["revenue"] is None
+    assert "Q4 revenue not derived for 2025-12-31: result would be 0" in out["notes"]
+
+
+def test_negative_derived_net_income_is_emitted():
+    # net income FY 60 - 9M 99 = -39 (a loss-making Q4 is legitimate)
+    out = E.earnings_facts(f3_data(900), date(2026, 2, 20))
+    row = out["quarters"][0]
+    assert row["net_income"] == "-39" and row["derived_metrics"] == ["net_income"]
+    assert row["derived"] is True
+
+
+def test_positive_derived_revenue_emitted_normally():
+    out = E.earnings_facts(f3_data(1300), date(2026, 2, 20))  # 1,300 - 990 = 310
+    assert out["quarters"][0]["revenue"] == "310"
+    assert not any("Q4 revenue not derived" in n for n in out["notes"])
+
+
+# ---- derived-Q4 shapes ----
+
+def test_fy_from_10ka_and_nine_months_from_10qa_use_the_amended_values():
+    # 9M: 990 (10-Q) then 995 (10-Q/A); FY: 1,300 (10-K) repeated unchanged by a 10-K/A.
+    # The latest 9M value (995) is used: Q4 = 1,300 - 995 = 305.
+    rev = [
+        q("2025-01-01", "2025-09-30", 990, "2025-11-01"),
+        q("2025-01-01", "2025-09-30", 995, "2025-12-01", form="10-Q/A"),
+        q("2025-07-01", "2025-09-30", 330, "2025-11-01"),
+        fyq("2025-01-01", "2025-12-31", 1300, "2026-02-15"),
+        fyq("2025-01-01", "2025-12-31", 1300, "2026-03-15", form="10-K/A"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 3, 20))
+    row = out["quarters"][0]
+    assert (row["end"], row["revenue"], row["derived"]) == ("2025-12-31", "305", True)
+    assert "restatement" in out["catalysts"]
+    # last_filed is the later source's latest filing (the 10-K/A, 2026-03-15)
+    assert row["last_filed"] == "2026-03-15"
+
+
+def test_fifty_three_week_non_december_year_derives_a_98_day_q4():
+    # FY2025 = 2024-09-29..2025-10-04 (53 weeks); 9M = 2024-09-29..2025-06-28.
+    # Q4 = 440 - 300 = 140, starting 2025-06-29, i.e. 98 days after the 9M end.
+    rev = [
+        q("2024-09-29", "2025-06-28", 300, "2025-08-01", fy=2025, fp="Q3"),
+        q("2025-03-30", "2025-06-28", 100, "2025-08-01", fy=2025, fp="Q3"),
+        fyq("2024-09-29", "2025-10-04", 440, "2025-11-15"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2025, 11, 20))
+    row = out["quarters"][0]
+    assert (row["start"], row["end"], row["revenue"], row["derived"]) == (
+        "2025-06-29", "2025-10-04", "140", True)
+    assert (date(2025, 10, 4) - date(2025, 6, 28)).days == 98

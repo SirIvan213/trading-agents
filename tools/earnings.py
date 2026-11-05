@@ -184,13 +184,22 @@ def _pick_concept(candidates: list[tuple[str, dict]]) -> tuple[str | None, dict]
     return best_name, best
 
 
-def _derive_q4(quarterly: dict, long_rows: list[dict]) -> dict:
+def _derive_q4(
+    quarterly: dict, long_rows: list[dict], metric: str, notes: list[str]
+) -> dict:
     """Return {(start, end): derived Q4 record} = full year - 9-month YTD.
 
     `long_rows` are parsed (filed <= as_of) entries of 260-380 days. A derived
     row needs a full-year group (350-380 days) and a 9-month group (260-290
     days) with the SAME start, the 9-month end 80-100 days before the full-year
     end, and no real quarterly entry already ending in that gap.
+
+    Never derived (a note is appended to `notes` instead) when the full-year
+    figures were recast, because the 9-month value (from an older 10-Q) may then
+    be on a different basis: (a) the full-year value differs between filings, or
+    (b) the 10-K supplying the full-year value also reports a different value
+    than an earlier filing for any other full-year or 9-month period of this
+    concept. A derived revenue <= 0 is refused with a note.
     """
     def key_of(e: dict) -> tuple[date, date]:
         return (e["start"], e["end"])
@@ -219,8 +228,35 @@ def _derive_q4(quarterly: dict, long_rows: list[dict]) -> dict:
         q4_start = nine["end"] + timedelta(days=1)
         if any(q4_start <= end <= fy_end for (_, end) in quarterly):
             continue  # a real quarterly entry exists; never override it
+        fy_vals = {e["val"] for e in long_rows if (e["start"], e["end"]) == (fy_start, fy_end)}
+        by_period: dict = {}
+        for e in long_rows:
+            by_period.setdefault((e["start"], e["end"]), []).append(e)
+        recast_10k = False
+        for per, es in by_period.items():
+            if per == (fy_start, fy_end):
+                continue
+            earlier = [e for e in es if e["filed"] < fy["last_filed"]]
+            if earlier and any(
+                e["filed"] == fy["last_filed"] and e["val"] != min(
+                    earlier, key=lambda x: x["filed"])["val"]
+                for e in es
+            ):
+                recast_10k = True
+        if len(fy_vals) > 1 or recast_10k:
+            notes.append(
+                f"Q4 not derived for {metric} ending {fy_end.isoformat()}: full-year figures "
+                "were recast; 9-month and full-year values may be on different bases"
+            )
+            continue
+        q4_val = fy["val"] - nine["val"]
+        if metric == "revenue" and q4_val <= 0:
+            notes.append(
+                f"Q4 revenue not derived for {fy_end.isoformat()}: result would be {q4_val}"
+            )
+            continue
         out[(q4_start, fy_end)] = {
-            "start": q4_start, "end": fy_end, "val": fy["val"] - nine["val"],
+            "start": q4_start, "end": fy_end, "val": q4_val,
             "fy": fy["fy"], "fp": "Q4", "form": fy["form"],
             "first_filed": max(fy["first_filed"], nine["first_filed"]),
             "last_filed": max(fy["last_filed"], nine["last_filed"]),
@@ -268,7 +304,9 @@ def _duration_series(
                     for r in rows
                 ) if e
             ]
-            grouped.update(_derive_q4(grouped, long_rows))
+            dnotes: list[str] = []
+            grouped.update(_derive_q4(grouped, long_rows, metric, dnotes))
+            stats.setdefault("derive_notes", {})[(metric, concept)] = dnotes
         candidates.append((concept, grouped))
     return _pick_concept(candidates)
 
@@ -440,6 +478,8 @@ def earnings_facts(companyfacts: dict, as_of: date, quarters: int = 4) -> dict:
 
     cash_concept, cash = _latest_instant(facts, "us-gaap", CASH_CONCEPTS, "USD", as_of, stats)
     shares_concept, shares = _latest_instant(facts, "dei", SHARES_CONCEPTS, "shares", as_of, stats)
+    for m, (concept_used, _) in picked.items():
+        notes.extend(stats.get("derive_notes", {}).get((m, concept_used), []))
     for m, s in series.items():
         if not s:
             notes.append(f"missing concept: {m}")
