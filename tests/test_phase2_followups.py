@@ -12,7 +12,7 @@ import agents.technical as tech
 import agents.tool_registry as reg
 import pipeline.data as pdata
 from agents.tool_registry import ToolSession
-from tests.fakes import NOW, FakeClient, FakeMarketData, report_json, response, text
+from tests.fakes import NOW, FakeClient, FakeMarketData, report_json, response, text, tool_use
 from tools.config import load_limits
 from tools.exit_plan import exit_plan as real_exit_plan
 from tools.scan import ScanCriteria
@@ -259,7 +259,10 @@ def test_invalid_symbol_raises(bad):
 
 
 def test_padded_lowercase_symbol_accepted():
-    client = FakeClient([response([text(report_json())], "end_turn")])
+    client = FakeClient([
+        response([tool_use("b", "get_bars", {"symbol": "AAPL"})], "tool_use"),
+        response([text(report_json())], "end_turn"),
+    ])
     report = tech.run_technical_analyst(" aapl ", NOW, FakeMarketData(), client=client)
     assert report.symbol == "AAPL" and report.stance == "bullish"
 

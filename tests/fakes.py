@@ -103,3 +103,61 @@ class FakeClient:
         self.queue: list = list(queue or [])
         self.calls: list[dict] = []
         self.beta = SimpleNamespace(messages=_Messages(self))
+
+
+NOON = datetime(2026, 11, 3, 12, 0, tzinfo=NY)  # 17:00Z; the clock the news fixtures were built for
+
+
+def merged_news() -> dict:
+    items = load_fixture("alpaca_news_page1.json")["news"] + load_fixture(
+        "alpaca_news_page2.json"
+    )["news"]
+    return {"news": items}
+
+
+class FakeFilingsData:
+    """NewsData + FilingsData over saved fixtures (ABCD, CIK 12345). Records every call."""
+
+    def __init__(
+        self,
+        *,
+        news_raises: Exception | None = None,
+        subs_raises: Exception | None = None,
+        facts_raises: Exception | None = None,
+        no_cik: bool = False,
+        facts_fixture: str = "sec_companyfacts_abcd.json",
+    ) -> None:
+        self.facts_fixture = facts_fixture
+        self.calls: list[tuple] = []
+        self.news_raises = news_raises
+        self.subs_raises = subs_raises
+        self.facts_raises = facts_raises
+        self.no_cik = no_cik
+
+    def news(self, symbols: list[str], start: datetime, end: datetime) -> dict:
+        self.calls.append(("news", list(symbols), start, end))
+        if self.news_raises:
+            raise self.news_raises
+        return merged_news()
+
+    def submissions(self, symbol: str) -> dict | None:
+        self.calls.append(("submissions", symbol))
+        if self.subs_raises:
+            raise self.subs_raises
+        return None if self.no_cik else load_fixture("sec_submissions_8k.json")
+
+    def company_facts(self, symbol: str) -> dict | None:
+        self.calls.append(("company_facts", symbol))
+        if self.facts_raises:
+            raise self.facts_raises
+        return None if self.no_cik else load_fixture(self.facts_fixture)
+
+
+class FakeAllData(FakeMarketData, FakeFilingsData):
+    """Everything the three analysts read, offline."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        FakeMarketData.__init__(self)
+        calls = self.calls
+        FakeFilingsData.__init__(self, **kwargs)
+        self.calls = calls
