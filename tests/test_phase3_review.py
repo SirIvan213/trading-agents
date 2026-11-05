@@ -488,7 +488,7 @@ def test_recent_10q_passes_when_earnings_facts_lists_it():
     assert run.ok is True and run.report.catalysts[0].name == "recent_10q"
     (res,) = client.calls[1]["messages"][-1]["content"]
     import json
-    assert json.loads(res["content"])["catalysts"] == ["recent_10q", "restatement"]
+    assert json.loads(res["content"])["catalysts"] == ["recent_10q"]
 
 
 def test_restatement_passes_with_the_default_fixture():

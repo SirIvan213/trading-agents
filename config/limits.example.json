@@ -8,6 +8,9 @@
   "max_trades_per_day": 3,
   "min_reward_to_risk": "1.0",
   "max_reward_multiple": "5",
+  "min_risk_per_share": "0.10",
+  "min_risk_atr_multiple": "1.0",
+  "max_plan_age_s": 300,
   "entry_window": ["09:45", "15:30"],
   "flat_by": "15:55",
   "blocked_symbols": []

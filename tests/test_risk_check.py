@@ -172,7 +172,8 @@ def test_cap_rule_skipped_when_stop_not_below_entry():
 
 
 GRID_ENTRIES = ["10.00", "33.33", "52.17", "101.01", "364.18"]
-GRID_LEVEL_OFFSETS = [D("0.07"), D("0.50"), D("1.33"), D("2.01")]
+# every offset gives risk >= 0.10 and >= 1 x ATR for every ATR below (#66)
+GRID_LEVEL_OFFSETS = [D("1.33"), D("2.01"), D("3.07"), D("5.50")]
 GRID_ATRS = [None, D("0.37"), D("1.13"), D("0.01")]
 
 
@@ -194,6 +195,33 @@ def test_exit_plan_at_the_cap_always_passes_the_cap_rule(limits, multiple):
                 assert reward <= multiple * risk + D("0.01")
                 checked += 1
     assert checked == 80
+
+
+# Lowest production-reachable risks (the #66 floor is 0.10): ATR None or tiny, so the plan
+# is not refused and the cap rule is still exercised near the minimum.
+NEAR_MIN_OFFSETS = [D("0.10"), D("0.12"), D("0.15")]
+NEAR_MIN_ATRS = [None, D("0.01")]
+
+
+@pytest.mark.parametrize("limits,multiple", [(CAP5, D("5")), (CAP2, D("2"))])
+def test_exit_plan_near_minimum_risk_always_passes_the_cap_rule(limits, multiple):
+    checked = 0
+    for entry in GRID_ENTRIES:
+        for off in NEAR_MIN_OFFSETS:
+            for atr in NEAR_MIN_ATRS:
+                level = D(entry) - off
+                plan = exit_plan("level", D(entry), limits, level=level, atr=atr,
+                                 reward_multiple=multiple)
+                assert plan["ok"], (entry, off, atr, plan)
+                assert D(plan["risk_per_share"]) >= D("0.10")
+                order = cap_order(plan["target"], entry=plan["entry"], stop=plan["stop"], qty=1)
+                r = check(order=order, limits=limits)
+                assert cap_reasons(r) == [], (entry, off, atr, plan, r)
+                risk = D(plan["entry"]) - D(plan["stop"])
+                reward = D(plan["target"]) - D(plan["entry"])
+                assert reward <= multiple * risk + D("0.01")
+                checked += 1
+    assert checked == 30
 
 
 def test_exit_plan_above_cap_is_refused_before_risk_check_is_needed():
@@ -360,15 +388,19 @@ def test_non_positive_entry_or_stop_blocks_with_exact_reason(entry, stop):
 
 
 def test_tiny_positive_prices_are_evaluated_normally():
-    r = check(order=fc_order(entry="0.02", stop_loss="0.01", take_profit="0.05"))
+    # risk 0.10 is exactly the minimum (#66), so sub-dollar prices are still evaluated normally
+    r = check(order=fc_order(entry="0.30", stop_loss="0.20", take_profit="0.40"))
     assert r == {"verdict": "PASS", "reasons": []}
-    # ...and still judged by the normal rules: 5x reward is over a cap of 2
-    r2 = check(order=fc_order(entry="0.02", stop_loss="0.01", take_profit="0.07"),
+    # ...and still judged by the normal rules: 4x reward is over a cap of 2
+    r2 = check(order=fc_order(entry="0.30", stop_loss="0.20", take_profit="0.70"),
                limits=replace(LIMITS, max_reward_multiple=D("2")))
     assert r2["verdict"] == "BLOCK"
     assert r2["reasons"] == [
-        "reward:risk 5.00 over cap 2 (beyond one-cent rounding tolerance)"
+        "reward:risk 4.00 over cap 2 (beyond one-cent rounding tolerance)"
     ]
+    # a one-cent stop is a noise stop and is blocked by the minimum risk rule
+    r3 = check(order=fc_order(entry="0.02", stop_loss="0.01", take_profit="0.05"))
+    assert r3 == {"verdict": "BLOCK", "reasons": ["risk per share 0.01 below minimum 0.10"]}
 
 
 # ---------- paper flag on hand-built limits ----------

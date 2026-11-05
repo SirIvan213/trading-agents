@@ -1,19 +1,23 @@
 """The one order path: from a stored exit plan to a sized order.
 
 Order prices come only from tool-produced ExitPlanRecords. Analyst text and analyst scores
-never feed sizing or risk_check (CLAUDE.md rule 2; issues #40, #50). Nothing but the plan and
-the risk limits is an input here.
+never feed sizing or risk_check (CLAUDE.md rule 2; issues #40, #50).
+Nothing but the plan, the risk limits and the clock is an input here; a stale plan is refused
+(issue #67).
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from agents.schemas import DecisionPacket, ExitPlanRecord
+from pipeline.market import NY
 from tools.config import Limits
 from tools.scan import validate_symbols
 from tools.size import Plan, size_position
 
 _CENT = Decimal("0.01")
+_SKEW = timedelta(seconds=5)  # tolerated clock skew for a plan dated slightly ahead of now
 
 
 def select_plan(packet: DecisionPacket, plan_id: str) -> ExitPlanRecord:
@@ -43,10 +47,35 @@ def _cents(text: object) -> Decimal | None:
     return d
 
 
-def build_order(plan: ExitPlanRecord, limits: Limits) -> dict:
-    """Re-validate the plan, then size it with tools.size.size_position (result unchanged).
+def _freshness_error(plan: ExitPlanRecord, limits: Limits, now: datetime) -> str | None:
+    """Why the plan may not be ordered at `now`, or None if it is fresh. Arithmetic in UTC."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        return "now must be timezone-aware"
+    try:
+        made = datetime.fromisoformat(plan.as_of)
+    except (ValueError, TypeError):
+        return "plan as_of is invalid"
+    if made.tzinfo is None or made.utcoffset() is None:
+        return "plan as_of is invalid"
+    made_utc = made.astimezone(UTC)
+    now_utc = now.astimezone(UTC)
+    if made_utc.astimezone(NY).date() != now_utc.astimezone(NY).date():
+        return "plan is from another session day"
+    if made_utc - now_utc > _SKEW:
+        return "plan is dated in the future"
+    age = int((now_utc - made_utc).total_seconds())  # whole seconds, rounded toward zero
+    if age > limits.max_plan_age_s:
+        return f"plan is {age}s old (max {limits.max_plan_age_s}s)"
+    return None
 
-    Never raises for a bad plan: returns {"ok": False, "reason": ...}.
+
+def build_order(plan: ExitPlanRecord, limits: Limits, now: datetime) -> dict:
+    """Re-validate the plan, check it is fresh at `now`, then size it (size_position result).
+
+    `now` must be timezone-aware. After the price re-validation the plan is refused if `now`
+    is naive, plan.as_of is not an aware ISO datetime, the plan is from another New York
+    session day, it is dated more than 5 s in the future, or it is older than
+    limits.max_plan_age_s. Never raises for a bad plan: returns {"ok": False, "reason": ...}.
     """
     try:
         validate_symbols([plan.symbol])
@@ -64,4 +93,7 @@ def build_order(plan: ExitPlanRecord, limits: Limits) -> dict:
         matches = False
     if not matches:
         return {"ok": False, "reason": "plan risk_per_share does not match entry - stop"}
+    stale = _freshness_error(plan, limits, now)
+    if stale is not None:
+        return {"ok": False, "reason": stale}
     return size_position(Plan(plan.symbol, entry, stop, target), limits)

@@ -55,6 +55,11 @@ def exit_plan(
     Stop = floor_cent(structure - buffer_atr * atr). Target = ceil_cent(entry + R * risk),
     where R = max(reward_multiple or min_reward_to_risk, min_reward_to_risk, 1.0).
     reward_multiple must be positive and at most limits.max_reward_multiple.
+
+    Minimum stop distance: a stop a few cents from entry is a noise stop that
+    sizing then pushes to the position cap. After the other checks, the plan is
+    refused when risk per share is below limits.min_risk_per_share, or, when an
+    ATR is given and limits.min_risk_atr_multiple > 0, below that multiple of ATR.
     """
     if setup not in SETUPS:
         return _refuse(f"unknown setup {setup!r}")
@@ -131,6 +136,18 @@ def exit_plan(
         )
 
     risk = entry - stop
+    if risk < limits.min_risk_per_share:
+        return _refuse(
+            f"risk per share {risk} is below min_risk_per_share {limits.min_risk_per_share}"
+        )
+    if (
+        atr_d is not None
+        and limits.min_risk_atr_multiple > 0
+        and risk < limits.min_risk_atr_multiple * atr_d
+    ):
+        return _refuse(
+            f"risk per share {risk} is below {limits.min_risk_atr_multiple} x ATR {atr_d}"
+        )
     target = (entry + r * risk).quantize(CENT, rounding=ROUND_CEILING)
     # Rounded down so the reported ratio never overstates the real one.
     rr = ((target - entry) / risk).quantize(CENT, rounding=ROUND_FLOOR)

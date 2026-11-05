@@ -327,10 +327,79 @@ def test_red_flags_entry_is_an_allowed_catalyst_name():
     assert run.ok is True
 
 
-def test_catalyst_name_is_case_sensitive_and_exact():
-    bad = end(catalysts=[{"name": "Earnings", "source": "get_news"}])
-    run, _ = go([call_news(), bad, bad])
-    assert reason_of(run) == "catalyst Earnings is not in get_news's output"
+ITEM_SESSION = ScriptSession({"get_news": (
+    {"headlines": [], "catalysts": ["earnings", "item_9.01"], "red_flags": ["bankruptcy"]},
+    False)})
+
+
+@pytest.mark.parametrize(("given", "stored"), [
+    ("Earnings", "earnings"),
+    (" earnings ", "earnings"),
+    ("EARNINGS", "earnings"),
+    ("earnings", "earnings"),
+    ("item 9.01", "item_9.01"),
+    ("Item-9.01", "item_9.01"),
+    ("item__9.01", "item_9.01"),
+    ("ITEM - 9.01", "item_9.01"),
+    ("  item_9.01  ", "item_9.01"),
+    ("Bankruptcy", "bankruptcy"),
+])
+def test_catalyst_name_variants_validate_and_store_the_tools_spelling(given, stored):
+    """Issue #53: case, surrounding space and runs of space/hyphen/underscore are ignored."""
+    run, client = go(
+        [call_news(), end(catalysts=[{"name": given, "source": "get_news"}])],
+        session=ScriptSession(copy.deepcopy(ITEM_SESSION.results)),
+    )
+    assert run.ok is True
+    assert [c.name for c in run.report.catalysts] == [stored]
+    assert len(client.calls) == 2  # no retry was spent
+
+
+def test_stored_spelling_is_the_tools_even_when_the_tool_uses_spaces():
+    session = ScriptSession({"get_news": (
+        {"headlines": [], "catalysts": ["Item 9.01"], "red_flags": []}, False)})
+    run, _ = go([call_news(), end(catalysts=[{"name": "item_9.01", "source": "get_news"}])],
+                session=session)
+    assert run.ok is True and run.report.catalysts[0].name == "Item 9.01"
+
+
+@pytest.mark.parametrize("invented", ["earning", "item 9.02", "earnings!", "ear nings",
+                                      "item9.01", "moon landing", "", "   "])
+def test_invented_catalyst_names_are_still_rejected(invented):
+    bad = end(catalysts=[{"name": invented, "source": "get_news"}])
+    run, client = go([call_news(), bad, bad],
+                     session=ScriptSession(copy.deepcopy(ITEM_SESSION.results)))
+    assert run.ok is False
+    assert run.reason == f"catalyst {invented} is not in get_news's output"
+    assert [e.source for e in run.report.evidence] == [NEUTRAL_SOURCE]
+    assert len(client.calls) == 3
+
+
+def test_normalisation_does_not_cross_sources():
+    session = ScriptSession({
+        "get_news": ({"catalysts": ["earnings"], "red_flags": []}, False),
+        "get_fundamentals": ({"catalysts": ["recent_10q"], "red_flags": []}, False),
+    })
+    # "Recent 10q" is a get_fundamentals catalyst, cited here against get_news
+    wrong = end(catalysts=[{"name": "Recent 10q", "source": "get_news"}])
+    q = [
+        response([tool_use("a", "get_news", {"symbol": "ABCD"}),
+                  tool_use("b", "get_fundamentals", {"symbol": "ABCD"})], "tool_use"),
+        wrong, wrong,
+    ]
+    run, _ = go(q, session=session)
+    assert run.ok is False
+    assert run.reason == "catalyst Recent 10q is not in get_news's output"
+
+
+def test_catalyst_description_says_copy_exactly_from_the_tool_lists():
+    from agents.schemas import Catalyst
+    desc = Catalyst.model_fields["name"].description
+    assert "copied exactly" in desc
+    assert "`catalysts`" in desc and "`red_flags`" in desc
+    assert "8-K item name" not in desc  # the old free-text nudge is gone
+    schema_desc = Catalyst.model_json_schema()["properties"]["name"]["description"]
+    assert schema_desc == desc
 
 
 def test_names_from_all_successful_calls_accumulate():
