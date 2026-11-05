@@ -11,8 +11,19 @@ class Evidence(BaseModel):
     source: str = Field(description="Tool or data the point came from")
 
 
+ReasonCode = Literal[
+    "api_error", "timeout", "cancelled", "refusal", "max_tokens",
+    "invalid_output", "tool_rounds", "config_error", "exception",
+]
+
+
 class Catalyst(BaseModel):
-    name: str = Field(description='Short event label, e.g. "earnings" or an 8-K item name')
+    name: str = Field(
+        description=(
+            "copied exactly from the cited tool's `catalysts` or `red_flags` list "
+            "(e.g. earnings, item_9.01, halt)"
+        )
+    )
     source: str = Field(description="The tool that returned it")
 
 
@@ -85,6 +96,7 @@ class AgentRunRecord(BaseModel):
     effort: str
     ok: bool
     reason: str | None = None
+    reason_code: ReasonCode | None = None  # None when ok
     duration_ms: int
     calls: list[CallRecord] = Field(default_factory=list)
 

@@ -8,6 +8,7 @@ Every API response is recorded as a CallRecord (requested vs serving model, fall
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from agents.schemas import (
     Evidence,
     ExitPlanRecord,
     IterationRecord,
+    ReasonCode,
     UsageRecord,
 )
 from pipeline.market import NY, ny_today
@@ -62,6 +64,7 @@ class AnalystRun:
     # Plans the plan_exit executor recorded. Use them downstream ONLY when ok is True; when
     # ok is False run_analyst sets this to [] (the report did not validate).
     exit_plans: list[ExitPlanRecord] = field(default_factory=list)
+    reason_code: ReasonCode | None = None  # None when ok (issue #52)
 
 
 # --------------------------------------------------------------------------
@@ -169,6 +172,7 @@ def call_record(response: Any, requested_model: str) -> CallRecord:
 class _Outcome:
     report: AnalystReport | None = None
     error: str = ""
+    code: ReasonCode = "invalid_output"
     pending: list[dict] = field(default_factory=list)  # tool_results owed to the model
 
 
@@ -211,6 +215,11 @@ class _Tracked:
                     if isinstance(items, list):
                         names.update(i for i in items if isinstance(i, str))
         return result, is_error
+
+
+def _is_api_error(exc: BaseException) -> bool:
+    """True for anthropic SDK errors (APIError family, incl. connection/timeout errors)."""
+    return any(c.__module__.split(".")[0] == "anthropic" for c in type(exc).__mro__)
 
 
 def _neutral(name: str, symbol: str, reason: str) -> AnalystReport:
@@ -271,6 +280,11 @@ def _tool_results(content: Any, session: ToolExecutor, *, refuse: str | None = N
     return results
 
 
+def _norm(name: str) -> str:
+    """Casefold, strip, and collapse runs of spaces/hyphens/underscores to one "_"."""
+    return re.sub(r"[\s_-]+", "_", name.casefold().strip())
+
+
 def _parse(
     content: Any, name: str, symbol: str, tracked: _Tracked
 ) -> tuple[AnalystReport | None, str]:
@@ -291,14 +305,18 @@ def _parse(
     for ev in report.evidence:
         if ev.source not in tracked.answered_tools:
             return None, f"evidence source {ev.source} is not a tool that answered in this run"
+    fixed = []
     for cat in report.catalysts:
         if cat.source not in ok_tools:
             return None, (
                 f"catalyst source {cat.source} is not a tool that returned data in this run"
             )
-        if cat.name not in tracked.allowed.get(cat.source, set()):
+        exact = {_norm(n): n for n in sorted(tracked.allowed.get(cat.source, set()))}
+        canonical = exact.get(_norm(cat.name))
+        if canonical is None:
             return None, f"catalyst {cat.name} is not in {cat.source}'s output"
-    return report.model_copy(update={"symbol": symbol}), ""
+        fixed.append(cat.model_copy(update={"name": canonical}))
+    return report.model_copy(update={"symbol": symbol, "catalysts": fixed}), ""
 
 
 def _loop(
@@ -321,7 +339,7 @@ def _loop(
             messages.append({"role": "assistant", "content": response.content})
             if i == config.max_tool_rounds:
                 return _Outcome(
-                    error="too many tool rounds",
+                    error="too many tool rounds", code="tool_rounds",
                     pending=_tool_results(content, session, refuse="tool round limit reached"),
                 )
             if stop == "tool_use":
@@ -339,9 +357,12 @@ def _loop(
             messages.append({"role": "assistant", "content": response.content})
         return _Outcome(
             error=f"model stopped with {stop}",
+            code="refusal" if stop == "refusal" else (
+                "max_tokens" if stop == "max_tokens" else "invalid_output"
+            ),
             pending=_tool_results(content, session, refuse="not executed"),
         )
-    return _Outcome(error="too many tool rounds")  # pragma: no cover
+    return _Outcome(error="too many tool rounds", code="tool_rounds")  # pragma: no cover
 
 
 def run_analyst(
@@ -373,12 +394,14 @@ def run_analyst(
     calls: list[CallRecord] = calls_sink if calls_sink is not None else []
     started = time.monotonic()
 
-    def finish(report: AnalystReport, ok: bool, reason: str | None) -> AnalystRun:
+    def finish(
+        report: AnalystReport, ok: bool, reason: str | None, code: ReasonCode | None = None
+    ) -> AnalystRun:
         ms = int((time.monotonic() - started) * 1000)
         plans = list(getattr(session, "exit_plans", [])) if ok else []
         return AnalystRun(
             report=report, ok=ok, reason=reason, calls=list(calls), duration_ms=ms,
-            exit_plans=plans,
+            exit_plans=plans, reason_code=None if ok else code,
         )
 
     try:
@@ -399,10 +422,13 @@ def run_analyst(
             })
             outcome = _loop(client, spec, config, messages, tracked, sym, calls)
         if outcome.report is None:
-            return finish(_neutral(spec.name, sym, outcome.error), False, outcome.error)
+            return finish(
+                _neutral(spec.name, sym, outcome.error), False, outcome.error, outcome.code
+            )
         return finish(outcome.report, True, None)
     except _Cancelled:
-        return finish(_neutral(spec.name, sym, "cancelled"), False, "cancelled")
+        return finish(_neutral(spec.name, sym, "cancelled"), False, "cancelled", "cancelled")
     except Exception as exc:  # noqa: BLE001 - must not raise; type name only, no secrets
         reason = type(exc).__name__
-        return finish(_neutral(spec.name, sym, reason), False, reason)
+        code: ReasonCode = "api_error" if _is_api_error(exc) else "exception"
+        return finish(_neutral(spec.name, sym, reason), False, reason, code)

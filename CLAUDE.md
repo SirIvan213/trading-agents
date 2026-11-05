@@ -78,6 +78,10 @@ qa-engineer → `tests/`, code-reviewer is read-only.
   plus `risk-sensitive` when it touches sizing, stops/targets, `risk_check`,
   limits, broker code or the paper/live switch. List the new issue numbers in
   the PR. A PR that fixes an issue says `Fixes #N` in its description.
+  Label a follow-up `before-phase-N` only if it could lose money or corrupt
+  data in phase N; everything else is `hardening`. Work that phase N's own
+  build will deliver stays in that phase's milestone without the
+  `before-phase-N` label, with a comment saying so.
 - **Phase gate.** Before starting phase N, check
   `gh issue list --label before-phase-N --state open`. If any are open, fix
   them first or tell Ivan which ones remain.

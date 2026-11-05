@@ -32,6 +32,12 @@ class Limits:
     flat_by: time
     blocked_symbols: frozenset[str] = field(default_factory=frozenset)
     max_reward_multiple: Decimal = Decimal("5")
+    # Minimum stop distance (#66): a stop a few cents from entry is a noise stop
+    # that sizing pushes to the position cap. ATR part is off when the multiple is 0.
+    min_risk_per_share: Decimal = Decimal("0.10")
+    min_risk_atr_multiple: Decimal = Decimal("1.0")
+    # Maximum age of an exit plan at order time (#67), in seconds.
+    max_plan_age_s: int = 300
 
 
 def _hhmm(s: str) -> time:
@@ -85,8 +91,17 @@ def validate_limits(limits: Limits) -> None:
     for name in (
         "account_cash", "max_loss_per_trade", "max_position_value",
         "daily_loss_limit", "min_reward_to_risk", "max_reward_multiple",
+        "min_risk_per_share",
     ):
         positive(name)
+    atr_mult = limits.min_risk_atr_multiple
+    if not isinstance(atr_mult, Decimal) or not atr_mult.is_finite():
+        problems.append(f"min_risk_atr_multiple must be a finite number, got {atr_mult!r}")
+    elif atr_mult < 0:
+        problems.append(f"min_risk_atr_multiple must be at least 0, got {atr_mult}")
+    age = limits.max_plan_age_s
+    if isinstance(age, bool) or not isinstance(age, int) or age < 1:
+        problems.append(f"max_plan_age_s must be an integer of at least 1, got {age!r}")
     buf = limits.cash_buffer_pct
     if not isinstance(buf, Decimal) or not buf.is_finite():
         problems.append(f"cash_buffer_pct must be a finite number, got {buf!r}")
@@ -148,6 +163,19 @@ def limits_from_dict(d: dict) -> Limits:
         max_trades = None
     if max_trades is None:
         raise ValueError(f"max_trades_per_day: not an integer: {raw_trades!r}")
+    raw_age = d.get("max_plan_age_s", 300)
+    if isinstance(raw_age, bool):
+        max_age = None
+    elif isinstance(raw_age, int):
+        max_age = raw_age
+    elif isinstance(raw_age, float):
+        max_age = int(raw_age) if raw_age.is_integer() else None
+    elif isinstance(raw_age, str) and re.fullmatch(r"[0-9]+", raw_age.strip()):
+        max_age = int(raw_age.strip())
+    else:
+        max_age = None
+    if max_age is None:
+        raise ValueError(f"max_plan_age_s: not an integer: {raw_age!r}")
     limits = Limits(
         paper=bool(d["paper"]),
         account_cash=_dec(d, "account_cash"),
@@ -162,6 +190,9 @@ def limits_from_dict(d: dict) -> Limits:
         flat_by=_time(d["flat_by"], "flat_by"),
         blocked_symbols=_blocked(d.get("blocked_symbols", [])),
         max_reward_multiple=_dec(d, "max_reward_multiple", "5"),
+        min_risk_per_share=_dec(d, "min_risk_per_share", "0.10"),
+        min_risk_atr_multiple=_dec(d, "min_risk_atr_multiple", "1.0"),
+        max_plan_age_s=max_age,
     )
     validate_limits(limits)
     return limits

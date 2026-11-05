@@ -142,11 +142,17 @@ def test_ten_k_full_year_is_skipped_and_noted(cf):
     assert all(r["start"] != "2025-01-01" or r["end"] != "2025-12-31" for r in out["quarters"])
     wide = E.earnings_facts(cf, NOV3, quarters=20)["quarters"]
     assert "2025-12-31" not in [r["end"] for r in wide]
-    # three concepts carry a 10-K full-year entry filed 2026-02-25
+    # three concepts carry a 10-K full-year entry filed 2026-02-25. This fixture has NO 9-month
+    # YTD figure, so Q4 cannot be derived (FY - 9M) and the full-year entries stay unused.
     assert out["notes"] == [
         "skipped 3 non-quarterly duration entries (full-year/year-to-date; "
-        "Q4 not derived by subtraction)"
+        "used only to derive Q4 where both are filed)"
     ]
+    assert not any(r["derived"] for r in wide_rows(cf))
+
+
+def wide_rows(cf):
+    return E.earnings_facts(cf, NOV3, quarters=20)["quarters"]
 
 
 def test_ten_k_not_noted_before_it_was_filed(cf):
@@ -587,15 +593,70 @@ def test_b2_value_comes_from_the_latest_filing_known_at_as_of(real):
     assert "2026-09-30" not in before
 
 
-def test_restatement_catalyst_only_when_visible_and_returned(real):
-    # Q3 2025 is among the 4 returned quarters at Nov 3 and its value changed
-    assert "restatement" in E.earnings_facts(real, NOV3)["catalysts"]
-    # a day earlier the restated comparative is not public: no restatement
-    assert "restatement" not in E.earnings_facts(real, date(2026, 11, 2))["catalysts"]
-    # Q1 2025 (restated 2026-05-07) is returned only with a wider window
+def test_recast_comparative_only_when_visible_and_returned(real):
+    # Issue #51: a changed comparative value from a NON-/A filing is "recast_comparative",
+    # never "restatement". Q3 2025 (1,200,000 -> 1,210,000 in the 2026-11-03 10-Q) is the 5th
+    # newest quarter once Q4 2025 is derived, so quarters=4 does not return it...
+    assert E.earnings_facts(real, NOV3)["catalysts"] == ["recent_10q"]
+    # ...and a wider window does.
+    out5 = E.earnings_facts(real, NOV3, quarters=5)
+    assert out5["catalysts"] == ["recast_comparative", "recent_10q"]
+    # a day earlier the restated comparative is not public: no recast
+    assert E.earnings_facts(real, date(2026, 11, 2), quarters=5)["catalysts"] == []
+    # Q1 2025 (recast 2026-05-07) is returned only with a wider window (documented behaviour)
     oct1 = date(2026, 10, 1)
     assert E.earnings_facts(real, oct1)["catalysts"] == []
-    assert E.earnings_facts(real, oct1, quarters=10)["catalysts"] == ["restatement"]
+    assert E.earnings_facts(real, oct1, quarters=10)["catalysts"] == ["recast_comparative"]
+
+
+def test_split_adjusted_eps_recast_is_not_a_restatement():
+    # EPS 0.40 as first filed, 0.20 in a later 10-Q after a 2-for-1 split: a recast comparative.
+    eps = [
+        q(*OLD, 0.40, "2025-08-05", fy=2025),
+        q(*NEW, 0.25, "2026-08-05"),
+        q(*OLD, 0.20, "2026-08-05"),  # same period repeated, split adjusted, form 10-Q
+    ]
+    out = E.earnings_facts(build(eps=eps), date(2026, 9, 30))
+    by = {r["end"]: r for r in out["quarters"]}
+    assert by["2025-06-30"]["eps_diluted"] == "0.2"
+    assert out["catalysts"] == ["recast_comparative"]
+    assert "restatement" not in out["catalysts"]
+
+
+def test_10q_amendment_is_a_restatement_not_a_recast():
+    rev = [
+        q(*NEW, 100, "2026-08-05"),
+        q(*NEW, 110, "2026-08-20", form="10-Q/A"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 9, 30))
+    assert out["catalysts"] == ["restatement"]
+
+
+def test_10k_amendment_is_a_restatement():
+    rev = [
+        q("2025-10-01", "2025-12-31", 100, "2026-02-25", form="10-K"),
+        q("2025-10-01", "2025-12-31", 101, "2026-03-20", form="10-K/A"),
+    ]
+    assert E.earnings_facts(build(revenue=rev), date(2026, 6, 1))["catalysts"] == ["restatement"]
+
+
+def test_same_value_in_later_filing_is_neither_recast_nor_restatement():
+    rev = [q(*NEW, 100, "2026-08-05"), q(*NEW, 100, "2026-11-05")]
+    assert E.earnings_facts(build(revenue=rev), date(2026, 12, 1))["catalysts"] == []
+
+
+def test_restatement_window_follows_quarters_for_amendments():
+    # An amended OLD quarter fires only when it is among the returned quarters.
+    rev = [
+        q(*OLD, 90, "2025-08-05", fy=2025), q(*OLD, 95, "2025-09-10", form="10-Q/A", fy=2025),
+        q("2025-07-01", "2025-09-30", 100, "2025-11-05", fy=2025),
+        q("2025-10-01", "2025-12-31", 110, "2026-02-25"),
+        q("2026-01-01", "2026-03-31", 120, "2026-05-05"),
+        q(*NEW, 130, "2026-08-05"),
+    ]
+    d = date(2026, 12, 1)
+    assert "restatement" not in E.earnings_facts(build(revenue=rev), d, quarters=4)["catalysts"]
+    assert "restatement" in E.earnings_facts(build(revenue=rev), d, quarters=5)["catalysts"]
 
 
 def test_restatement_catalyst_for_amendment_form(cf):
@@ -614,9 +675,9 @@ def test_growth_uses_restated_comparative(real):
 
 
 @pytest.mark.parametrize(("as_of", "expected"), [
-    (date(2026, 11, 3), ["recent_10q", "restatement"]),   # 0 days after the 10-Q
-    (date(2026, 11, 8), ["recent_10q", "restatement"]),   # 5 days: still recent
-    (date(2026, 11, 9), ["restatement"]),                 # 6 days: no longer recent
+    (date(2026, 11, 3), ["recent_10q"]),   # 0 days after the 10-Q
+    (date(2026, 11, 8), ["recent_10q"]),   # 5 days: still recent
+    (date(2026, 11, 9), []),               # 6 days: no longer recent
     (date(2026, 11, 2), []),                              # before the filing
 ])
 def test_recent_10q_window_is_five_days(real, as_of, expected):
@@ -648,7 +709,8 @@ def test_recent_10k_from_newest_quarter_form():
 def test_catalysts_are_sorted_and_from_the_allowed_set(real):
     for as_of in (NOV3, date(2026, 11, 8), date(2026, 2, 27), date(2026, 10, 1)):
         c = E.earnings_facts(real, as_of, quarters=10)["catalysts"]
-        assert c == sorted(c) and set(c) <= {"recent_10q", "recent_10k", "restatement"}
+        allowed = {"recent_10q", "recent_10k", "restatement", "recast_comparative"}
+        assert c == sorted(c) and set(c) <= allowed
 
 
 def test_ytd_durations_are_skipped(real):
@@ -664,9 +726,12 @@ def test_ytd_durations_are_skipped(real):
     assert not revenues & {"2100000", "3300000", "4600000", "2400000", "3800000"}
     assert "220000" not in {r["net_income"] for r in out["quarters"]}
     # revenue: 6mo 2025, 9mo 2025, FY 2025 10-K, 6mo 2026, 9mo 2026 ; net income: 6mo 2026 => 6
+    # (the 9-month and full-year entries are used only to derive Q4; EPS is never derived)
     assert out["notes"] == [
+        "eps_diluted not derived for Q4 ending 2025-12-31 "
+        "(share counts differ; EPS is never derived by subtraction)",
         "skipped 6 non-quarterly duration entries (full-year/year-to-date; "
-        "Q4 not derived by subtraction)"
+        "used only to derive Q4 where both are filed)",
     ]
 
 
@@ -674,8 +739,10 @@ def test_ytd_count_depends_on_as_of(real):
     # at 2026-10-01 the 9-month 2026 YTD (filed 2026-11-03) is not public: 5 skipped
     out = E.earnings_facts(real, date(2026, 10, 1))
     assert out["notes"] == [
+        "eps_diluted not derived for Q4 ending 2025-12-31 "
+        "(share counts differ; EPS is never derived by subtraction)",
         "skipped 5 non-quarterly duration entries (full-year/year-to-date; "
-        "Q4 not derived by subtraction)"
+        "used only to derive Q4 where both are filed)",
     ]
 
 
@@ -705,3 +772,154 @@ def test_extreme_growth_ratio_is_none_with_note():
     assert out["ok"] is True
     assert out["growth"]["revenue_yoy_pct"] is None
     assert "revenue_yoy_pct not computable (extreme ratio)" in out["notes"]
+
+
+# ---------------- issue #54: derived Q4 = full year - 9-month YTD ----------------
+
+FY25 = ("2025-01-01", "2025-12-31")    # 364 days
+NINE25 = ("2025-01-01", "2025-09-30")  # 272 days
+FY24 = ("2024-01-01", "2024-12-31")
+NINE24 = ("2024-01-01", "2024-09-30")
+
+
+def synth(nine_filed="2025-11-05", fy_filed="2026-02-25", extra_rev=()):
+    rev = [
+        q(*NINE25, 3000, nine_filed, fy=2025, fp="Q3"),
+        q(*FY25, 4000, fy_filed, form="10-K", fy=2025, fp="FY"),
+        q("2025-07-01", "2025-09-30", 1100, "2025-11-05", fy=2025, fp="Q3"),
+        *extra_rev,
+    ]
+    ni = [
+        q(*NINE25, 300, nine_filed, fy=2025, fp="Q3"),
+        q(*FY25, 420, fy_filed, form="10-K", fy=2025, fp="FY"),
+        q("2025-07-01", "2025-09-30", 110, "2025-11-05", fy=2025, fp="Q3"),
+    ]
+    eps = [
+        q(*NINE25, 1.00, nine_filed, fy=2025, fp="Q3"),
+        q(*FY25, 1.40, fy_filed, form="10-K", fy=2025, fp="FY"),
+        q("2025-07-01", "2025-09-30", 0.33, "2025-11-05", fy=2025, fp="Q3"),
+    ]
+    return build(revenue=rev, net_income=ni, eps=eps)
+
+
+def test_derived_q4_values_fields_and_sources():
+    out = E.earnings_facts(synth(), date(2026, 3, 1))
+    row = out["quarters"][0]
+    # revenue: 4,000 (FY2025) - 3,000 (9M 2025) = 1,000 ; net income: 420 - 300 = 120
+    assert (row["revenue"], row["net_income"]) == ("1000", "120")
+    assert row["start"] == "2025-10-01" and row["end"] == "2025-12-31"  # 9M end + 1 day .. FY end
+    assert row["fp"] == "Q4" and row["fy"] == 2025
+    assert row["derived"] is True and row["derived_metrics"] == ["revenue", "net_income"]
+    assert row["sources"] == {
+        "full_year": {"form": "10-K", "first_filed": "2026-02-25"},
+        "nine_months": {"form": "10-Q", "first_filed": "2025-11-05"},
+    }
+    assert row["first_filed"] == "2026-02-25" and row["last_filed"] == "2026-02-25"
+    # the real quarter before it is not marked derived and carries no sources
+    prev = out["quarters"][1]
+    assert prev["end"] == "2025-09-30" and prev["derived"] is False
+    assert prev["derived_metrics"] == [] and "sources" not in prev
+
+
+def test_derived_q4_eps_is_none_with_a_note():
+    out = E.earnings_facts(synth(), date(2026, 3, 1))
+    assert out["quarters"][0]["eps_diluted"] is None  # 1.40 - 1.00 would be wrong: shares differ
+    assert "eps_diluted" not in out["quarters"][0]["derived_metrics"]
+    assert (
+        "eps_diluted not derived for Q4 ending 2025-12-31 "
+        "(share counts differ; EPS is never derived by subtraction)"
+    ) in out["notes"]
+
+
+def test_q4_not_derived_when_a_real_quarter_exists():
+    real_q4 = q("2025-10-01", "2025-12-31", 1050, "2026-02-25", form="10-K", fy=2025, fp="Q4")
+    out = E.earnings_facts(synth(extra_rev=[real_q4]), date(2026, 3, 1))
+    row = out["quarters"][0]
+    assert row["end"] == "2025-12-31" and row["revenue"] == "1050"  # not 1,000
+    # net income has no real Q4, so only that metric is derived on the same period
+    assert row["derived_metrics"] == ["net_income"] and row["net_income"] == "120"
+    assert row["derived"] is True
+    only_rev = build(revenue=[
+        q(*NINE25, 3000, "2025-11-05"), q(*FY25, 4000, "2026-02-25", form="10-K"), real_q4])
+    out = E.earnings_facts(only_rev, date(2026, 3, 1))
+    assert out["quarters"][0]["revenue"] == "1050"
+    assert out["quarters"][0]["derived"] is False and "sources" not in out["quarters"][0]
+
+
+def test_q4_not_derived_when_nine_month_filed_after_as_of():
+    late = synth(nine_filed="2026-03-10")
+    out = E.earnings_facts(late, date(2026, 3, 1))
+    assert [r["end"] for r in out["quarters"]] == ["2025-09-30"]  # nothing derived
+    assert not any(r["derived"] for r in out["quarters"])
+    out = E.earnings_facts(late, date(2026, 3, 11))  # now both are public
+    row = out["quarters"][0]
+    assert row["derived"] is True and row["revenue"] == "1000"
+    assert row["first_filed"] == "2026-03-10"  # the later of the two sources
+
+
+def test_q4_not_derived_when_full_year_not_yet_filed():
+    out = E.earnings_facts(synth(), date(2026, 2, 24))  # 10-K filed 2026-02-25
+    assert [r["end"] for r in out["quarters"]] == ["2025-09-30"]
+    assert not any(r["derived"] for r in out["quarters"])
+
+
+def test_q4_not_derived_without_matching_start_dates():
+    rev = [
+        q("2025-02-01", "2025-09-30", 3000, "2025-11-05"),   # 9M starts a month late
+        q(*FY25, 4000, "2026-02-25", form="10-K"),
+        q("2025-07-01", "2025-09-30", 1100, "2025-11-05"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 3, 1))
+    assert not any(r["derived"] for r in out["quarters"])
+
+
+def test_yoy_growth_uses_derived_rows():
+    rev = [
+        q(*NINE24, 2700, "2024-11-05", fy=2024), q(*FY24, 3700, "2025-02-25", form="10-K"),
+        q(*NINE25, 3000, "2025-11-05"), q(*FY25, 4000, "2026-02-25", form="10-K"),
+    ]
+    ni = [
+        q(*NINE24, 300, "2024-11-05", fy=2024), q(*FY24, 400, "2025-02-25", form="10-K"),
+        q(*NINE25, 300, "2025-11-05"), q(*FY25, 420, "2026-02-25", form="10-K"),
+    ]
+    out = E.earnings_facts(build(revenue=rev, net_income=ni), date(2026, 3, 1))
+    new, old = out["quarters"][0], out["quarters"][1]
+    assert (new["end"], new["derived"], new["revenue"]) == ("2025-12-31", True, "1000")
+    assert (old["end"], old["derived"], old["revenue"]) == ("2024-12-31", True, "1000")
+    # revenue Q4'25 = 4,000 - 3,000 = 1,000 ; Q4'24 = 3,700 - 2,700 = 1,000 -> 0.00%
+    assert out["growth"]["revenue_yoy_pct"] == "0.00"
+    # net income Q4'25 = 420 - 300 = 120 ; Q4'24 = 400 - 300 = 100 -> (120-100)/100 = 20.00%
+    assert out["growth"]["net_income_yoy_pct"] == "20.00"
+    assert out["growth"]["eps_yoy_pct"] is None  # no EPS series at all
+
+
+def test_yoy_growth_against_a_derived_prior_year_quarter():
+    # newest quarter is a REAL Q4'25; the year-ago Q4'24 is derived: 3,700 - 2,700 = 1,000
+    rev = [
+        q(*NINE24, 2700, "2024-11-05", fy=2024), q(*FY24, 3700, "2025-02-25", form="10-K"),
+        q("2025-10-01", "2025-12-31", 1250, "2026-02-25"),
+    ]
+    out = E.earnings_facts(build(revenue=rev), date(2026, 3, 1))
+    assert out["quarters"][1]["derived"] is True
+    assert out["growth"]["revenue_yoy_pct"] == "25.00"  # (1,250 - 1,000) / 1,000
+
+
+def test_derived_q4_on_realistic_fixture():
+    real = load_fixture("sec_companyfacts_abcd_realistic.json")
+    out = E.earnings_facts(real, NOV3)
+    row = out["quarters"][3]
+    # revenue FY2025 10-K 4,600,000 - 9M 2025 3,300,000 = 1,300,000
+    assert (row["end"], row["revenue"], row["fp"], row["derived"]) == (
+        "2025-12-31", "1300000", "Q4", True)
+    assert row["net_income"] is None and row["eps_diluted"] is None  # no FY net income there
+    assert row["derived_metrics"] == ["revenue"]
+    assert row["sources"]["full_year"] == {"form": "10-K", "first_filed": "2026-02-25"}
+    assert row["sources"]["nine_months"] == {"form": "10-Q", "first_filed": "2025-11-06"}
+    # point in time: before the 10-K there is no Q4 and Q3'25 is the newest 2025 quarter
+    early = E.earnings_facts(real, date(2026, 2, 24))
+    assert early["quarters"][0]["end"] == "2025-09-30" and not early["quarters"][0]["derived"]
+
+
+def test_derived_result_is_json_serialisable():
+    import json
+    json.dumps(E.earnings_facts(synth(), date(2026, 3, 1)))

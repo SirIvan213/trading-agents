@@ -31,6 +31,9 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
 
     `order` is the bracket order written by tools.size.size_position.
     `now` must be timezone-aware; it is converted to New York time.
+    Minimum stop distance: entry - stop below limits.min_risk_per_share is blocked,
+    because a stop a few cents from entry is a noise stop that sizing pushes to the
+    position cap. No ATR is available here, so only the absolute minimum is enforced.
     Only the 8 fields in ORDER_FIELDS are accepted (symbol, side, qty, type,
     order_class, entry, stop_loss, take_profit). Any other key adds a BLOCK reason, and a
     non-dict order is blocked outright. Analyst confidence and other analyst output must
@@ -153,3 +156,8 @@ def _numeric_rules(
                 f"reward:risk {rr:.2f} over cap {limits.max_reward_multiple} "
                 f"(beyond one-cent rounding tolerance)"
             )
+
+    if 0 < risk_per_share < limits.min_risk_per_share:
+        reasons.append(
+            f"risk per share {risk_per_share} below minimum {limits.min_risk_per_share}"
+        )

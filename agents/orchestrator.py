@@ -15,7 +15,13 @@ from typing import Any
 from agents.fundamentals import run_fundamentals
 from agents.llm import AgentConfig, config_for
 from agents.runner import NEUTRAL_SOURCE, AnalystRun, neutral_report
-from agents.schemas import AgentRunRecord, CallRecord, DecisionPacket, ExitPlanRecord
+from agents.schemas import (
+    AgentRunRecord,
+    CallRecord,
+    DecisionPacket,
+    ExitPlanRecord,
+    ReasonCode,
+)
 from agents.sentiment import run_sentiment
 from agents.technical import run_technical
 from pipeline.market import NY, ny_today
@@ -87,7 +93,8 @@ async def _one(
         )
         record = AgentRunRecord(
             agent=agent, requested_model=config.model, effort=config.effort, ok=run.ok,
-            reason=run.reason, duration_ms=run.duration_ms, calls=run.calls,
+            reason=run.reason, reason_code=run.reason_code, duration_ms=run.duration_ms,
+            calls=run.calls,
         )
         return run.report, record, (list(run.exit_plans) if run.ok else [])
     except asyncio.CancelledError:
@@ -96,9 +103,14 @@ async def _one(
     except Exception as exc:  # noqa: BLE001 - includes TimeoutError; the run must not crash
         cancel.set()  # ask a still-running worker to stop at its next request/tool call
         reason = "timeout" if isinstance(exc, TimeoutError) else f"failed ({type(exc).__name__})"
+        code: ReasonCode = (
+            "timeout" if isinstance(exc, TimeoutError)
+            else "config_error" if isinstance(exc, ValueError)
+            else "exception"
+        )
         record = AgentRunRecord(
             agent=agent, requested_model=config.model, effort=config.effort, ok=False,
-            reason=reason, duration_ms=int((time.monotonic() - started) * 1000),
+            reason=reason, reason_code=code, duration_ms=int((time.monotonic() - started) * 1000),
             calls=list(calls),
         )
         return neutral_report(agent, symbol, reason), record, []

@@ -52,6 +52,7 @@ ROOT = Path(__file__).resolve().parent.parent
 NY = ZoneInfo("America/New_York")
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
 MON_1015 = datetime(2026, 10, 19, 10, 15, tzinfo=NY)
+FRESH = datetime(2026, 10, 19, 10, 15, 30, tzinfo=NY)  # 30 s after plan_record()'s as_of
 
 AAPL_LEVELS = {
     "session_low": "99.70", "session_high": "103.20", "last_close": "103.10",
@@ -587,8 +588,8 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
         symbol="TSLA", action="BUY", confidence=0.99, setup=rec.setup,
         reasoning="; ".join(FAKE_TEXT))
     assert decision.symbol == dirty.symbol and decision.action == "BUY"
-    o_clean = build_order(select_plan(clean, "plan-1"), LIMITS)
-    o_dirty = build_order(select_plan(dirty, "plan-1"), LIMITS)
+    o_clean = build_order(select_plan(clean, "plan-1"), LIMITS, FRESH)
+    o_dirty = build_order(select_plan(dirty, "plan-1"), LIMITS, FRESH)
     assert o_clean == o_dirty
     assert o_clean["ok"] is True
     assert o_clean["order"]["entry"] == "364.18" and o_clean["order"]["stop_loss"] == "358.32"
@@ -602,7 +603,7 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
 def test_build_order_is_sized_by_size_position_unchanged():
     rec = plan_record()
     direct = size_position(Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS)
-    assert build_order(rec, LIMITS) == direct
+    assert build_order(rec, LIMITS, FRESH) == direct
 
 
 # ---- AST guard ----
@@ -750,7 +751,8 @@ def test_check_order_signature_pinned():
 
 
 def test_build_order_signature_pinned():
-    assert _params(build_order) == ["plan", "limits"]
+    # Deliberately changed in issue #67: the order path now takes the clock.
+    assert _params(build_order) == ["plan", "limits", "now"]
 
 
 def test_select_plan_signature_pinned():
@@ -860,7 +862,7 @@ def test_two_confidences_same_plan_same_order():
 
     def order_for(decision, packet):
         assert decision.symbol == packet.symbol
-        return build_order(select_plan(packet, "plan-1"), LIMITS)
+        return build_order(select_plan(packet, "plan-1"), LIMITS, FRESH)
 
     o_lo = order_for(d_lo, lo)
     o_hi = order_for(d_hi, hi)
@@ -878,7 +880,7 @@ def test_size_position_has_no_way_to_receive_confidence():
     with pytest.raises(TypeError):
         size_position(REAL_PLAN, LIMITS, 0.99)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
-        build_order(plan_record(), LIMITS, confidence=0.99)  # type: ignore[call-arg]
+        build_order(plan_record(), LIMITS, FRESH, confidence=0.99)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         Plan("TSLA", D("1"), D("1"), D("2"), confidence=0.9)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
@@ -898,7 +900,7 @@ def test_build_order_passes_size_position_exactly_plan_and_limits(monkeypatch):
         return real(*args)
 
     monkeypatch.setattr(orders, "size_position", strict)
-    out = build_order(plan_record(), LIMITS)
+    out = build_order(plan_record(), LIMITS, FRESH)
     assert out["ok"] is True and len(seen) == 1
 
 
@@ -997,13 +999,13 @@ REFUSALS = [
 
 @pytest.mark.parametrize(("over", "reason"), REFUSALS)
 def test_build_order_refuses_invalid_plan_without_sizing(size_spy, over, reason):
-    out = build_order(raw_plan(**over), LIMITS)
+    out = build_order(raw_plan(**over), LIMITS, FRESH)
     assert out == {"ok": False, "reason": reason}
     assert size_spy == []  # size_position was never reached
 
 
 def test_build_order_valid_record_still_sizes_exactly_as_before(size_spy):
-    out = build_order(plan_record(), LIMITS)
+    out = build_order(plan_record(), LIMITS, FRESH)
     direct = size_position(REAL_PLAN, LIMITS)
     assert out == direct and out["ok"] is True
     assert len(size_spy) == 1
@@ -1011,7 +1013,7 @@ def test_build_order_valid_record_still_sizes_exactly_as_before(size_spy):
 
 
 def test_build_order_model_construct_valid_record_also_sizes(size_spy):
-    assert build_order(raw_plan(), LIMITS) == size_position(REAL_PLAN, LIMITS)
+    assert build_order(raw_plan(), LIMITS, FRESH) == size_position(REAL_PLAN, LIMITS)
     assert len(size_spy) == 1
 
 
