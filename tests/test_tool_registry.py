@@ -14,6 +14,10 @@ from tools.exit_plan import exit_plan as real_exit_plan
 from tools.scan import ScanCriteria
 
 REFUSAL = "opening_range and atr come from get_bars, not from the model"
+LEVEL_MSG = (
+    "level must be one of get_bars price_levels: "
+    "session_low, session_high, last_close, or_low, or_high, vwap"
+)
 SENTINEL = "sk-ant-SENTINEL-1234567890"
 
 
@@ -65,17 +69,17 @@ def test_plan_exit_uses_fixture_opening_range(spy):
     summary, err = s.execute("get_bars", {"symbol": "AAPL"})
     assert err is False
     assert summary["opening_range"]["low"] == "99.7"
-    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.50"})
+    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
     assert err is False
     assert len(spy) == 1
     args, kwargs = spy[0]
-    assert args[0] == "orb" and args[1] == Decimal("102.50")
+    assert args[0] == "orb" and args[1] == Decimal("102.00")
     assert kwargs["opening_range"] == summary["opening_range"]
     assert kwargs["atr"] == Decimal("0.8151")
     # stop = floor(99.7 - 0.10 * 0.8151) = 99.61
     assert res["ok"] is True
     assert res["stop"] == "99.61"
-    assert res["risk_per_share"] == "2.89"
+    assert res["risk_per_share"] == "2.39"
 
 
 def test_plan_exit_before_get_bars(spy):
@@ -87,9 +91,9 @@ def test_plan_exit_before_get_bars(spy):
 def test_level_inside_range_passes(spy):
     s = make()
     s.execute("get_bars", {"symbol": "AAPL"})
-    res, err = s.execute("plan_exit", {"setup": "level", "entry": "102.50", "level": "100.00"})
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "99.70"})
     assert err is False and res["ok"] is True
-    assert res["stop"] == "99.91"  # floor(100 - 0.08151)
+    assert res["stop"] == "99.61"  # floor(99.70 - 0.08151)
     assert len(spy) == 1
 
 
@@ -105,8 +109,8 @@ def test_level_at_session_boundary_passes(level):
 def test_level_outside_range_refused(spy, level):
     s = make()
     s.execute("get_bars", {"symbol": "AAPL"})
-    res, err = s.execute("plan_exit", {"setup": "level", "entry": "102.50", "level": level})
-    assert (res, err) == ({"error": "level must be within today's session range"}, True)
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": level})
+    assert (res, err) == ({"error": LEVEL_MSG}, True)
     assert spy == []
 
 
@@ -131,7 +135,7 @@ def test_junk_level_refused(spy, bad):
 def test_level_setup_without_level_refused():
     s = make()
     s.execute("get_bars", {"symbol": "AAPL"})
-    res, err = s.execute("plan_exit", {"setup": "level", "entry": "102.50"})
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": "103.10"})
     assert (res, err) == ({"error": "level setup needs a level"}, True)
 
 

@@ -21,6 +21,7 @@ from agents.schemas import (
     AnalystReport,
     CallRecord,
     Evidence,
+    ExitPlanRecord,
     IterationRecord,
     UsageRecord,
 )
@@ -58,6 +59,9 @@ class AnalystRun:
     reason: str | None
     calls: list[CallRecord]
     duration_ms: int
+    # Plans the plan_exit executor recorded. Use them downstream ONLY when ok is True; when
+    # ok is False run_analyst sets this to [] (the report did not validate).
+    exit_plans: list[ExitPlanRecord] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -371,7 +375,11 @@ def run_analyst(
 
     def finish(report: AnalystReport, ok: bool, reason: str | None) -> AnalystRun:
         ms = int((time.monotonic() - started) * 1000)
-        return AnalystRun(report=report, ok=ok, reason=reason, calls=list(calls), duration_ms=ms)
+        plans = list(getattr(session, "exit_plans", [])) if ok else []
+        return AnalystRun(
+            report=report, ok=ok, reason=reason, calls=list(calls), duration_ms=ms,
+            exit_plans=plans,
+        )
 
     try:
         tracked = _Tracked(session, cancel)

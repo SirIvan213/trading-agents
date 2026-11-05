@@ -63,7 +63,7 @@ def happy_queue():
     return [
         response([tool_use("t1", "get_bars", {"symbol": "AAPL"})], "tool_use"),
         response(
-            [tool_use("t2", "plan_exit", {"setup": "orb", "entry": "102.50"})], "tool_use"
+            [tool_use("t2", "plan_exit", {"setup": "orb", "entry": "102.00"})], "tool_use"
         ),
         good(),
     ]
@@ -132,7 +132,7 @@ def test_tool_results_roundtrip_and_ids():
     (r2,) = m3[4]["content"]
     assert r2["tool_use_id"] == "t2" and r2["is_error"] is False
     plan = json.loads(r2["content"])
-    assert plan["ok"] is True and plan["stop"] == "99.61"
+    assert plan["ok"] is True and plan["stop"] == "99.61" and plan["plan_id"] == "plan-1"
 
 
 def test_parallel_tool_calls_come_back_in_one_user_message():

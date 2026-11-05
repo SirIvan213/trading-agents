@@ -80,12 +80,12 @@ def test_bars_from_another_day_yield_no_bars_and_orb_refused(spy):
     summary, err = s.execute("get_bars", {"symbol": "AAPL"})
     assert err is False
     assert summary["bars"] == 0 and summary["opening_range"] is None
-    _, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.50"})
-    assert err is True  # no session range, so the entry cannot be validated
+    _, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    assert err is True  # no price_levels, so the entry cannot be validated
     assert spy == []
     _, err = s.execute(
         "plan_exit",
-        {"setup": "orb", "entry": "102.50", "opening_range": {"low": "1", "complete": True}},
+        {"setup": "orb", "entry": "102.00", "opening_range": {"low": "1", "complete": True}},
     )
     assert err is True and spy == []
 
@@ -214,9 +214,14 @@ def test_only_pipeline_market_reaches_scan():
 
 # ---- 6. entry within session range, symbol validation ----
 
+ENTRY_MSG = (
+    "entry must be one of get_bars price_levels: "
+    "session_low, session_high, last_close, or_low, or_high, vwap"
+)
+
 SETUPS = [
     ("orb", {}),
-    ("level", {"level": "100.00"}),
+    ("level", {"level": "99.70"}),
 ]
 
 
@@ -226,7 +231,7 @@ def test_entry_outside_session_range_refused(spy, setup, extra, entry):
     s = make()
     s.execute("get_bars", {"symbol": "AAPL"})
     res, err = s.execute("plan_exit", {"setup": setup, "entry": entry, **extra})
-    assert (res, err) == ({"error": "entry must be within today's session range"}, True)
+    assert (res, err) == ({"error": ENTRY_MSG}, True)
     assert spy == []
 
 
