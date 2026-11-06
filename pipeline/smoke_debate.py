@@ -16,9 +16,11 @@ then TRADING_AGENTS_MODEL / _EFFORT, then the defaults); --model / --effort over
 agents (technical, sentiment, fundamentals, bull, bear). Debate rounds come from
 TRADING_AGENTS_DEBATE_ROUNDS (default 2). Risk limits are loaded and validated as in a real run.
 
-Exit codes: 0 = all three analysts and every debate turn produced validated output;
-1 = something fell back (a neutral analyst report, a missing Bull case or a fail-closed Bear)
-or no API call succeeded; 2 = no API key, unreadable .env, or invalid config/limits.
+Exit codes: 0 = all three analysts and every debate turn produced validated output (a
+server-side MODEL fallback, where another model answered, still counts as success and is
+shown per call); 1 = an agent produced no validated output (a neutral analyst report, a
+missing Bull case or a fail-closed Bear) or no API call succeeded; 2 = no API key,
+unreadable .env, or invalid config/limits.
 
 Usage:
     python -m pipeline.smoke_debate
@@ -98,6 +100,9 @@ def _print_calls(label: str, calls: list[CallRecord]) -> None:
         if c.refusal_category:
             line += f"  refusal_category={c.refusal_category}"
         print(line)
+        for it in c.iterations:  # per-hop usage; matters on fallback calls (see #58)
+            print(f"     iteration {it.type} model={it.model} "
+                  f"in={it.usage.input_tokens} out={it.usage.output_tokens}")
 
 
 def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, AgentConfig]) -> None:
@@ -118,11 +123,16 @@ def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, Agen
 
     print("\n-- Debate --")
     for turn in debate.turns:
-        status = "ok" if turn.run.ok else f"FAILED ({turn.run.reason_code})"
+        # run.reason never quotes money values (count-only by design), so it is safe to print.
+        status = "ok" if turn.run.ok else f"FAILED ({turn.run.reason_code}: {turn.run.reason})"
         print(f"\n[round {turn.round}] {turn.side.upper()} {status}")
         print(turn.case.model_dump_json(indent=2))
     print(f"\nrounds planned {debate.rounds_planned}, run {debate.rounds_run}")
-    if debate.stopped_early:
+    last_bear = next((t for t in reversed(debate.turns) if t.side == "bear"), None)
+    bear_failed = last_bear is not None and not last_bear.run.ok
+    if debate.stopped_early and bear_failed:
+        print("stopped early: YES, the Bear failed and the debate failed closed (counted as fatal)")
+    elif debate.stopped_early:
         print("stopped early: YES, the Bear marked an objection fatal")
     else:
         print("stopped early: no")
