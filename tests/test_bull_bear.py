@@ -139,9 +139,10 @@ def test_bull_money_violation_names_mention(where):
         js["key_points"] = ["fine point", "stop 98 looks safe"]
     r, c = bull([reply(js), reply(js)])
     assert not r.ok
-    assert "money values" in r.reason
-    assert ("at 99.10" in r.reason) or ("stop 98" in r.reason)
-    assert "money values" in c.calls[1]["messages"][-1]["content"]
+    assert r.reason == "case states 1 money value(s) not in a plan record"
+    assert "99.10" not in r.reason and "98" not in r.reason  # count only, never the values
+    retry = c.calls[1]["messages"][-1]["content"]
+    assert ("at 99.10" in retry) if where == "argument" else ("stop 98" in retry)
 
 
 def test_bull_quoting_plan_values_exactly_is_valid():
@@ -189,8 +190,11 @@ def test_bear_symbol_and_plan_id_checked():
 
 def test_bear_money_violation_in_objections_names_mention():
     js = bear_json(objections=["thin volume", "a stop at 98.40 is too tight", "late"])
-    r, _ = bear([reply(js), reply(js)])
-    assert not r.ok and "at 98.40" in r.reason
+    r, c = bear([reply(js), reply(js)])
+    assert not r.ok and r.reason == "case states 1 money value(s) not in a plan record"
+    assert "98.40" not in r.reason
+    assert "at 98.40" in c.calls[1]["messages"][-1]["content"]
+    assert "98.40" not in json.dumps(r.value.model_dump())
 
 
 def test_bear_quoting_plan_values_valid():

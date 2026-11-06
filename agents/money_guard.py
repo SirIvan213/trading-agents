@@ -23,12 +23,20 @@ Patterns (a number is `\d[\d,]*(\.\d+)?`):
 A (b) mention is ALWAYS a violation (plan records hold no size). Any other mention is a
 violation unless its value is Decimal-equal to an allowed plan value ("101.5" == "101.50").
 
-Documented exemptions (never flagged by a, c or d):
+Documented exemptions (apply ONLY to a bare (d) number or a weak (c) hit; they never apply to
+a `$` amount, a strong keyword, an (e) or an (a2) hit, so "stop item 98.50", "stop at
+$98.50:00" and "buy at 101:50" are still flagged):
   - 8-K item numbers: a number immediately preceded by `item`, `item_` or `item-`
     (case-insensitive): "item 9.01", "Item 2.02", "item_9.01", "8-K item 9.01".
   - clock times such as 10:30 or 09:45 (a number touching a `:digit` pair).
   - "at least 3", "at most 2", "risk of 2 halts", "price action over 15 minutes" and
     "buy signal in 3 of 3 analysts" are prose counts, not prices.
+  - "per share", "/share" and "a share" are a price unit, not a size: "Risk is 2.39 per share"
+    is not a (b) mention, but the number is treated as a price and must be an allowed value.
+
+Allowed values: entry, stop, target, risk_per_share and reward_to_risk of every plan.
+Share counts from analyst text (e.g. "CEO sold 50,000 shares") are still flagged: conservative
+by design; the model must rephrase ("a large insider sale") without the count.
 
 Known false positives (accepted, the guard errs on the side of flagging): a ratio such as
 "2.50" in prose unless it equals a plan value; "stop 3 times"; "target 2 analysts";
@@ -53,8 +61,13 @@ _E = re.compile(
     rf"(?=((?:[\s:=,]+[A-Za-z][\w'-]*){{0,1}})[\s:=,]+(\$?)({_NUM}))",
     re.I,
 )
-_B = re.compile(rf"(?<![\w.,])({_NUM})(?:\s+[A-Za-z][\w'-]*){{0,2}}?\s+{_SIZE_WORDS}\b", re.I)
-_B_REV = re.compile(rf"\b{_SIZE_WORDS}\s*[:=]?\s*\$?({_NUM})", re.I)
+_PER_SHARE = r"(?:/\s*|per\s+|a\s+)share"
+_PS = re.compile(rf"(?<![\w.,])({_NUM})\s*{_PER_SHARE}\b", re.I)
+_B = re.compile(
+    rf"(?<![\w.,])({_NUM})(?!\s*{_PER_SHARE})(?:\s+[A-Za-z][\w'-]*){{0,2}}?\s+{_SIZE_WORDS}\b",
+    re.I,
+)
+_B_REV = re.compile(rf"(?<!per\s)(?<!/)(?<!\ba\s)\b{_SIZE_WORDS}\s*[:=]?\s*\$?({_NUM})", re.I)
 # Zero-width lookahead so overlapping keywords ("buy at ...", "stop at ...") are all tried.
 _C = re.compile(
     rf"\b({_KEYWORDS})\b(?=((?:[\s:=,]+[A-Za-z][\w'-]*){{0,2}})[\s:=,]+(\$?)({_NUM}))", re.I
@@ -73,8 +86,12 @@ def _exempt(text: str, start: int, end: int) -> bool:
     return False
 
 
-def _c_hits(text: str) -> list[tuple[str, str, int]]:
-    """Pattern (c) hits as (mention, number, number_start), price-like numbers only."""
+def _c_hits(text: str) -> list[tuple[str, str, str, int]]:
+    """Pattern (c) hits as (kind, mention, number, number_start), price-like numbers only.
+
+    kind is "c" for a strong keyword or a `$` amount (never exempt) and "w" for a weak
+    keyword / `at` hit (exemptions apply).
+    """
     hits = []
     for m in _C.finditer(text):
         kw = m.group(1).lower().replace(" ", "-")
@@ -88,21 +105,33 @@ def _c_hits(text: str) -> list[tuple[str, str, int]]:
         else:
             ok = dollar or decimals
         if ok:
-            hits.append((text[m.start():m.end(4)], num, m.start(4)))
+            kind = "c" if (kw in _STRONG or dollar) else "w"
+            hits.append((kind, text[m.start():m.end(4)], num, m.start(4)))
     return hits
 
 
 def _scan(text: str) -> list[tuple[str, str, str]]:
-    """Return (kind, mention, number) per distinct number position; (b) wins over a/c/d."""
-    found: dict[int, tuple[str, str, str]] = {}
-    for mention, num, start in _c_hits(text):
-        found[start] = ("c", mention, num)
-    for kind, pattern in (("d", _D), ("a", _A), ("a", _A_WORD)):
+    """Return (kind, mention, number) per distinct number position; (b) wins over the rest.
+
+    Weak hits (bare 2-decimal numbers, weak-keyword hits) are subject to the item/clock
+    exemptions; keyword, `$`, currency-word, (e) and per-share hits are not.
+    """
+    weak: dict[int, tuple[str, str, str]] = {}
+    for m in _D.finditer(text):
+        weak[m.start(1)] = ("d", m.group(0).strip(), m.group(1))
+    c_hits = _c_hits(text)
+    for kind, mention, num, start in c_hits:
+        if kind == "w":
+            weak[start] = ("w", mention, num)
+    found = {k: v for k, v in weak.items() if not _exempt(text, k, k + len(v[2]))}
+    for kind, mention, num, start in c_hits:
+        if kind == "c":
+            found[start] = ("c", mention, num)
+    for kind, pattern in (("a", _A), ("a", _A_WORD), ("p", _PS)):
         for m in pattern.finditer(text):
-            found.setdefault(m.start(1), (kind, m.group(0).strip(), m.group(1)))
+            found[m.start(1)] = (kind, m.group(0).strip(), m.group(1))
     for m in _E.finditer(text):
-        found.setdefault(m.start(4), ("e", text[m.start():m.end(4)], m.group(4)))
-    found = {k: v for k, v in found.items() if not _exempt(text, k, k + len(v[2]))}
+        found[m.start(4)] = ("e", text[m.start():m.end(4)], m.group(4))
     for pattern in (_B, _B_REV):
         for m in pattern.finditer(text):
             found[m.start(1)] = ("b", m.group(0).strip(), m.group(1))
@@ -117,10 +146,10 @@ def _to_decimal(raw: str) -> Decimal | None:
 
 
 def allowed_values(packet: DecisionPacket) -> set[Decimal]:
-    """Entry, stop, target and risk_per_share of every exit plan in the packet, as Decimals."""
+    """Entry, stop, target, risk_per_share and reward_to_risk of every plan, as Decimals."""
     out: set[Decimal] = set()
     for plan in packet.exit_plans:
-        for raw in (plan.entry, plan.stop, plan.target, plan.risk_per_share):
+        for raw in (plan.entry, plan.stop, plan.target, plan.risk_per_share, plan.reward_to_risk):
             value = _to_decimal(str(raw))
             if value is not None:
                 out.add(value)

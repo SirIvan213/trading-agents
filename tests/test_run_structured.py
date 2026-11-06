@@ -4,6 +4,8 @@ import threading
 
 import pytest
 
+from agents import runner as R
+from agents.debate_common import BearOut, BullOut
 from agents.llm import AgentConfig
 from agents.runner import BETAS, model_output_schema, run_structured
 from agents.schemas import BearCase, BullCase
@@ -18,7 +20,7 @@ SENTINEL = "sk-ant-SENTINEL-SECRET"
 def run(queue, validate=lambda v: None, cfg=CFG, cancel=None, client=None):
     client = client or FakeClient(queue)
     result = run_structured(
-        "bull", "SYSTEM PROMPT", "USER PAYLOAD", BullCase, validate,
+        "bull", "SYSTEM PROMPT", "USER PAYLOAD", BullOut, validate,
         client=client, config=cfg, cancel=cancel,
     )
     return result, client
@@ -26,7 +28,7 @@ def run(queue, validate=lambda v: None, cfg=CFG, cancel=None, client=None):
 
 def test_valid_first_reply():
     r, c = run([reply(bull_json())])
-    assert r.ok and isinstance(r.value, BullCase) and r.reason is None and r.reason_code is None
+    assert r.ok and isinstance(r.value, BullOut) and r.reason is None and r.reason_code is None
     assert len(c.calls) == 1 and len(r.calls) == 1
 
 
@@ -149,7 +151,7 @@ def test_request_kwargs_shape():
     assert kw["output_config"]["effort"] == "medium"
     fmt = kw["output_config"]["format"]
     assert fmt["type"] == "json_schema"
-    assert fmt["schema"] == model_output_schema(BullCase)
+    assert fmt["schema"] == model_output_schema(BullOut)
     assert kw["system"] == [
         {"type": "text", "text": "SYSTEM PROMPT", "cache_control": {"type": "ephemeral"}}]
     assert kw["messages"][0] == {"role": "user", "content": "USER PAYLOAD"}
@@ -171,17 +173,18 @@ def test_with_options_timeout_applied():
             return inner
 
     cfg = AgentConfig(request_timeout_s=7.5)
-    r = run_structured("bull", "P", "U", BullCase, lambda v: None, client=Wrapped(), config=cfg)
+    r = run_structured("bull", "P", "U", BullOut, lambda v: None, client=Wrapped(), config=cfg)
     assert r.ok and seen == {"timeout": 7.5} and len(inner.calls) == 1
 
 
-@pytest.mark.parametrize("model", [BullCase, BearCase])
+@pytest.mark.parametrize("model", [BullOut, BearOut])
 def test_output_schema_is_strict_compatible(model):
     schema = model_output_schema(model)
 
     def walk(node):
         if isinstance(node, dict):
-            assert "anyOf" not in node and "$ref" not in node and "default" not in node
+            for bad in ("anyOf", "oneOf", "allOf", "$ref", "default"):
+                assert bad not in node
             if node.get("type") == "object":
                 assert node["additionalProperties"] is False
                 assert node["required"] == list(node["properties"])
@@ -192,7 +195,48 @@ def test_output_schema_is_strict_compatible(model):
                 walk(v)
 
     walk(schema)
-    assert schema["properties"]["plan_id"]["type"] == ["string", "null"]
+    assert schema["properties"]["plan_id"]["type"] == "string"
     assert set(schema["required"]) == set(schema["properties"])
     assert "plan_id" in schema["required"]
 
+
+@pytest.mark.parametrize("model", [BullCase, BearCase])
+def test_nullable_case_models_raise_unsupported_union(model):
+    with pytest.raises(ValueError) as e:
+        model_output_schema(model)
+    assert str(e.value) == "unsupported union (anyOf) in output schema at 'plan_id'"
+
+
+@pytest.mark.parametrize("union", ["anyOf", "oneOf", "allOf"])
+def test_strict_raises_on_any_union(union):
+    node = {"type": "object", "properties": {"x": {union: [{"type": "string"}]}}}
+    with pytest.raises(ValueError, match=rf"unsupported union \({union}\) .* 'x'"):
+        R._strict(node, {})
+    with pytest.raises(ValueError, match=union):
+        R._strict({union: []}, {})  # root path
+
+
+def test_analyst_output_schemas_pinned():
+    expected_props = {
+        "agent": {"type": "string", "enum": None},
+        "symbol": {"type": "string"},
+        "stance": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+        "confidence": {"type": "number"},
+        "evidence": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"point": {"type": "string"}, "source": {"type": "string"}},
+            "required": ["point", "source"], "additionalProperties": False}},
+        "catalysts": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "source": {"type": "string"}},
+            "required": ["name", "source"], "additionalProperties": False}},
+    }
+    for name in ("technical", "sentiment", "fundamentals"):
+        props = {k: dict(v) for k, v in expected_props.items()}
+        props["agent"] = {"type": "string", "enum": [name]}
+        expected = {
+            "type": "object", "properties": props,
+            "required": ["agent", "symbol", "stance", "confidence", "evidence", "catalysts"],
+            "additionalProperties": False,
+        }
+        assert R.output_schema(name) == expected

@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from agents.debate_common import build_payload, make_validator
+from agents.debate_common import BullOut, build_payload, make_validator, to_case
 from agents.llm import AgentConfig, config_for
 from agents.runner import StructuredRun, run_structured
 from agents.schemas import BearCase, BullCase, DecisionPacket
@@ -26,9 +26,12 @@ def run_bull(
     cfg = config if config is not None else config_for("bull")
     try:
         payload = build_payload(packet, opponent, round)
+        result = run_structured(
+            "bull", PROMPT, payload, BullOut, make_validator(packet, BullCase),
+            client=client, config=cfg, cancel=cancel,
+        )
+        if result.ok and result.value is not None:
+            result.value = to_case(result.value, packet.symbol)  # "" -> None, upper symbol
     except Exception as exc:  # noqa: BLE001
         return StructuredRun(None, False, type(exc).__name__, "exception", [], 0)
-    return run_structured(
-        "bull", PROMPT, payload, BullCase, make_validator(packet, BullCase),
-        client=client, config=cfg, cancel=cancel,
-    )
+    return result

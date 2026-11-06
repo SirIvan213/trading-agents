@@ -61,16 +61,16 @@ def test_commas_handled():
     assert money_violations("1,000 shares", {Decimal("1000")})
 
 
-def test_allowed_values_reads_exactly_four_fields_from_every_plan():
+def test_allowed_values_reads_exactly_five_fields_from_every_plan():
     p1 = make_plan("a", entry="10.10", stop="9.90", target="10.50", risk_per_share="0.20",
                    reward_to_risk="2.00", time_exit="15:45")
     p2 = make_plan("b", entry="20.00", stop="19.00", target="22.00", risk_per_share="1.00",
                    reward_to_risk="2.00")
     vals = allowed_values(make_packet([p1, p2]))
     assert vals == {Decimal(x) for x in (
-        "10.10", "9.90", "10.50", "0.20", "20.00", "19.00", "22.00", "1.00")}
-    # reward_to_risk (2.00) is NOT allowed; neither is a time or level name
-    assert Decimal("2.00") not in vals
+        "10.10", "9.90", "10.50", "0.20", "20.00", "19.00", "22.00", "1.00", "2.00")}
+    # entry, stop, target, risk_per_share and reward_to_risk; not time_exit or level names
+    assert Decimal("15.45") not in vals and Decimal("1545") not in vals
 
 
 def test_empty_packet_allows_nothing():

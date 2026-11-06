@@ -119,8 +119,8 @@ def run_debate(
             )
         except Exception as exc:  # noqa: BLE001 - fail closed
             bear = StructuredRun(None, False, type(exc).__name__, "exception", [], 0)
-        if not isinstance(bear.value, BearCase):
-            bear.ok = False
+        if not bear.ok or not isinstance(bear.value, BearCase):
+            bear.ok = False  # fail closed: always the fatal fail-closed case
             bear.value = unavailable_bear(sym, bear.reason_code)
         last_bear = bear.value
         turns.append(DebateTurn(
@@ -130,6 +130,8 @@ def run_debate(
             fatal = True
             break
 
+    requested_same = cfgs["bull"].model == cfgs["bear"].model
+    served = {c.serving_model for t in turns for c in t.run.calls}  # models that answered
     return DebateRecord(
         symbol=sym,
         as_of=packet.as_of,
@@ -138,7 +140,8 @@ def run_debate(
         turns=turns,
         stopped_early=fatal and rounds_run < planned,
         fatal=fatal,
-        same_model=cfgs["bull"].model == cfgs["bear"].model,
+        requested_same_model=requested_same,
+        same_model=requested_same and len(served) <= 1,
         final_bull=last_bull,
         final_bear=last_bear,
         all_ok=all(t.run.ok for t in turns),

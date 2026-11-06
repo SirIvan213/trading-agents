@@ -75,12 +75,20 @@ class AnalystRun:
 _KEEP = ("type", "enum", "properties", "required", "additionalProperties", "items")
 
 
-def _strict(node: Any, defs: dict[str, Any]) -> Any:
-    """Reduce a pydantic JSON schema to type/enum/properties/required/additionalProperties."""
+def _strict(node: Any, defs: dict[str, Any], path: str = "") -> Any:
+    """Reduce a pydantic JSON schema to type/enum/properties/required/additionalProperties.
+
+    Raises ValueError (naming the field path) for any anyOf/oneOf/allOf: unions are not
+    expressible as a simple strict type, so a model must not use them in an output schema.
+    """
     if not isinstance(node, dict):
         return node
     if "$ref" in node:
-        return _strict(defs[node["$ref"].rsplit("/", 1)[-1]], defs)
+        return _strict(defs[node["$ref"].rsplit("/", 1)[-1]], defs, path)
+    for union in ("anyOf", "oneOf", "allOf"):
+        if union in node:
+            where = path or "<root>"
+            raise ValueError(f"unsupported union ({union}) in output schema at '{where}'")
     out: dict[str, Any] = {}
     if "const" in node:
         out["enum"] = [node["const"]]
@@ -89,15 +97,11 @@ def _strict(node: Any, defs: dict[str, Any]) -> Any:
             continue
         value = node[key]
         if key == "properties":
-            out[key] = {k: _strict(v, defs) for k, v in value.items()}
+            out[key] = {k: _strict(v, defs, f"{path}.{k}".lstrip(".")) for k, v in value.items()}
         elif key == "items":
-            out[key] = _strict(value, defs)
+            out[key] = _strict(value, defs, f"{path}[]")
         else:
             out[key] = value
-    if "anyOf" in node:  # nullable / simple unions -> "type": [...] (strict-compatible)
-        types = [_strict(v, defs) for v in node["anyOf"]]
-        if all(set(t) == {"type"} and isinstance(t["type"], str) for t in types):
-            out["type"] = [t["type"] for t in types]
     if out.get("type") == "object":
         out["required"] = list(out.get("properties", {}))
         out["additionalProperties"] = False
@@ -491,7 +495,7 @@ def run_structured(
     prompt: str,
     user_payload: str,
     output_model: type[BaseModel],
-    validate: Callable[[BaseModel], str | None],
+    validate: Callable[[BaseModel], str | tuple[str, str] | None],
     *,
     client: Any,
     config: AgentConfig,
@@ -500,14 +504,15 @@ def run_structured(
     """One tool-less structured request, validated, with ONE retry; never raises.
 
     The JSON text is parsed into `output_model`, then `validate(value)` returns None when fine
-    or an error string. Invalid output, a refusal or max_tokens triggers one retry with a short
+    an error string, or a tuple (stored_reason, model_hint). Only `stored_reason` is ever kept
+    in the result; `model_hint` (which may quote offending values) goes only to the model in the
+    retry message. Invalid output, a refusal or max_tokens triggers one retry with a short
     error message appended (history is append-only). `cancel` is checked before each request.
     A CallRecord is kept for every response. API errors give reason_code "api_error" and
     reason = exception type name only.
     """
     calls: list[CallRecord] = []
     started = time.monotonic()
-    schema = model_output_schema(output_model)
 
     def done(
         value: BaseModel | None, reason: str | None, code: ReasonCode | None
@@ -519,8 +524,9 @@ def run_structured(
         )
 
     try:
+        schema = model_output_schema(output_model)  # ValueError -> exception result
         messages: list[dict] = [{"role": "user", "content": user_payload}]
-        error, code = "", "invalid_output"
+        error, hint, code = "", "", "invalid_output"
         for attempt in range(2):
             if cancel is not None and cancel.is_set():
                 raise _Cancelled
@@ -528,6 +534,7 @@ def run_structured(
             calls.append(call_record(response, config.model))
             content = list(response.content)
             stop = response.stop_reason
+            hint = ""
             if stop == "end_turn":
                 texts = [
                     b.text for b in content if _btype(b) == "text" and getattr(b, "text", "")
@@ -546,7 +553,7 @@ def run_structured(
                         problem = validate(value)
                         if problem is None:
                             return done(value, None, None)
-                        error = problem
+                        error, hint = (problem, problem) if isinstance(problem, str) else problem
             else:
                 error = f"model stopped with {stop}"
                 code = (
@@ -559,7 +566,7 @@ def run_structured(
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"Your previous attempt failed: {error}. "
+                        f"Your previous attempt failed: {hint or error}. "
                         "Return only the corrected JSON object."
                     ),
                 })

@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from agents.debate_common import build_payload, make_validator
+from agents.debate_common import BearOut, build_payload, make_validator, to_case
 from agents.llm import AgentConfig, config_for
 from agents.runner import StructuredRun, run_structured
 from agents.schemas import BearCase, BullCase, DecisionPacket
@@ -49,9 +49,11 @@ def run_bear(
     try:
         payload = build_payload(packet, opponent, round)
         result = run_structured(
-            "bear", PROMPT, payload, BearCase, make_validator(packet, BearCase),
+            "bear", PROMPT, payload, BearOut, make_validator(packet, BearCase),
             client=client, config=cfg, cancel=cancel,
         )
+        if result.ok and result.value is not None:
+            result.value = to_case(result.value, packet.symbol)  # "" -> None, upper symbol
     except Exception as exc:  # noqa: BLE001
         result = StructuredRun(None, False, type(exc).__name__, "exception", [], 0)
     if result.ok:
