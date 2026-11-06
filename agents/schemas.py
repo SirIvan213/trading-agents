@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Evidence(BaseModel):
@@ -40,12 +40,22 @@ class AnalystReport(BaseModel):
 
 class BullCase(BaseModel):
     symbol: str
+    plan_id: str | None = Field(
+        default=None,
+        description="the packet plan this case argues for, or null; must be one of "
+        "packet.exit_plans",
+    )
     argument: str
     key_points: list[str] = Field(min_length=1)
 
 
 class BearCase(BaseModel):
     symbol: str
+    plan_id: str | None = Field(
+        default=None,
+        description="the packet plan this case challenges, or null; must be one of "
+        "packet.exit_plans",
+    )
     objections: list[str] = Field(min_length=3, description="At least three concrete objections")
     fatal: bool = Field(description="True if any objection alone should stop the trade")
 
@@ -140,3 +150,39 @@ class DecisionPacket(BaseModel):
         default_factory=list,
         description="Technical run's plans; only when that run's report validated",
     )
+
+
+class DebateTurn(BaseModel):
+    """One side's turn in the debate, with its audit record."""
+
+    round: int
+    side: Literal["bull", "bear"]
+    case: BullCase | BearCase
+    run: AgentRunRecord
+
+    @model_validator(mode="after")
+    def _side_matches_case(self) -> DebateTurn:
+        """A bull turn holds a BullCase and a bear turn a BearCase."""
+        expected = BullCase if self.side == "bull" else BearCase
+        if not isinstance(self.case, expected):
+            raise ValueError(f"side {self.side!r} requires a {expected.__name__}")
+        return self
+
+
+class DebateRecord(BaseModel):
+    """Outcome of the bull/bear debate. Advisory text only; never feeds sizing or orders."""
+
+    symbol: str
+    as_of: str
+    rounds_planned: int
+    rounds_run: int
+    turns: list[DebateTurn]
+    stopped_early: bool
+    fatal: bool
+    requested_same_model: bool = Field(description="bull and bear were configured with one model")
+    same_model: bool = Field(
+        description="both sides requested and were served by the same model"
+    )
+    final_bull: BullCase | None
+    final_bear: BearCase | None
+    all_ok: bool
