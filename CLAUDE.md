@@ -26,6 +26,9 @@ checks it against hard risk limits, and asks a human before anything reaches a
    variables (see `.env.example`).
 5. **Tests never hit the network.** Every tool is tested against saved fixtures
    in `tests/fixtures/`.
+6. **Never make a billed API call (Claude, or any paid data source) without
+   Ivan's explicit approval in this session.** Tests and checks use fakes with
+   the network blocked.
 
 ## Layout
 

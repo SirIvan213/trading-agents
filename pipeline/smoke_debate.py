@@ -9,8 +9,10 @@ tests/fixtures/ (synthetic data in the real API shapes, for a run "as of" 2026-1
     alpaca_news_tsla.json, sec_submissions_tsla.json   headlines and 8-K filings (sentiment)
     sec_companyfacts_tsla.json                         XBRL quarterly facts (fundamentals)
 
-The API key is read from ANTHROPIC_API_KEY, loaded from .env in the repo root if present (a
-non-empty exported variable wins). The key is never printed. Without flags each agent uses
+Nothing is sent unless --billed is given (CLAUDE.md rule 6); without it the script prints
+what it would run and exits 3. The API key is read from ANTHROPIC_API_KEY, loaded from .env
+in the repo root (or --env-file PATH; --no-dotenv skips it) if present (a non-empty exported
+variable wins). The key is never printed. Without flags each agent uses
 its own configured model and effort (config_for: TRADING_AGENTS_<AGENT>_MODEL / _EFFORT,
 then TRADING_AGENTS_MODEL / _EFFORT, then the defaults); --model / --effort override all five
 agents (technical, sentiment, fundamentals, bull, bear). Debate rounds come from
@@ -20,12 +22,13 @@ Exit codes: 0 = all three analysts and every debate turn produced validated outp
 server-side MODEL fallback, where another model answered, still counts as success and is
 shown per call); 1 = an agent produced no validated output (a neutral analyst report, a
 missing Bull case or a fail-closed Bear) or no API call succeeded; 2 = no API key,
-unreadable .env, or invalid config/limits.
+unreadable .env, or invalid config/limits; 3 = --billed not given, nothing was sent.
 
 Usage:
-    python -m pipeline.smoke_debate
-    python -m pipeline.smoke_debate --model claude-sonnet-5-5
-    python -m pipeline.smoke_debate --effort medium --no-fallbacks
+    python -m pipeline.smoke_debate                          # dry plan only, nothing sent
+    python -m pipeline.smoke_debate --billed
+    python -m pipeline.smoke_debate --billed --model claude-sonnet-5-5
+    python -m pipeline.smoke_debate --billed --effort medium --no-fallbacks
 """
 from __future__ import annotations
 
@@ -41,12 +44,11 @@ from agents.debate import resolve_rounds, run_debate
 from agents.llm import EFFORTS, AgentConfig, config_for, make_client
 from agents.orchestrator import AGENTS, run_analysts
 from agents.schemas import CallRecord, DebateRecord, DecisionPacket
+from pipeline.smoke_common import ROOT, add_safety_flags, load_env, refuse_unbilled
 from pipeline.smoke_technical import (
     FIXTURES,
-    ROOT,
     SYMBOL,
     FixtureMarketData,
-    load_dotenv,
     token_totals,
 )
 
@@ -172,20 +174,28 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
                         help="effort for all five agents (default: each agent's configured effort)")
     parser.add_argument("--no-fallbacks", action="store_true",
                         help="turn off server-side refusal fallback")
+    add_safety_flags(parser)
     args = parser.parse_args(argv)
 
     if client is None:  # .env first: it may hold the key and TRADING_AGENTS_* settings
-        try:
-            load_dotenv(ROOT / ".env")
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
+        err = load_env(args, ROOT)
+        if err is not None:
+            return err
     try:
         configs = _configs(args.model, args.effort, not args.no_fallbacks)
         rounds = resolve_rounds(None)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if client is None and not args.billed:
+        return refuse_unbilled("Analysts + debate smoke run", [
+            f"symbol {SYMBOL} on saved fixtures (no Alpaca or SEC calls)",
+            *(f"{a:<12} model {c.model}  effort {c.effort}  "
+              f"fallbacks {'on' if c.fallbacks else 'off'}" for a, c in configs.items()),
+            f"debate rounds {rounds}",
+            f"about {7 + 2 * rounds}-{7 + 4 * rounds} Claude API calls "
+            "(analyst tool rounds, then up to 2 attempts per debate turn)",
+        ])
     if client is None:
         try:
             client = make_client()

@@ -5,28 +5,29 @@ billed Claude API calls; it makes NO Alpaca calls - bars and the snapshot come f
 tests/fixtures/alpaca_bars_tsla.json and alpaca_snapshot_tsla.json (synthetic data in Alpaca's
 response shape for 2026-11-03: a few 08:55-08:59 ET pre-market bars, then 09:30-10:59 ET).
 
-The API key is read from ANTHROPIC_API_KEY, loaded from .env in the repo root if present (a
-non-empty exported variable wins). The key is never printed. Model and effort come from the
-command-line flags only (TRADING_AGENTS_MODEL / _EFFORT are not used here).
+Nothing is sent unless --billed is given (CLAUDE.md rule 6); without it the script prints
+what it would run and exits 3. The API key is read from ANTHROPIC_API_KEY, loaded from .env
+in the repo root (or --env-file PATH; --no-dotenv skips it) if present; a non-empty exported
+variable wins. The key is never printed. Model and effort default to config_for("technical")
+and can be overridden with --model / --effort.
 
 Exit codes: 0 = the model produced a validated report; 1 = the run fell back to the neutral
-report or made no successful API call; 2 = no API key or unreadable .env.
+report or made no successful API call; 2 = no API key, unreadable .env or bad config;
+3 = --billed not given, nothing was sent.
 
 Usage:
-    python -m pipeline.smoke_technical
-    python -m pipeline.smoke_technical --model claude-sonnet-5-5
-    python -m pipeline.smoke_technical --effort medium --no-fallbacks
+    python -m pipeline.smoke_technical                       # dry plan only, nothing sent
+    python -m pipeline.smoke_technical --billed
+    python -m pipeline.smoke_technical --billed --model claude-sonnet-5-5
+    python -m pipeline.smoke_technical --billed --effort medium --no-fallbacks
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -34,52 +35,21 @@ from agents.llm import EFFORTS, AgentConfig, config_for, make_client
 from agents.schemas import CallRecord
 from agents.technical import run_technical
 from agents.tool_registry import ToolSession
+from pipeline.smoke_common import (  # noqa: F401  (load_dotenv re-exported for callers)
+    ROOT,
+    add_safety_flags,
+    load_dotenv,
+    load_env,
+    refuse_unbilled,
+)
 from tools.bars import parse_bars
 
-ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
 BARS_FIXTURE = FIXTURES / "alpaca_bars_tsla.json"
 SNAPSHOT_FIXTURE = FIXTURES / "alpaca_snapshot_tsla.json"
 SYMBOL = "TSLA"
 NY = ZoneInfo("America/New_York")
 PREVIEW = 600
-
-
-def _parse_value(raw: str) -> str:
-    """Value part of KEY=VALUE: quoted values keep everything inside the quotes; unquoted
-    values drop a trailing ' # comment'."""
-    raw = raw.strip()
-    if raw[:1] in ("'", '"'):
-        end = raw.find(raw[0], 1)
-        if end != -1:
-            return raw[1:end]
-    if raw.startswith("#"):
-        return ""
-    return re.split(r"\s#", raw, maxsplit=1)[0].strip()
-
-
-def load_dotenv(path: Path) -> None:
-    """Minimal .env reader. Handles a UTF-8 BOM, `export `, quotes and inline comments.
-
-    Never overrides a non-empty exported variable. Raises ValueError for an unreadable file
-    (e.g. UTF-16, which PowerShell's `>` writes). Never includes values in messages.
-    """
-    if not path.is_file():
-        return
-    try:
-        text = path.read_text(encoding="utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{path.name} is not UTF-8 (save it as UTF-8)") from exc
-    except OSError as exc:
-        raise ValueError(f"cannot read {path.name} ({type(exc).__name__})") from exc
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.removeprefix("export ").strip()
-        if key and not os.environ.get(key, "").strip():
-            os.environ[key] = _parse_value(value)
 
 
 class FixtureMarketData:
@@ -158,24 +128,34 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         description="Run the Technical Analyst once on saved TSLA fixtures against the real "
                     "Claude API (billed; no Alpaca calls)."
     )
-    if client is None:  # .env first: it may hold TRADING_AGENTS_* defaults
-        try:
-            load_dotenv(ROOT / ".env")
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
+    parser.add_argument("--model", default=None,
+                        help="Claude model ID (default: the technical agent's configured model)")
+    parser.add_argument("--effort", default=None, choices=sorted(EFFORTS),
+                        help="effort (default: the technical agent's configured effort)")
+    parser.add_argument("--no-fallbacks", action="store_true",
+                        help="turn off server-side refusal fallback")
+    add_safety_flags(parser)
+    args = parser.parse_args(argv)
+
+    if client is None:  # .env first: it may hold TRADING_AGENTS_* defaults and the key
+        err = load_env(args, ROOT)
+        if err is not None:
+            return err
     try:
         defaults = config_for("technical")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    parser.add_argument("--model", default=defaults.model,
-                        help=f"Claude model ID (default: {defaults.model})")
-    parser.add_argument("--effort", default=defaults.effort, choices=sorted(EFFORTS))
-    parser.add_argument("--no-fallbacks", action="store_true",
-                        help="turn off server-side refusal fallback")
-    args = parser.parse_args(argv)
+    args.model = args.model or defaults.model
+    args.effort = args.effort or defaults.effort
 
+    if client is None and not args.billed:
+        return refuse_unbilled("Technical Analyst smoke run", [
+            f"symbol {SYMBOL} on saved fixtures (no Alpaca calls)",
+            f"technical  model {args.model}  effort {args.effort}  "
+            f"fallbacks {'off' if args.no_fallbacks else 'on'}",
+            "about 3-6 Claude API calls (tool rounds plus at most one retry)",
+        ])
     if client is None:
         try:
             client = make_client()
