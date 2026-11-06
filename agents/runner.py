@@ -11,11 +11,12 @@ import json
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from agents.llm import AgentConfig
 from agents.schemas import (
@@ -93,6 +94,10 @@ def _strict(node: Any, defs: dict[str, Any]) -> Any:
             out[key] = _strict(value, defs)
         else:
             out[key] = value
+    if "anyOf" in node:  # nullable / simple unions -> "type": [...] (strict-compatible)
+        types = [_strict(v, defs) for v in node["anyOf"]]
+        if all(set(t) == {"type"} and isinstance(t["type"], str) for t in types):
+            out["type"] = [t["type"] for t in types]
     if out.get("type") == "object":
         out["required"] = list(out.get("properties", {}))
         out["additionalProperties"] = False
@@ -432,3 +437,134 @@ def run_analyst(
         reason = type(exc).__name__
         code: ReasonCode = "api_error" if _is_api_error(exc) else "exception"
         return finish(_neutral(spec.name, sym, reason), False, reason, code)
+
+
+# --------------------------------------------------------------------------
+# Generic structured runner (no tools): used by the debate agents
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class StructuredRun:
+    """Result of run_structured. `value` is the validated model, or None when `ok` is False."""
+
+    value: BaseModel | None
+    ok: bool
+    reason: str | None
+    reason_code: ReasonCode | None
+    calls: list[CallRecord]
+    duration_ms: int
+
+
+def model_output_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Strict-compatible JSON schema of any pydantic model (nullable fields become type lists)."""
+    raw = model.model_json_schema()
+    return _strict(raw, raw.get("$defs", {}))
+
+
+def _structured_request(
+    client: Any, name: str, prompt: str, schema: dict[str, Any], config: AgentConfig,
+    messages: list[dict],
+) -> Any:
+    """Same request shape as `_request` but with NO tools (and no thinking/temperature)."""
+    spec = AnalystSpec(name=name, prompt=prompt, tools=[], output_schema=schema)
+    if hasattr(client, "with_options"):
+        client = client.with_options(timeout=config.request_timeout_s)
+    kwargs: dict[str, Any] = {
+        "model": config.model,
+        "max_tokens": config.max_tokens,
+        "system": [{"type": "text", "text": spec.prompt, "cache_control": {"type": "ephemeral"}}],
+        "messages": messages,
+        "output_config": {
+            "effort": config.effort,
+            "format": {"type": "json_schema", "schema": spec.output_schema},
+        },
+    }
+    if config.fallbacks:
+        kwargs["betas"] = BETAS
+        kwargs["fallbacks"] = "default"
+    return client.beta.messages.create(**kwargs)
+
+
+def run_structured(
+    name: str,
+    prompt: str,
+    user_payload: str,
+    output_model: type[BaseModel],
+    validate: Callable[[BaseModel], str | None],
+    *,
+    client: Any,
+    config: AgentConfig,
+    cancel: threading.Event | None = None,
+) -> StructuredRun:
+    """One tool-less structured request, validated, with ONE retry; never raises.
+
+    The JSON text is parsed into `output_model`, then `validate(value)` returns None when fine
+    or an error string. Invalid output, a refusal or max_tokens triggers one retry with a short
+    error message appended (history is append-only). `cancel` is checked before each request.
+    A CallRecord is kept for every response. API errors give reason_code "api_error" and
+    reason = exception type name only.
+    """
+    calls: list[CallRecord] = []
+    started = time.monotonic()
+    schema = model_output_schema(output_model)
+
+    def done(
+        value: BaseModel | None, reason: str | None, code: ReasonCode | None
+    ) -> StructuredRun:
+        ms = int((time.monotonic() - started) * 1000)
+        return StructuredRun(
+            value=value, ok=value is not None, reason=reason,
+            reason_code=None if value is not None else code, calls=list(calls), duration_ms=ms,
+        )
+
+    try:
+        messages: list[dict] = [{"role": "user", "content": user_payload}]
+        error, code = "", "invalid_output"
+        for attempt in range(2):
+            if cancel is not None and cancel.is_set():
+                raise _Cancelled
+            response = _structured_request(client, name, prompt, schema, config, messages)
+            calls.append(call_record(response, config.model))
+            content = list(response.content)
+            stop = response.stop_reason
+            if stop == "end_turn":
+                texts = [
+                    b.text for b in content if _btype(b) == "text" and getattr(b, "text", "")
+                ]
+                code = "invalid_output"
+                if not texts:
+                    error = "no text output"
+                else:
+                    try:
+                        value = output_model.model_validate_json(texts[-1])
+                    except ValidationError as exc:
+                        first = exc.errors()[0]
+                        loc = ".".join(str(p) for p in first["loc"])
+                        error = f"output failed validation at '{loc}': {first['msg']}"
+                    else:
+                        problem = validate(value)
+                        if problem is None:
+                            return done(value, None, None)
+                        error = problem
+            else:
+                error = f"model stopped with {stop}"
+                code = (
+                    "refusal" if stop == "refusal"
+                    else "max_tokens" if stop == "max_tokens" else "invalid_output"
+                )
+            if attempt == 0:
+                if content:
+                    messages.append({"role": "assistant", "content": response.content})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Your previous attempt failed: {error}. "
+                        "Return only the corrected JSON object."
+                    ),
+                })
+        return done(None, error, code)  # type: ignore[arg-type]
+    except _Cancelled:
+        return done(None, "cancelled", "cancelled")
+    except Exception as exc:  # noqa: BLE001 - must not raise; type name only, no secrets
+        return done(None, type(exc).__name__, "api_error" if _is_api_error(exc) else "exception")

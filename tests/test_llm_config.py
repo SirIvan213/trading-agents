@@ -4,8 +4,9 @@ import pytest
 from agents.llm import DEFAULT_MODELS, AgentConfig, config_for
 
 AGENTS = ["technical", "sentiment", "fundamentals"]
+DEBATERS = ["bull", "bear"]
 VARS = [f"TRADING_AGENTS_{s}" for s in ("MODEL", "EFFORT")] + [
-    f"TRADING_AGENTS_{a.upper()}_{s}" for a in AGENTS for s in ("MODEL", "EFFORT")
+    f"TRADING_AGENTS_{a.upper()}_{s}" for a in AGENTS + DEBATERS for s in ("MODEL", "EFFORT")
 ]
 
 
@@ -15,7 +16,7 @@ def clean_env(monkeypatch):
         monkeypatch.delenv(v, raising=False)
 
 
-@pytest.mark.parametrize("agent", AGENTS)
+@pytest.mark.parametrize("agent", AGENTS + DEBATERS)
 def test_defaults(agent):
     cfg = config_for(agent)
     assert cfg == AgentConfig(model=DEFAULT_MODELS[agent])
@@ -56,7 +57,7 @@ def test_model_and_effort_resolve_independently(monkeypatch):
     assert (cfg.model, cfg.effort) == ("f-model", "xhigh")
 
 
-@pytest.mark.parametrize("agent", ["", "Technical", "bull", None, "technical "])
+@pytest.mark.parametrize("agent", ["", "Technical", "Bull", "trader", None, "technical ", "bull "])
 def test_unknown_agent_raises(agent):
     with pytest.raises(ValueError, match="unknown agent"):
         config_for(agent)
@@ -89,3 +90,16 @@ def test_other_agents_bad_vars_do_not_affect_this_agent(monkeypatch):
 def test_every_valid_effort(monkeypatch, effort):
     monkeypatch.setenv("TRADING_AGENTS_TECHNICAL_EFFORT", effort)
     assert config_for("technical").effort == effort
+
+
+@pytest.mark.parametrize("agent", DEBATERS)
+def test_debater_config_for_resolution(monkeypatch, agent):
+    up = agent.upper()
+    monkeypatch.setenv("TRADING_AGENTS_MODEL", "global-model")
+    assert config_for(agent).model == "global-model"
+    monkeypatch.setenv(f"TRADING_AGENTS_{up}_MODEL", "side-model")
+    monkeypatch.setenv(f"TRADING_AGENTS_{up}_EFFORT", "Low")
+    cfg = config_for(agent)
+    assert (cfg.model, cfg.effort) == ("side-model", "low")
+    other = "bear" if agent == "bull" else "bull"
+    assert config_for(other).model == "global-model"
