@@ -12,8 +12,8 @@ variable wins. The key is never printed. Model and effort default to config_for(
 and can be overridden with --model / --effort.
 
 Exit codes: 0 = the model produced a validated report; 1 = the run fell back to the neutral
-report or made no successful API call; 2 = no API key, unreadable .env or bad config;
-3 = --billed not given, nothing was sent.
+report or made no successful API call; 2 = no API key, unreadable or missing
+.env/--env-file, or bad config; 3 = --billed not given, nothing was sent.
 
 Usage:
     python -m pipeline.smoke_technical                       # dry plan only, nothing sent
@@ -38,6 +38,7 @@ from agents.tool_registry import ToolSession
 from pipeline.smoke_common import (  # noqa: F401  (load_dotenv re-exported for callers)
     ROOT,
     add_safety_flags,
+    key_hint,
     load_dotenv,
     load_env,
     refuse_unbilled,
@@ -154,14 +155,15 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
             f"symbol {SYMBOL} on saved fixtures (no Alpaca calls)",
             f"technical  model {args.model}  effort {args.effort}  "
             f"fallbacks {'off' if args.no_fallbacks else 'on'}",
-            "about 3-6 Claude API calls (tool rounds plus at most one retry)",
+            "Claude API calls: typically 3-6, at most "
+            f"{2 * (defaults.max_tool_rounds + 1)} (2 attempts x up to "
+            f"{defaults.max_tool_rounds} tool rounds + 1)",
         ])
     if client is None:
         try:
             client = make_client()
         except RuntimeError as exc:
-            print(f"error: {exc} (add ANTHROPIC_API_KEY=... to .env at the repo root, "
-                  "or export it)", file=sys.stderr)
+            print(f"error: {exc} ({key_hint(args)})", file=sys.stderr)
             return 2
 
     rec = Recorder()

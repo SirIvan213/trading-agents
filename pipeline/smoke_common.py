@@ -3,8 +3,9 @@
 A smoke script makes real, billed Claude API calls only when run with ``--billed``. Without
 it, the script loads its config, prints what it WOULD run (agents, models, effort, an
 estimate of the calls) and exits with NOT_BILLED, without constructing a client or reading
-the API key. A caller that injects its own client (tests, offline dry runs) is never billed,
-so the flag isn't needed then.
+the API key. A caller that injects its own client (tests, offline dry runs with a fake)
+skips the gate; the caller owns billing then - passing a real anthropic client that way IS
+billed.
 
 The .env file is loaded only when asked for: by default from the repo root, from
 ``--env-file PATH`` instead, or not at all with ``--no-dotenv``. That makes the missing-key
@@ -77,7 +78,8 @@ def load_env(args: argparse.Namespace, root: Path = ROOT) -> int | None:
         return None
     path = args.env_file if args.env_file is not None else root / ".env"
     if args.env_file is not None and not path.is_file():
-        print(f"error: --env-file {path.name} not found", file=sys.stderr)
+        what = "is not a file" if path.exists() else "not found"
+        print(f"error: --env-file {path.name} {what}", file=sys.stderr)
         return 2
     try:
         load_dotenv(path)
@@ -85,6 +87,15 @@ def load_env(args: argparse.Namespace, root: Path = ROOT) -> int | None:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return None
+
+
+def key_hint(args: argparse.Namespace) -> str:
+    """Where the key was looked for, for the missing-key message (never the key itself)."""
+    if args.no_dotenv:
+        return "export ANTHROPIC_API_KEY (--no-dotenv: no .env was read)"
+    if args.env_file is not None:
+        return f"add ANTHROPIC_API_KEY=... to {args.env_file.name} (--env-file)"
+    return "add ANTHROPIC_API_KEY=... to .env at the repo root, or export it"
 
 
 def refuse_unbilled(script: str, plan: list[str]) -> int:

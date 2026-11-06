@@ -22,7 +22,8 @@ Exit codes: 0 = all three analysts and every debate turn produced validated outp
 server-side MODEL fallback, where another model answered, still counts as success and is
 shown per call); 1 = an agent produced no validated output (a neutral analyst report, a
 missing Bull case or a fail-closed Bear) or no API call succeeded; 2 = no API key,
-unreadable .env, or invalid config/limits; 3 = --billed not given, nothing was sent.
+unreadable or missing .env/--env-file, or invalid config/limits; 3 = --billed not given,
+nothing was sent.
 
 Usage:
     python -m pipeline.smoke_debate                          # dry plan only, nothing sent
@@ -44,7 +45,7 @@ from agents.debate import resolve_rounds, run_debate
 from agents.llm import EFFORTS, AgentConfig, config_for, make_client
 from agents.orchestrator import AGENTS, run_analysts
 from agents.schemas import CallRecord, DebateRecord, DecisionPacket
-from pipeline.smoke_common import ROOT, add_safety_flags, load_env, refuse_unbilled
+from pipeline.smoke_common import ROOT, add_safety_flags, key_hint, load_env, refuse_unbilled
 from pipeline.smoke_technical import (
     FIXTURES,
     SYMBOL,
@@ -193,15 +194,15 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
             *(f"{a:<12} model {c.model}  effort {c.effort}  "
               f"fallbacks {'on' if c.fallbacks else 'off'}" for a, c in configs.items()),
             f"debate rounds {rounds}",
-            f"about {7 + 2 * rounds}-{7 + 4 * rounds} Claude API calls "
-            "(analyst tool rounds, then up to 2 attempts per debate turn)",
+            f"Claude API calls: typically {7 + 2 * rounds}-{7 + 4 * rounds}, at most "
+            f"{sum(2 * (configs[a].max_tool_rounds + 1) for a in AGENTS) + 4 * rounds} "
+            "(analysts: 2 attempts x tool rounds; debate: 2 attempts per turn)",
         ])
     if client is None:
         try:
             client = make_client()
         except RuntimeError as exc:
-            print(f"error: {exc} (add ANTHROPIC_API_KEY=... to .env at the repo root, "
-                  "or export it)", file=sys.stderr)
+            print(f"error: {exc} ({key_hint(args)})", file=sys.stderr)
             return 2
 
     data = FixtureData()
