@@ -22,7 +22,10 @@ from tools.exit_plan import exit_plan
 from tools.scan import ScanCriteria, validate_symbols
 
 MAX_SCAN_SYMBOLS = 50
-PLAN_EXIT_KEYS = frozenset({"setup", "entry", "level"})
+PLAN_EXIT_KEYS = frozenset({"setup", "entry", "level", "reward_multiple"})
+# The only reward multiples the model may pick (a menu, not a number it supplies). exit_plan
+# computes the target; values above limits.max_reward_multiple are refused.
+REWARD_MULTIPLES = ("1", "1.5", "2", "2.5", "3")
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -46,6 +49,9 @@ TOOLS: list[dict[str, Any]] = [
             "Compute stop, target and reward:risk for a long entry. Opening range and ATR "
             "come from get_bars automatically; do not supply them. Requires get_bars first. "
             "entry and level must be copied exactly from get_bars price_levels. "
+            "reward_multiple (optional, default the configured minimum) picks the target "
+            "multiple of risk from a fixed menu. The result says whether the target is below "
+            "the session high (target_vs_session_high). "
             "Returns {ok: false, reason} if the setup is refused."
         ),
         "strict": True,
@@ -59,6 +65,12 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Support level (setup 'level' only): copy exactly one "
                     "value from get_bars price_levels",
+                },
+                "reward_multiple": {
+                    "type": "string",
+                    "enum": list(REWARD_MULTIPLES),
+                    "description": "Target as a multiple of risk per share; pick a higher "
+                    "one only when structure supports it",
                 },
             },
             "required": ["setup", "entry"],
@@ -196,6 +208,15 @@ def _summary_atr(summary: dict) -> Decimal | None:
     return None if raw is None else Decimal(raw)
 
 
+def _vs_session_high(target: str, levels: dict[str, str]) -> str:
+    """"below" when the target sits under today's session high (room before it matters),
+    "at_or_above" otherwise, "unknown" without a session high. Compared in Decimal."""
+    high = levels.get("session_high")
+    if high is None:
+        return "unknown"
+    return "below" if Decimal(target) < Decimal(high) else "at_or_above"
+
+
 def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     if set(inp) - PLAN_EXIT_KEYS:
         return _err("opening_range and atr come from get_bars, not from the model")
@@ -214,11 +235,17 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     # ("102" -> "102.00"), so plan records and orders always carry cent prices.
     entry = Decimal(levels[entry_level])
     atr = _summary_atr(s.summary)
+    extra: dict[str, Decimal] = {}
+    if inp.get("reward_multiple") is not None:
+        if inp["reward_multiple"] not in REWARD_MULTIPLES:
+            return _err(f"reward_multiple must be one of {', '.join(REWARD_MULTIPLES)}")
+        extra["reward_multiple"] = Decimal(inp["reward_multiple"])
     structure_level: str | None
     if setup == "orb":
         structure_level = "or_low"
         result = exit_plan(
-            "orb", entry, s.limits, opening_range=s.summary.get("opening_range"), atr=atr
+            "orb", entry, s.limits, opening_range=s.summary.get("opening_range"), atr=atr,
+            **extra,
         )
     else:
         if inp.get("level") is None:
@@ -228,7 +255,7 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
         if structure_level is None:
             return _err(f"level must be one of get_bars price_levels: {names}")
         level = Decimal(levels[structure_level])
-        result = exit_plan("level", entry, s.limits, level=level, atr=atr)
+        result = exit_plan("level", entry, s.limits, level=level, atr=atr, **extra)
     if result.get("ok") is True:
         record = ExitPlanRecord(
             plan_id=f"plan-{len(s.exit_plans) + 1}",
@@ -247,7 +274,8 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
         if s.ledger is not None:
             s.ledger.record(record)  # LedgerError -> a tool error via ToolSession.execute
         s.exit_plans.append(record)
-        result = {**result, "plan_id": record.plan_id}
+        result = {**result, "plan_id": record.plan_id,
+                  "target_vs_session_high": _vs_session_high(result["target"], levels)}
     return result, False
 
 
