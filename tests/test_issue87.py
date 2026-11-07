@@ -63,7 +63,8 @@ QUOTED = quoted_values(PKT)
 # ---------------- quoted_values ----------------
 
 def test_quoted_values_are_verbatim_numbers_from_ok_evidence_only():
-    assert QUOTED == {"2.54", "1.64", "7.47", "0.46", "3,225,000,000"}
+    # evidence numbers, plus the ok report's confidence as written ("0.6")
+    assert QUOTED == {"2.54", "1.64", "7.47", "0.46", "3,225,000,000", "0.6"}
     assert "9.99" not in QUOTED and "123.45" not in QUOTED  # failed run's evidence
 
 
@@ -161,8 +162,8 @@ def test_labels_do_not_unlock_money_mentions(text):
 
 def test_plain_values_next_to_labels_are_still_quoted():
     q = quoted_values(labels_packet("at 10:15 the stock was 2.54% up on 1.64 relative volume"))
-    assert q == {"2.54", "1.64"}
-    assert quoted_values(labels_packet("dividend 0.26 per share")) == {"0.26"}  # 0.x is a value
+    assert q == {"2.54", "1.64", "0.6"}  # 0.6 is the confidence
+    assert quoted_values(labels_packet("dividend 0.26 per share")) == {"0.26", "0.6"}
 
 
 # ---------------- validator and agents ----------------
