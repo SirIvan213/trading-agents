@@ -61,11 +61,28 @@ class BearCase(BaseModel):
 
 
 class TraderDecision(BaseModel):
+    """The Trader's choice. Long only: BUY one tool-produced plan by id, or PASS.
+
+    Deliberately has NO price, stop, target, size or setup field (issues #65, #85): the order
+    is built only from the pipeline's plan ledger by plan_id. `confidence` and `reasoning` are
+    advisory and never reach sizing or risk_check (CLAUDE.md rule 2).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
-    action: Literal["BUY", "SELL", "PASS"]
+    action: Literal["BUY", "PASS"]
+    plan_id: str | None = Field(
+        default=None, description="plan_id from the packet's exit_plans; required for BUY"
+    )
     confidence: float = Field(ge=0, le=1)
     reasoning: str
-    setup: str | None = Field(default=None, description="e.g. orb, level; needed for exit_plan")
+
+    @model_validator(mode="after")
+    def _buy_needs_plan(self) -> TraderDecision:
+        if self.action == "BUY" and not (self.plan_id or "").strip():
+            raise ValueError("BUY requires a plan_id")
+        return self
 
 
 class UsageRecord(BaseModel):

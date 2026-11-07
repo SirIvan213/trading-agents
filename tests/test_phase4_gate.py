@@ -585,7 +585,7 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
     # A TraderDecision whose free text carries the fake prices is also in play. The Trader
     # agent does not exist yet; the end-to-end Trader proof is a Phase 4 follow-up.
     decision = TraderDecision(
-        symbol="TSLA", action="BUY", confidence=0.99, setup=rec.setup,
+        symbol="TSLA", action="BUY", confidence=0.99, plan_id=rec.plan_id,
         reasoning="; ".join(FAKE_TEXT))
     assert decision.symbol == dirty.symbol and decision.action == "BUY"
     o_clean = build_order(select_plan(clean, "plan-1"), LIMITS, FRESH)
@@ -853,12 +853,12 @@ def test_two_confidences_same_plan_same_order():
     assert lo.reports["technical"].confidence == 0.1
     assert hi.reports["technical"].confidence == 0.99
     d_lo = TraderDecision(
-        symbol="TSLA", action="BUY", confidence=0.1, reasoning="r", setup=rec.setup)
+        symbol="TSLA", action="BUY", confidence=0.1, reasoning="r", plan_id=rec.plan_id)
     d_hi = TraderDecision(
-        symbol="TSLA", action="BUY", confidence=0.99, reasoning="r", setup=rec.setup)
+        symbol="TSLA", action="BUY", confidence=0.99, reasoning="r", plan_id=rec.plan_id)
     assert d_lo.confidence != d_hi.confidence
     for d in (d_lo, d_hi):  # the decision matches the plan it will be executed with
-        assert d.action == "BUY" and d.symbol == rec.symbol and d.setup == rec.setup
+        assert d.action == "BUY" and d.symbol == rec.symbol and d.plan_id == rec.plan_id
 
     def order_for(decision, packet):
         assert decision.symbol == packet.symbol
