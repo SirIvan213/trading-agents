@@ -1,7 +1,7 @@
 # trading-agents — project rules for Claude Code
 
 A multi-agent intraday trading research system. LLM agents analyze a stock,
-debate it, and propose BUY / SELL / PASS. Deterministic code sizes the order,
+debate it, and propose BUY or PASS (long only). Deterministic code sizes the order,
 checks it against hard risk limits, and asks a human before anything reaches a
 **paper** trading account.
 
@@ -99,9 +99,17 @@ qa-engineer → `tests/`, code-reviewer is read-only.
 
 ## Current phase
 
-Phases 1–3 are done: the tools, the Technical, Sentiment and Fundamentals
-analysts, and the orchestrator that runs them in parallel and returns a
-`DecisionPacket`. Phase 4 (bull/bear debate + trader) is next. It is gated by
-the open issues labeled `before-phase-4` (Phase 4 milestone): check
-`gh issue list --label before-phase-4 --state open` and fix them first or tell
-Ivan which remain.
+Phases 1–4 are done: the tools, the three analysts and the parallel
+orchestrator, the Bull/Bear debate, and the Trader with the plan ledger, the
+approval step and the journal ("approved, not sent"). The Trader is long only:
+it BUYs one tool-produced plan by `plan_id`, or PASSes.
+
+**Now:** validating Phase 4 with the smoke scenarios
+(`python -m pipeline.smoke_debate --scenario clean-buy|extended-chase|tsla|red-flag`).
+Only Ivan runs them with `--billed`.
+
+**Next:** Phase 5, paper trading: the Alpaca paper broker, scheduled runs, and
+sending approved orders. It is gated by the open issues labeled
+`before-phase-5`: check `gh issue list --label before-phase-5 --state open`
+and fix them first or tell Ivan which remain. Work the Phase 5 build itself
+delivers sits in the Phase 5 milestone without that label.
