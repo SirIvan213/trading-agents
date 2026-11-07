@@ -106,7 +106,7 @@ def test_listener_gets_side_field_token_pattern_and_excerpt():
         ("argument", SECRET_TOKEN), ("key_points[0]", "500")]
     target, size = (d for _, d in bull_items)
     assert target.pattern == PATTERN_NAMES["c"] and f"target {SECRET_TOKEN}" in target.excerpt
-    assert size.pattern == PATTERN_NAMES["e"] or size.pattern == PATTERN_NAMES["b"]
+    assert size.pattern == PATTERN_NAMES["b"]  # (b) size wins over (e) "buy 500"
     assert "buy 500 shares" in size.excerpt
     assert events[1][1][0][0] == "objections[0]" and events[1][1][0][1].number == "97.13"
 
@@ -116,6 +116,29 @@ def test_excerpt_is_trimmed_and_marked():
     (d,) = violation_details(text, set(), context=10)
     assert d.excerpt.startswith("...") and d.excerpt.endswith("...")
     assert "stop 97.13" in d.excerpt and len(d.excerpt) < 40
+
+
+def test_excerpt_strips_control_characters():
+    text = "stop" + chr(27) + "[2J" + chr(7) + " 97.13" + chr(13) + chr(10) + "next"
+    (d,) = violation_details(text, set())
+    assert d.excerpt.isprintable() and "97.13" in d.excerpt
+
+
+def test_scan_is_scan_at_sorted():
+    from agents.money_guard import _scan, _scan_at
+    for text in CORPUS:
+        found = _scan_at(text)
+        assert _scan(text) == [found[k] for k in sorted(found)]
+
+
+def test_quoted_values_are_skipped_in_a_real_bear_rejection():
+    events = []
+    bear = bear_json(objections=["up 7.47% on 1.64 relative volume, stop 97.13", "b", "c"])
+    client = FakeClient([reply(bull_json()), reply(bear), reply(bear_json())])
+    with money_debug(lambda side, items: events.append((side, items))):
+        run_debate(PKT, clients=client, configs=CFGS, rounds=1)
+    ((side, items),) = events
+    assert side == "bear" and [d.number for _, d in items] == ["97.13"]
 
 
 def test_size_equal_to_plan_value_is_marked():

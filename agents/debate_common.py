@@ -110,9 +110,7 @@ def build_payload(
 
 def case_texts(case: BullCase | BearCase) -> list[str]:
     """Every free-text field of a case (argument, key_points, objections)."""
-    if isinstance(case, BullCase):
-        return [case.argument, *case.key_points]
-    return list(case.objections)
+    return [text for _, text in _labelled_texts(case)]
 
 
 def make_validator(

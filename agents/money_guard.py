@@ -284,7 +284,9 @@ def violation_details(
         value = _to_decimal(number)
         if kind == "b" or value is None or value not in allowed:
             lo, hi = max(0, start - context), min(len(text), start + len(number) + context)
-            excerpt = " ".join(text[lo:hi].split())
+            # printable only, whitespace collapsed: odd model output cannot garble the terminal
+            raw = "".join(ch if ch.isprintable() else " " for ch in text[lo:hi])
+            excerpt = " ".join(raw.split())
             excerpt = ("..." if lo > 0 else "") + excerpt + ("..." if hi < len(text) else "")
             out.append(ViolationDetail(
                 pattern=PATTERN_NAMES.get(kind, kind), mention=mention, number=number,

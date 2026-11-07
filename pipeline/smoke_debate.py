@@ -49,6 +49,7 @@ from typing import Any
 from agents.debate import resolve_rounds, run_debate
 from agents.debate_common import MONEY_REASON, money_debug
 from agents.llm import EFFORTS, AgentConfig, config_for, make_client
+from agents.money_guard import ViolationDetail
 from agents.orchestrator import AGENTS, run_analysts
 from agents.schemas import CallRecord, DebateRecord, DecisionPacket, RetryRecord
 from pipeline.smoke_common import ROOT, add_safety_flags, key_hint, load_env, refuse_unbilled
@@ -121,7 +122,7 @@ def _print_retries(label: str, retries: list[RetryRecord]) -> None:
         print(f"  {label} RETRY after attempt {r.attempt}: {r.reason_code}: {r.reason}")
 
 
-Rejection = tuple[str, list[tuple[str, Any]]]  # (side, [(field, ViolationDetail), ...])
+Rejection = tuple[str, list[tuple[str, ViolationDetail]]]  # (side, [(field, detail)])
 
 
 def print_money_debug(rejections: list[Rejection]) -> None:
@@ -261,9 +262,13 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     rejections: list[Rejection] = []
-    with money_debug(lambda side, items: rejections.append((side, items))):
-        debate = run_debate(packet, clients=client,
-                            configs={a: configs[a] for a in DEBATERS}, rounds=rounds)
+    try:
+        with money_debug(lambda side, items: rejections.append((side, items))):
+            debate = run_debate(packet, clients=client,
+                                configs={a: configs[a] for a in DEBATERS}, rounds=rounds)
+    except BaseException:
+        print_money_debug(rejections)  # still show what was collected before the crash
+        raise
 
     report(packet, debate, configs)
     print_money_debug(rejections)
