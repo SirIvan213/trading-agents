@@ -1,0 +1,17 @@
+{
+ "name": "clean-buy",
+ "symbol": "BRKO",
+ "description": "Orderly push off a quiet VWAP base after an opening spike. Last close 80.42 is about 1.2 ATR above VWAP 80.28 (not extended); a level plan at VWAP has risk 0.16 (about 1.3 ATR, a tight structural stop) and a 2R target of 80.74, well below the 82.02 session high. News is positive (analyst upgrade, supply contract, raised guidance), a material-agreement 8-K, no red flags.",
+ "files": {
+  "bars": "bars.json",
+  "snapshot": "snapshot.json",
+  "news": "news.json",
+  "submissions": "submissions.json",
+  "companyfacts": "companyfacts.json"
+ },
+ "expected": {
+  "action": "BUY",
+  "fatal_bear": null,
+  "why": "Clean structure, room for 2R before the session high, positive catalysts, no red flags."
+ }
+}

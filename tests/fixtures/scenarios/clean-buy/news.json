@@ -1,0 +1,44 @@
+{
+ "news": [
+  {
+   "id": 92000001,
+   "headline": "Analyst upgrade: broker raises Brookfield Optics to buy",
+   "summary": "The broker cited order growth and a cleaner balance sheet.",
+   "author": "fixture",
+   "source": "fixture",
+   "url": "https://example.invalid/brko/1",
+   "symbols": [
+    "BRKO"
+   ],
+   "created_at": "2026-11-03T15:20:00Z",
+   "updated_at": "2026-11-03T15:20:00Z"
+  },
+  {
+   "id": 92000002,
+   "headline": "Brookfield Optics wins multi-year supply contract",
+   "summary": "The company signed a five-year optical module supply agreement.",
+   "author": "fixture",
+   "source": "fixture",
+   "url": "https://example.invalid/brko/2",
+   "symbols": [
+    "BRKO"
+   ],
+   "created_at": "2026-11-03T13:10:00Z",
+   "updated_at": "2026-11-03T13:10:00Z"
+  },
+  {
+   "id": 92000003,
+   "headline": "Brookfield Optics raises full-year guidance",
+   "summary": "Management lifted its revenue outlook on stronger bookings.",
+   "author": "fixture",
+   "source": "fixture",
+   "url": "https://example.invalid/brko/3",
+   "symbols": [
+    "BRKO"
+   ],
+   "created_at": "2026-11-02T21:30:00Z",
+   "updated_at": "2026-11-02T21:30:00Z"
+  }
+ ],
+ "next_page_token": null
+}

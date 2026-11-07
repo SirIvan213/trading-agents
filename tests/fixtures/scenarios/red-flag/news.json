@@ -1,0 +1,44 @@
+{
+ "news": [
+  {
+   "id": 92000001,
+   "headline": "Ventara shares halted for volatility, trading resumes",
+   "summary": "Trading was halted for five minutes after a sharp move, then resumed.",
+   "author": "fixture",
+   "source": "fixture",
+   "url": "https://example.invalid/vntr/1",
+   "symbols": [
+    "VNTR"
+   ],
+   "created_at": "2026-11-03T15:12:00Z",
+   "updated_at": "2026-11-03T15:12:00Z"
+  },
+  {
+   "id": 92000002,
+   "headline": "Ventara to report third-quarter earnings at 1:00 p.m. ET today",
+   "summary": "The company will release results and host a call during market hours.",
+   "author": "fixture",
+   "source": "fixture",
+   "url": "https://example.invalid/vntr/2",
+   "symbols": [
+    "VNTR"
+   ],
+   "created_at": "2026-11-03T13:00:00Z",
+   "updated_at": "2026-11-03T13:00:00Z"
+  },
+  {
+   "id": 92000003,
+   "headline": "Ventara shares rise on sector strength",
+   "summary": "Peers rallied after an industry trade group report.",
+   "author": "fixture",
+   "source": "fixture",
+   "url": "https://example.invalid/vntr/3",
+   "symbols": [
+    "VNTR"
+   ],
+   "created_at": "2026-11-02T22:00:00Z",
+   "updated_at": "2026-11-02T22:00:00Z"
+  }
+ ],
+ "next_page_token": null
+}

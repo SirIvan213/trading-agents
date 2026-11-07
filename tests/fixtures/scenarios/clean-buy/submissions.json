@@ -1,0 +1,36 @@
+{
+ "cik": "9900001",
+ "name": "Brookfield Optics (fixture)",
+ "tickers": [
+  "BRKO"
+ ],
+ "filings": {
+  "recent": {
+   "accessionNumber": [
+    "0009999999-26-900000",
+    "0009999999-26-900001"
+   ],
+   "filingDate": [
+    "2026-11-02",
+    "2026-10-28"
+   ],
+   "acceptanceDateTime": [
+    "2026-11-02T21:05:00.000Z",
+    "2026-10-28T20:05:00.000Z"
+   ],
+   "form": [
+    "8-K",
+    "10-Q"
+   ],
+   "items": [
+    "1.01,9.01",
+    ""
+   ],
+   "primaryDocument": [
+    "brko-8k_20261102.htm",
+    "brko-20260930.htm"
+   ]
+  },
+  "files": []
+ }
+}
