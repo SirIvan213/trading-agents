@@ -17,7 +17,7 @@ from tools.size import Plan, size_position
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
 FIX = Path(__file__).parent / "fixtures"
 NY = ZoneInfo("America/New_York")
-OR = {"high": "102.00", "low": "99.70", "complete": True}
+OR = {"high": "102.00", "low": "99.70", "complete": True, "missing_minutes": 0}
 
 
 # ---------- happy paths ----------

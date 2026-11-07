@@ -10,7 +10,8 @@ from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from tools.config import MARKET_CLOSE, MARKET_OPEN, Limits, validate_limits
+from tools.config import MARKET_CLOSE, Limits, validate_limits
+from tools.market_calendar import CalendarError, closed_reason, day_times, session_hours
 
 NY = ZoneInfo("America/New_York")
 
@@ -48,7 +49,10 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
     `now`, or a DayState whose trades_today is not a non-negative int or whose
     risk_used_today is not a finite, non-negative Decimal, is an early BLOCK (#31).
     `limits.trading_enabled` other than True (the kill switch, #32) and `limits.paper` other
-    than True each add a BLOCK reason.
+    than True each add a BLOCK reason. Market hours come from the NYSE calendar
+    (tools.market_calendar, #11): a full holiday or weekend, a time outside that day's session
+    (13:00 close on an early close), a time outside the day's entry window (it ends before the
+    12:55 flat-by on an early close) or a year the calendar does not cover BLOCK.
     Minimum stop distance: entry - stop below limits.min_risk_per_share is blocked,
     because a stop a few cents from entry is a noise stop that sizing pushes to the
     position cap. No ATR is available here, so only the absolute minimum is enforced.
@@ -142,12 +146,23 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
             f"already {state.trades_today} trades today (max {limits.max_trades_per_day})"
         )
 
-    if ny.weekday() >= 5 or not (MARKET_OPEN <= ny.time() < MARKET_CLOSE):
-        reasons.append("market is closed")
-    elif not (limits.entry_start <= ny.time() <= limits.entry_end):
-        reasons.append(
-            f"outside entry window {limits.entry_start:%H:%M}-{limits.entry_end:%H:%M} ET"
-        )
+    # NYSE calendar (#11): holidays, early closes (13:00, entry window ending before the
+    # 12:55 flat-by) and an uncovered year all BLOCK.
+    day = ny.date()
+    try:
+        hours = session_hours(day)
+    except CalendarError:
+        reasons.append("market calendar does not cover this date")
+    else:
+        if hours is None:
+            reasons.append(f"market is closed ({closed_reason(day)})")
+        elif not (hours[0] <= ny.time() < hours[1]):
+            reasons.append("market is closed")
+        else:
+            start, end, _flat = day_times(day, limits)
+            if not (start <= ny.time() <= end):
+                early = " (early close)" if hours[1] != MARKET_CLOSE else ""
+                reasons.append(f"outside entry window {start:%H:%M}-{end:%H:%M} ET{early}")
 
     return {"verdict": "BLOCK" if reasons else "PASS", "reasons": reasons}
 

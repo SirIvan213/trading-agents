@@ -177,7 +177,7 @@ def test_exit_plan_absolute_minimum_applies_even_when_atr_rule_is_off():
 
 
 def test_exit_plan_orb_refused_below_the_minimum():
-    orr = {"high": "100.00", "low": "99.96", "complete": True}
+    orr = {"high": "100.00", "low": "99.96", "complete": True, "missing_minutes": 0}
     r = exit_plan("orb", D("100.05"), NOISE, opening_range=orr)
     assert r["ok"] is False and "below min_risk_per_share" in r["reason"]
 

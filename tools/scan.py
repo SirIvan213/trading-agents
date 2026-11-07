@@ -33,6 +33,10 @@ class ScanCriteria:
     max_spread_pct: Decimal = Decimal("0.50")
     min_gap_pct: Decimal = Decimal("2.0")
     direction: str = "up"  # "up" (long-only phase) or "both"
+    # Staleness (#12): with `now`, a latestTrade or latestQuote older than this is rejected,
+    # so a halted stock cannot look like a live gap. 120 s catches a 5-minute LULD halt
+    # within two minutes; liquid names on the IEX feed trade and quote far more often.
+    max_quote_age_s: int = 120
 
     def __post_init__(self) -> None:
         money = ("min_price", "max_price", "max_spread_pct", "min_gap_pct")
@@ -48,6 +52,9 @@ class ScanCriteria:
             raise ValueError(f"min_volume must be an integer, got {self.min_volume!r}")
         if self.min_volume < 0:
             raise ValueError("min_volume must not be negative")
+        age = self.max_quote_age_s
+        if isinstance(age, bool) or not isinstance(age, int) or age < 1:
+            raise ValueError(f"max_quote_age_s must be an integer of at least 1, got {age!r}")
         if self.direction not in ("up", "both"):
             raise ValueError(f"direction must be 'up' or 'both', got {self.direction!r}")
 
@@ -63,12 +70,12 @@ def criteria_from_dict(d: dict) -> ScanCriteria:
     kwargs: dict = {}
     try:
         for k, v in d.items():
-            if k == "min_volume":
+            if k in ("min_volume", "max_quote_age_s"):
                 if isinstance(v, bool):
-                    raise ValueError("min_volume must be an integer")
+                    raise ValueError(f"{k} must be an integer")
                 dv = Decimal(str(v))
                 if not dv.is_finite() or dv != dv.to_integral_value():
-                    raise ValueError(f"min_volume must be a whole number, got {v!r}")
+                    raise ValueError(f"{k} must be a whole number, got {v!r}")
                 kwargs[k] = int(dv)
             elif k == "direction":
                 kwargs[k] = str(v)
@@ -87,6 +94,7 @@ def _criteria_dict(c: ScanCriteria) -> dict:
         "max_spread_pct": str(c.max_spread_pct),
         "min_gap_pct": str(c.min_gap_pct),
         "direction": c.direction,
+        "max_quote_age_s": c.max_quote_age_s,
     }
 
 
@@ -210,6 +218,8 @@ def _metrics_unsafe(
         "price": price, "gap_pct": gap, "spread_pct": spread,
         "gap_raw": gap_raw, "spread_raw": spread_raw, "bar_t": _get(daily, "t"),
         "volume": volume, "rvol": rvol, "rvol_note": note,
+        "trade_t": _get(snap.get("latestTrade"), "t"),
+        "quote_t": _get(snap.get("latestQuote"), "t"),
     }, ""
 
 
@@ -218,17 +228,36 @@ def _sort_key(c: dict) -> tuple:
     return (rvol is None, -(rvol or Decimal(0)), -c["gap_pct"], c["symbol"])
 
 
-def _bar_day(t: object) -> date | None:
-    """ET calendar date of a dailyBar RFC3339 timestamp, or None if absent/unparseable."""
+def _ts(t: object) -> datetime | None:
+    """An aware datetime from an RFC3339 timestamp, or None if absent/unparseable."""
     if not isinstance(t, str):
         return None
     try:
         dt = datetime.fromisoformat(t.strip().replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
-    if dt.tzinfo is None:
+    if dt.tzinfo is None or dt.utcoffset() is None:
         return None
-    return dt.astimezone(NY).date()
+    return dt
+
+
+def _bar_day(t: object) -> date | None:
+    """ET calendar date of a dailyBar RFC3339 timestamp, or None if absent/unparseable."""
+    dt = _ts(t)
+    return None if dt is None else dt.astimezone(NY).date()
+
+
+def _staleness(kind: str, t: object, now: datetime, max_age_s: int) -> str | None:
+    """Rejection reason when the latest `kind` ("trade" or "quote") is missing or older than
+    max_age_s at `now`; None when fresh. A timestamp after `now` (clock skew) counts as
+    fresh."""
+    dt = _ts(t)
+    if dt is None:
+        return f"stale {kind} (missing or invalid timestamp)"
+    age = int((now - dt).total_seconds())
+    if age > max_age_s:
+        return f"stale {kind} ({age}s old, max {max_age_s}s)"
+    return None
 
 
 def scan(
@@ -237,6 +266,7 @@ def scan(
     limits: Limits,
     avg_volume: dict[str, int] | None = None,
     today: date | None = None,
+    now: datetime | None = None,
 ) -> dict:
     """Filter snapshots into candidates; every rejection carries explicit reasons.
 
@@ -252,7 +282,12 @@ def scan(
     no freshness check is made, so a scan before 09:30 ET uses yesterday's bar as
     "today" (and its gap is stale). Pass `today` (ET date) to reject any snapshot
     whose dailyBar "t" is not on that date, or is missing, as "stale daily bar".
+    Pass `now` (timezone-aware) to also reject a symbol whose latestTrade or latestQuote "t"
+    is missing or older than criteria.max_quote_age_s, as "stale trade" / "stale quote"
+    (issue #12: a halted stock stops trading and quoting).
     """
+    if now is not None and (now.tzinfo is None or now.utcoffset() is None):
+        raise ValueError("now must be timezone-aware")
     blocked = {s.upper() for s in limits.blocked_symbols}
     avgs = None
     if isinstance(avg_volume, dict):
@@ -284,6 +319,11 @@ def scan(
                 reasons.append("stale daily bar (missing or invalid timestamp)")
             elif bar_day != today:
                 reasons.append(f"stale daily bar ({bar_day} is not {today})")
+        if now is not None:
+            for kind in ("trade", "quote"):
+                why_stale = _staleness(kind, m[f"{kind}_t"], now, criteria.max_quote_age_s)
+                if why_stale:
+                    reasons.append(why_stale)
         if m["price"] < criteria.min_price:
             reasons.append(f"price {m['price']} below minimum {criteria.min_price}")
         elif m["price"] > criteria.max_price:
