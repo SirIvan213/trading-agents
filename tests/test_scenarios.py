@@ -180,7 +180,7 @@ def test_build_reproduces_the_committed_files_byte_for_byte(tmp_path, monkeypatc
     monkeypatch.setattr(build, "HERE", tmp_path)  # FIXTURES stays: it reads the TSLA facts
     build.build()
     names = ("bars.json", "snapshot.json", "news.json", "submissions.json", "companyfacts.json")
-    for folder in ("clean-buy", "red-flag"):
+    for folder in ("clean-buy", "extended-chase", "red-flag"):
         for name in names:
             assert _lf(tmp_path / folder / name) == _lf(SCEN / folder / name), \
                 f"{folder}/{name} differs from build.py output"
@@ -189,7 +189,7 @@ def test_build_reproduces_the_committed_files_byte_for_byte(tmp_path, monkeypatc
 # ---------------- scenario_names / load_scenario ----------------
 
 def test_scenario_names_are_sorted():
-    assert scenario_names() == ["clean-buy", "red-flag", "tsla"]
+    assert scenario_names() == ["clean-buy", "extended-chase", "red-flag", "tsla"]
 
 
 @pytest.mark.parametrize("name,symbol,action,fatal", [
@@ -245,7 +245,7 @@ def test_unknown_scenario_raises(tmp_scen):
 
 
 def test_unknown_scenario_raises_against_the_real_tree():
-    with pytest.raises(ValueError, match="clean-buy, red-flag, tsla"):
+    with pytest.raises(ValueError, match="clean-buy, extended-chase, red-flag, tsla"):
         load_scenario("nope")
 
 
@@ -341,7 +341,7 @@ def test_scenario_data_serves_its_own_symbol_only():
     assert d.company_facts("TSLA") is None and d.company_facts("brko")["entityName"]
 
 
-@pytest.mark.parametrize("name", ["clean-buy", "red-flag", "tsla"])
+@pytest.mark.parametrize("name", ["clean-buy", "extended-chase", "red-flag", "tsla"])
 def test_as_of_is_11_00_eastern(name):
     now = ScenarioData(load_scenario(name)).as_of()
     assert now.isoformat() == "2026-11-03T11:00:00-05:00"

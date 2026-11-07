@@ -82,7 +82,13 @@ def test_money_field_rejects_unparseable_naming_field(field, bad):
 def test_money_field_accepts_small_positive(field):
     d = cfg(**{field: "0.01"})
     if field == "max_reward_multiple":
+        # good_setup_multiple must be a menu value (at least 1) and at most max_reward_multiple,
+        # so a max below 1 is rejected; that cap is meaningless anyway (exit_plan floors R at 1).
         d["min_reward_to_risk"] = "0.01"
+        d["good_setup_multiple"] = "0.01"
+        with pytest.raises(ValueError, match="good_setup_multiple must be one of"):
+            limits_from_dict(d)
+        return
     assert limits_from_dict(d)
 
 

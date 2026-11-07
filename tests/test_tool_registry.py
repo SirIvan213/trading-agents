@@ -69,17 +69,17 @@ def test_plan_exit_uses_fixture_opening_range(spy):
     summary, err = s.execute("get_bars", {"symbol": "AAPL"})
     assert err is False
     assert summary["opening_range"]["low"] == "99.7"
-    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "103.10"})
     assert err is False
-    assert len(spy) == 1
-    args, kwargs = spy[0]
-    assert args[0] == "orb" and args[1] == Decimal("102.00")
+    assert len(spy) == 2  # once for the labels, once at the chosen multiple
+    args, kwargs = spy[-1]
+    assert args[0] == "orb" and args[1] == Decimal("103.10")
     assert kwargs["opening_range"] == summary["opening_range"]
     assert kwargs["atr"] == Decimal("0.8151")
     # stop = floor(99.7 - 0.10 * 0.8151) = 99.61
     assert res["ok"] is True
     assert res["stop"] == "99.61"
-    assert res["risk_per_share"] == "2.39"
+    assert res["risk_per_share"] == "3.49"  # 103.10 - 99.61
 
 
 def test_plan_exit_before_get_bars(spy):
@@ -94,7 +94,7 @@ def test_level_inside_range_passes(spy):
     res, err = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "99.70"})
     assert err is False and res["ok"] is True
     assert res["stop"] == "99.61"  # floor(99.70 - 0.08151)
-    assert len(spy) == 1
+    assert len(spy) == 2
 
 
 @pytest.mark.parametrize("level", ["99.70", "103.20"])  # exactly at session low / high

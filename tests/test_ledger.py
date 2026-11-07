@@ -227,7 +227,7 @@ def session(ledger) -> ToolSession:
 def test_plan_exit_records_the_same_record_it_appends():
     ledger = PlanLedger("AAPL")
     s = session(ledger)
-    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "103.10"})
     assert err is False and res["plan_id"] == "plan-1"
     ledger.seal(accept=True)
     assert s.exit_plans == [ledger.get("plan-1")]
@@ -238,14 +238,14 @@ def test_plan_exit_refused_or_not_ok_records_nothing():
     ledger = PlanLedger("AAPL")
     s = session(ledger)
     s.execute("plan_exit", {"setup": "orb", "entry": "102.50"})  # not a price level
-    s.execute("plan_exit", {"setup": "orb", "entry": "99.70"})  # ok False
+    s.execute("plan_exit", {"setup": "orb", "entry": "99.70"})  # ok False: entry is not last_close
     ledger.seal(accept=True)
     assert ledger.plan_ids() == [] and s.exit_plans == []
 
 
 def test_plan_exit_without_a_ledger_still_works():
     s = session(None)
-    res, _ = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    res, _ = s.execute("plan_exit", {"setup": "orb", "entry": "103.10"})
     assert res["ok"] is True and len(s.exit_plans) == 1
 
 
@@ -254,7 +254,7 @@ def test_plan_exit_after_seal_is_an_error_and_appends_nothing():
     ledger = PlanLedger("AAPL")
     s = session(ledger)
     ledger.seal(accept=True)
-    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "103.10"})
     assert err is True and "error" in res
     assert s.exit_plans == [] and ledger.plan_ids() == []
 
@@ -262,7 +262,7 @@ def test_plan_exit_after_seal_is_an_error_and_appends_nothing():
 def test_plan_exit_for_another_symbol_ledger_is_an_error():
     ledger = PlanLedger("TSLA")
     s = session(ledger)
-    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "103.10"})
     assert err is True and "error" in res
     assert s.exit_plans == []
 
@@ -383,6 +383,6 @@ def test_run_analysts_without_a_ledger_is_unchanged():
 def test_registry_module_records_via_the_session_ledger_only(monkeypatch):
     """plan_exit has no way to take a ledger from the model: tool input keys are fixed."""
     s = session(PlanLedger("AAPL"))
-    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.00", "ledger": "x"})
+    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "103.10", "ledger": "x"})
     assert err is True and "error" in res
     assert reg.PLAN_EXIT_KEYS and "ledger" not in reg.PLAN_EXIT_KEYS

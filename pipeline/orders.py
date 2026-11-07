@@ -73,6 +73,8 @@ def _freshness_error(plan: ExitPlanRecord, limits: Limits, now: datetime) -> str
 def build_order(plan: ExitPlanRecord, limits: Limits, now: datetime) -> dict:
     """Re-validate the plan, check it is fresh at `now`, then size it (size_position result).
 
+    The plan is refused unless its entry is its last_close (entry_level "last_close" and the
+    recorded last_close equal to entry): orders are market orders (issue #118).
     `now` must be timezone-aware. After the price re-validation the plan is refused if `now`
     is naive, plan.as_of is not an aware ISO datetime, the plan is from another New York
     session day, it is dated more than 5 s in the future, or it is older than
@@ -94,6 +96,10 @@ def build_order(plan: ExitPlanRecord, limits: Limits, now: datetime) -> dict:
         matches = False
     if not matches:
         return {"ok": False, "reason": "plan risk_per_share does not match entry - stop"}
+    # Issue #118: the order is a MARKET order, so it fills near the last close. A plan whose
+    # entry is any other price would be sized on a risk it does not carry.
+    if plan.entry_level != "last_close" or _cents(plan.last_close) != entry:
+        return {"ok": False, "reason": "market order: plan entry must be its last_close"}
     stale = _freshness_error(plan, limits, now)
     if stale is not None:
         return {"ok": False, "reason": stale}

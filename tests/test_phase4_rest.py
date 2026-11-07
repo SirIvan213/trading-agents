@@ -193,12 +193,17 @@ def loaded() -> ToolSession:
     return s
 
 
+def put_vwap(s, vwap):
+    s.summary["price_levels"] = {**s.summary["price_levels"], "vwap": vwap}
+
+
 def test_plan_exit_noise_stop_pair_is_refused_without_a_record():
     s = loaded()
-    # entry session_high 103.20, level last_close 103.10 -> stop floor(103.10 - 0.08151) = 103.01
+    # entry last_close 103.10, a vwap level of 103.00 -> stop floor(103.00 - 0.08151) = 102.91
     # risk 0.19 passes the 0.10 minimum but is below 1 x ATR 0.8151
+    put_vwap(s, "103.00")
     res, err = s.execute("plan_exit",
-                         {"setup": "level", "entry": "103.20", "level": "103.10"})
+                         {"setup": "level", "entry": "103.10", "level": "103.00"})
     assert err is False
     assert res == {"ok": False, "reason": "risk per share 0.19 is below 1.0 x ATR 0.8151"}
     assert s.exit_plans == []
@@ -209,19 +214,21 @@ def test_plan_exit_second_noise_pair_below_atr_is_refused():
     # entry last_close 103.10, level 101.60 (vwap) -> stop 101.51, risk 1.59 > ATR: accepted
     res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "101.60"})
     assert res["ok"] is True and res["plan_id"] == "plan-1"
-    # entry 103.20, level 102.00 (or_high) -> stop 101.91, risk 1.29: accepted
-    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.20", "level": "102.00"})
+    # entry 103.10, level 102.00 (or_high) -> stop 101.91, risk 1.19: accepted
+    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "102.00"})
     assert res["ok"] is True
-    # entry 102.00 (or_high), level 101.60 (vwap) -> stop 101.51, risk 0.49 < ATR 0.8151
-    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "102.00", "level": "101.60"})
-    assert res == {"ok": False, "reason": "risk per share 0.49 is below 1.0 x ATR 0.8151"}
+    # entry 103.10, vwap level 102.50 -> stop 102.41, risk 0.69 < ATR 0.8151
+    put_vwap(s, "102.50")
+    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "102.50"})
+    assert res == {"ok": False, "reason": "risk per share 0.69 is below 1.0 x ATR 0.8151"}
     assert [p.plan_id for p in s.exit_plans] == ["plan-1", "plan-2"]
 
 
 def test_plan_exit_with_atr_rule_off_accepts_the_same_pair():
     s = loaded()
     s.limits = replace(s.limits, min_risk_atr_multiple=D("0"))
-    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.20", "level": "103.10"})
+    put_vwap(s, "103.00")
+    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "103.00"})
     assert res["ok"] is True and res["risk_per_share"] == "0.19"
     assert len(s.exit_plans) == 1
 
@@ -279,7 +286,7 @@ def plan_record(**over) -> ExitPlanRecord:
         "plan_id": "plan-1", "symbol": "TSLA", "setup": "level", "entry": "364.18",
         "stop": "358.32", "target": "370.04", "risk_per_share": "5.86",
         "reward_to_risk": "1.00", "time_exit": "15:55", "entry_level": "last_close",
-        "structure_level": "vwap", "as_of": "2026-10-19T10:15:00-04:00",
+        "structure_level": "vwap", "as_of": "2026-10-19T10:15:00-04:00", "last_close": "364.18",
     }
     d.update(over)
     return ExitPlanRecord(**d)

@@ -83,7 +83,7 @@ def tech_script(point="breakout above the opening range"):
     """get_bars, then plan_exit (orb at the opening-range high), then the report."""
     return [
         response([tool_use("b", "get_bars", {"symbol": SYMBOL})], "tool_use"),
-        response([tool_use("p", "plan_exit", {"setup": "orb", "entry": "102.00"})], "tool_use"),
+        response([tool_use("p", "plan_exit", {"setup": "orb", "entry": "103.10"})], "tool_use"),
         response([text(report_json(
             agent="technical", symbol=SYMBOL,
             evidence=[{"point": point, "source": "get_bars"}]))], "end_turn"),
@@ -160,7 +160,7 @@ def test_baseline_buy_is_sized_from_the_tool_plan(baseline):
     result, journal = baseline
     assert result.trader.ok and result.trader.decision.plan_id == "plan-1"
     plan = result.outcome.recheck.plan
-    assert (plan.entry, plan.setup, plan.symbol) == ("102.00", "orb", SYMBOL)
+    assert (plan.entry, plan.setup, plan.symbol) == ("103.10", "orb", SYMBOL)
     assert plan.as_of == NOON.isoformat()
     o = result.outcome.recheck.order
     assert (o["entry"], o["stop_loss"], o["take_profit"]) == (plan.entry, plan.stop, plan.target)
@@ -247,7 +247,7 @@ def test_b_tampered_evidence_is_what_the_trader_sees_but_not_what_the_order_uses
     trader_request = next(r for r in router.requests if r["agent"] == "trader")
     assert "stop 1.00" in json.dumps(trader_request["messages"])  # it was in the model's input
     o = result.outcome.recheck.order
-    assert "1.00" not in (o["stop_loss"], o["entry"]) and o["entry"] == "102.00"
+    assert "1.00" not in (o["stop_loss"], o["entry"]) and o["entry"] == "103.10"
     assert o["take_profit"] != "999.99" and o["qty"] != 10000
 
 

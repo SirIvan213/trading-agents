@@ -12,20 +12,20 @@ from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
-from agents.schemas import ExitPlanRecord
+from agents.schemas import ExitPlanRecord, PlanLabels
 from pipeline.data import MarketData, session_window
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY, ny_today, run_scan
 from tools.bars import parse_bars, regular_session, summarize
-from tools.config import Limits
+from tools.config import REWARD_MULTIPLES, Limits
 from tools.exit_plan import exit_plan
+from tools.plan_labels import plan_labels
 from tools.scan import ScanCriteria, validate_symbols
 
 MAX_SCAN_SYMBOLS = 50
 PLAN_EXIT_KEYS = frozenset({"setup", "entry", "level", "reward_multiple"})
-# The only reward multiples the model may pick (a menu, not a number it supplies). exit_plan
-# computes the target; values above limits.max_reward_multiple are refused.
-REWARD_MULTIPLES = ("1", "1.5", "2", "2.5", "3")
+# REWARD_MULTIPLES (tools.config) is the only menu the model may pick from. exit_plan computes
+# the target; values above the plan's suggested_multiple are refused here.
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -33,7 +33,8 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Fetch today's 1-minute bars for the symbol and return a regular-session "
             "summary: last_close, session_high/low, volume, vwap, atr (1-minute), atr_5m "
-            "(5-minute bars), opening_range, "
+            "(5-minute bars; atr_5m_provisional true when built from fewer than 14 of them), "
+            "opening_range, "
             "and price_levels (the only prices plan_exit accepts). Call this first."
         ),
         "strict": True,
@@ -47,15 +48,17 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "plan_exit",
         "description": (
-            "Compute stop, target and reward:risk for a long entry. Opening range and ATR "
-            "come from get_bars automatically; do not supply them. Requires get_bars first. "
-            "entry and level must be copied exactly from get_bars price_levels. "
-            "reward_multiple (optional, default the configured minimum) picks the target "
-            "multiple of risk from a fixed menu. The result says whether the target is below "
-            "the session high (target_vs_session_high) and, in units of the 5-minute ATR, "
-            "the risk per share, entry minus VWAP and session high minus entry "
-            "(risk_atr_5m, entry_vs_vwap_atr_5m, session_high_vs_entry_atr_5m) and atr_5m "
-            "itself; these are null until 70 minutes of 5-minute bars exist. "
+            "Compute stop, target and reward:risk for a long entry at market. Opening range "
+            "and ATR come from get_bars automatically; do not supply them. Requires get_bars "
+            "first. entry must be the get_bars price_levels last_close (orders are market "
+            "orders); level must be copied exactly from price_levels. The result's `labels` "
+            "are tool-computed from configured thresholds: extended, tight_stop, "
+            "structural_stop, suggested_multiple and atr_5m_provisional. reward_multiple "
+            "(optional) picks the target multiple of risk from a fixed menu; it defaults to "
+            "suggested_multiple and may not exceed it. The result also says whether the "
+            "target is below the session high (target_vs_session_high) and gives, in "
+            "5-minute ATRs, risk_atr_5m, entry_vs_vwap_atr_5m and "
+            "session_high_vs_entry_atr_5m. "
             "Returns {ok: false, reason} if the setup is refused."
         ),
         "strict": True,
@@ -63,18 +66,18 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "setup": {"type": "string", "enum": ["orb", "level"]},
-                "entry": {"type": "string", "description": "Entry price: copy exactly one value "
-                    "from get_bars price_levels"},
+                "entry": {"type": "string", "description": "Entry price: copy the "
+                    "last_close value from get_bars price_levels exactly"},
                 "level": {
                     "type": "string",
-                    "description": "Support level (setup 'level' only): copy exactly one "
+                    "description": "Stop structure (setup 'level' only): copy exactly one "
                     "value from get_bars price_levels",
                 },
                 "reward_multiple": {
                     "type": "string",
                     "enum": list(REWARD_MULTIPLES),
-                    "description": "Target as a multiple of risk per share; pick a higher "
-                    "one only when structure supports it",
+                    "description": "Target as a multiple of risk per share; defaults to the "
+                    "plan's suggested_multiple and may not exceed it",
                 },
             },
             "required": ["setup", "entry"],
@@ -225,6 +228,7 @@ def _atr_context(result: dict, levels: dict[str, str], atr_5m: Decimal | None) -
       session_high_vs_entry_atr_5m  (session_high - entry) / atr_5m
     The 1-minute ATR is too small for this: a normal stop reads as 6+ ATR. It still sets
     the stop buffer and limits.min_risk_atr_multiple inside exit_plan, unchanged.
+    atr_5m may be provisional early in the session (summary atr_5m_provisional, issue #117).
     Each field is None when atr_5m is missing or zero, or the level it needs is missing.
     Rounding down can understate a ratio by at most 0.01 ATR."""
     keys = ("risk_atr_5m", "entry_vs_vwap_atr_5m", "session_high_vs_entry_atr_5m")
@@ -252,6 +256,21 @@ def _vs_session_high(target: str, levels: dict[str, str]) -> str:
     return "below" if Decimal(target) < Decimal(high) else "at_or_above"
 
 
+def _labels(s: ToolSession, result: dict, structure_level: str | None) -> dict:
+    """tools.plan_labels for a successful exit_plan result, from this session's summary."""
+    summary = s.summary or {}
+    vwap = (summary.get("price_levels") or {}).get("vwap")
+    return plan_labels(
+        entry=Decimal(result["entry"]),
+        risk_per_share=Decimal(result["risk_per_share"]),
+        vwap=None if vwap is None else Decimal(vwap),
+        atr_5m=_summary_atr_5m(summary),
+        atr_5m_provisional=summary.get("atr_5m_provisional") is True,
+        structure_level=structure_level,
+        limits=s.limits,
+    )
+
+
 def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     if set(inp) - PLAN_EXIT_KEYS:
         return _err("opening_range and atr come from get_bars, not from the model")
@@ -263,25 +282,35 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     levels: dict[str, str] = s.summary.get("price_levels") or {}
     names = ", ".join(levels)
     entry = _decimal(inp.get("entry"), "entry")
-    entry_level = _level_name(levels, entry)
-    if entry_level is None:
+    if _level_name(levels, entry) is None:
         return _err(f"entry must be one of get_bars price_levels: {names}")
+    # Issue #118: orders are MARKET orders, so the entry is always last_close. Another price
+    # level may be a stop structure (`level`), never the entry.
+    last_close = levels.get("last_close")
+    if last_close is None or entry != Decimal(last_close):
+        return {"ok": False, "reason": (
+            "entry must be last_close: orders are market orders. Use other price levels "
+            "only as the `level` (stop structure) of a level setup"
+        )}, False
     # Use the canonical 2-decimal string get_bars returned, not the model's spelling
     # ("102" -> "102.00"), so plan records and orders always carry cent prices.
-    entry = Decimal(levels[entry_level])
+    entry_level = "last_close"
+    entry = Decimal(last_close)
     atr = _summary_atr(s.summary)
-    extra: dict[str, Decimal] = {}
+    requested: Decimal | None = None
     if inp.get("reward_multiple") is not None:
         if inp["reward_multiple"] not in REWARD_MULTIPLES:
             return _err(f"reward_multiple must be one of {', '.join(REWARD_MULTIPLES)}")
-        extra["reward_multiple"] = Decimal(inp["reward_multiple"])
+        requested = Decimal(inp["reward_multiple"])
     structure_level: str | None
     if setup == "orb":
         structure_level = "or_low"
-        result = exit_plan(
-            "orb", entry, s.limits, opening_range=s.summary.get("opening_range"), atr=atr,
-            **extra,
-        )
+
+        def run(multiple: Decimal | None) -> dict:
+            return exit_plan(
+                "orb", entry, s.limits, opening_range=s.summary.get("opening_range"),
+                atr=atr, reward_multiple=multiple,
+            )
     else:
         if inp.get("level") is None:
             return _err("level setup needs a level")
@@ -290,8 +319,25 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
         if structure_level is None:
             return _err(f"level must be one of get_bars price_levels: {names}")
         level = Decimal(levels[structure_level])
-        result = exit_plan("level", entry, s.limits, level=level, atr=atr, **extra)
+
+        def run(multiple: Decimal | None) -> dict:
+            return exit_plan(
+                "level", entry, s.limits, level=level, atr=atr, reward_multiple=multiple
+            )
+    # The stop (and so the labels) does not depend on the multiple: plan once at the
+    # minimum to label it, then at the chosen multiple, which may not exceed the suggestion.
+    result = run(None)
+    labels: dict | None = None
     if result.get("ok") is True:
+        labels = _labels(s, result, structure_level)
+        ceiling = Decimal(labels["suggested_multiple"])
+        if requested is not None and requested > ceiling:
+            return {"ok": False, "labels": labels, "reason": (
+                f"reward_multiple {inp['reward_multiple']} is above this plan's "
+                f"suggested_multiple {labels['suggested_multiple']}; choose it or lower"
+            )}, False
+        result = run(ceiling if requested is None else requested)
+    if result.get("ok") is True and labels is not None:
         record = ExitPlanRecord(
             plan_id=f"plan-{len(s.exit_plans) + 1}",
             symbol=s.symbol,
@@ -305,6 +351,8 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
             entry_level=entry_level,
             structure_level=structure_level,
             as_of=s.now.astimezone(NY).isoformat(),
+            last_close=last_close,
+            labels=PlanLabels(**labels),
         )
         if s.ledger is not None:
             s.ledger.record(record)  # LedgerError -> a tool error via ToolSession.execute
@@ -312,7 +360,8 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
         result = {**result, "plan_id": record.plan_id,
                   "target_vs_session_high": _vs_session_high(result["target"], levels),
                   **_atr_context(result, levels, _summary_atr_5m(s.summary)),
-                  "atr_5m": s.summary.get("atr_5m")}
+                  "atr_5m": s.summary.get("atr_5m"),
+                  "labels": labels}
     return result, False
 
 

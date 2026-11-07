@@ -11,6 +11,9 @@
   "min_risk_per_share": "0.10",
   "min_risk_atr_multiple": "1.0",
   "max_plan_age_s": 300,
+  "max_extension_atr_5m": "2.0",
+  "max_stop_atr_5m": "2.5",
+  "good_setup_multiple": "2",
   "entry_window": ["09:45", "15:30"],
   "flat_by": "15:55",
   "blocked_symbols": []

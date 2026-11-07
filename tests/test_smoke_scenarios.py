@@ -20,9 +20,9 @@ LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
 # The level plan (entry = last close, level = VWAP, 2R) each scenario's real tools produce.
 PLANS = {
     "clean-buy": dict(symbol="BRKO", entry="80.42", stop="80.26", target="80.74",
-                      risk_per_share="0.16", reward_to_risk="2.00"),
+                      risk_per_share="0.16", reward_to_risk="2.00", last_close="80.42"),
     "red-flag": dict(symbol="VNTR", entry="92.42", stop="92.27", target="92.72",
-                     risk_per_share="0.15", reward_to_risk="2.00"),
+                     risk_per_share="0.15", reward_to_risk="2.00", last_close="92.42"),
     "tsla": dict(symbol="TSLA"),
 }
 SHARES = {"clean-buy": 37, "red-flag": 32, "tsla": 8}
@@ -56,6 +56,7 @@ def unbilled(monkeypatch):
 
 @pytest.mark.parametrize("name,symbol,expected", [
     ("clean-buy", "BRKO", "expected: BUY"),
+    ("extended-chase", "CHSW", "expected: PASS"),
     ("red-flag", "VNTR", "expected: PASS"),
     ("tsla", "TSLA", "expected: none (baseline)"),
 ])
@@ -81,7 +82,7 @@ def test_unknown_scenario_is_an_argparse_error(unbilled, capsys):
 
 
 def test_scenario_choices_are_the_saved_scenarios():
-    assert scenario_names() == ["clean-buy", "red-flag", "tsla"]
+    assert scenario_names() == ["clean-buy", "extended-chase", "red-flag", "tsla"]
     assert S.DEFAULT_SCENARIO == "tsla"
 
 

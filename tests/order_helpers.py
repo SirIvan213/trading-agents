@@ -22,7 +22,7 @@ def plan(plan_id: str = "plan-1", **over) -> ExitPlanRecord:
         "plan_id": plan_id, "symbol": "TSLA", "setup": "level", "entry": "364.18",
         "stop": "358.32", "target": "370.04", "risk_per_share": "5.86",
         "reward_to_risk": "1.00", "time_exit": "15:55", "entry_level": "last_close",
-        "structure_level": "vwap", "as_of": AS_OF.isoformat(),
+        "structure_level": "vwap", "as_of": AS_OF.isoformat(), "last_close": "364.18",
     }
     d.update(over)
     return ExitPlanRecord(**d)

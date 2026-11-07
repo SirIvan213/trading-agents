@@ -144,6 +144,29 @@ class AgentRunRecord(BaseModel):
     )
 
 
+class PlanLabels(BaseModel):
+    """Tool-computed labels for one plan (tools/plan_labels.py). Context only: they never
+    feed sizing, stops, targets or risk_check."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    extended: bool | None = Field(
+        description="entry more than max_extension_atr_5m 5-minute ATRs above VWAP; null = unknown"
+    )
+    tight_stop: bool | None = Field(
+        description="risk per share at most max_stop_atr_5m 5-minute ATRs; null = unknown"
+    )
+    structural_stop: bool = Field(
+        description="stop under or_low, or_high, vwap or session_low"
+    )
+    suggested_multiple: str = Field(
+        description="highest reward multiple plan_exit allowed for this plan"
+    )
+    atr_5m_provisional: bool = Field(
+        description="the 5-minute ATR came from fewer than 14 bars (early session)"
+    )
+
+
 class ExitPlanRecord(BaseModel):
     """One successful exit_plan result, stored by the plan_exit executor.
 
@@ -167,6 +190,14 @@ class ExitPlanRecord(BaseModel):
         description='price_levels name used as level, or "or_low" for orb'
     )
     as_of: str = Field(description="New York ISO timestamp")
+    # Issue #118: orders are market orders, so the entry must be the session's last close when
+    # the plan was made. None (a record not built by plan_exit) is refused by build_order.
+    last_close: str | None = Field(
+        default=None, description="get_bars last_close price level when the plan was made"
+    )
+    labels: PlanLabels | None = Field(
+        default=None, description="tool-computed plan labels (context only)"
+    )
 
 
 class DecisionPacket(BaseModel):

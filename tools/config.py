@@ -11,6 +11,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
 
+# The only reward multiples the Technical analyst may request from plan_exit (a menu, not a
+# number it supplies). good_setup_multiple must be one of them, so the default target is
+# always one the model could also ask for.
+REWARD_MULTIPLES = ("1", "1.5", "2", "2.5", "3")
+
 # Regular session bounds (US/Eastern). Defined here so risk_check can import them
 # without a circular import.
 MARKET_OPEN = time(9, 30)
@@ -38,6 +43,11 @@ class Limits:
     min_risk_atr_multiple: Decimal = Decimal("1.0")
     # Maximum age of an exit plan at order time (#67), in seconds.
     max_plan_age_s: int = 300
+    # Plan labels (tools/plan_labels.py), in 5-minute ATRs. They set the suggested (maximum)
+    # reward multiple plan_exit allows; they never change a stop, a size or a risk limit.
+    max_extension_atr_5m: Decimal = Decimal("2.0")  # entry - VWAP above this: extended
+    max_stop_atr_5m: Decimal = Decimal("2.5")       # risk per share at or below this: tight
+    good_setup_multiple: Decimal = Decimal("2")     # suggested when not extended, tight, structural
 
 
 def _hhmm(s: str) -> time:
@@ -91,9 +101,21 @@ def validate_limits(limits: Limits) -> None:
     for name in (
         "account_cash", "max_loss_per_trade", "max_position_value",
         "daily_loss_limit", "min_reward_to_risk", "max_reward_multiple",
-        "min_risk_per_share",
+        "min_risk_per_share", "max_extension_atr_5m", "max_stop_atr_5m", "good_setup_multiple",
     ):
         positive(name)
+    try:
+        good = limits.good_setup_multiple
+        if not (limits.min_reward_to_risk <= good <= limits.max_reward_multiple):
+            problems.append(
+                "good_setup_multiple must be between min_reward_to_risk and max_reward_multiple"
+            )
+        if good.is_finite() and not any(good == Decimal(m) for m in REWARD_MULTIPLES):
+            problems.append(
+                f"good_setup_multiple must be one of {', '.join(REWARD_MULTIPLES)}, got {good}"
+            )
+    except (TypeError, ArithmeticError):
+        pass  # already reported above
     atr_mult = limits.min_risk_atr_multiple
     if not isinstance(atr_mult, Decimal) or not atr_mult.is_finite():
         problems.append(f"min_risk_atr_multiple must be a finite number, got {atr_mult!r}")
@@ -193,6 +215,9 @@ def limits_from_dict(d: dict) -> Limits:
         min_risk_per_share=_dec(d, "min_risk_per_share", "0.10"),
         min_risk_atr_multiple=_dec(d, "min_risk_atr_multiple", "1.0"),
         max_plan_age_s=max_age,
+        max_extension_atr_5m=_dec(d, "max_extension_atr_5m", "2.0"),
+        max_stop_atr_5m=_dec(d, "max_stop_atr_5m", "2.5"),
+        good_setup_multiple=_dec(d, "good_setup_multiple", "2"),
     )
     validate_limits(limits)
     return limits

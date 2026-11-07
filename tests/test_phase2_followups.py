@@ -80,12 +80,12 @@ def test_bars_from_another_day_yield_no_bars_and_orb_refused(spy):
     summary, err = s.execute("get_bars", {"symbol": "AAPL"})
     assert err is False
     assert summary["bars"] == 0 and summary["opening_range"] is None
-    _, err = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    _, err = s.execute("plan_exit", {"setup": "orb", "entry": "103.10"})
     assert err is True  # no price_levels, so the entry cannot be validated
     assert spy == []
     _, err = s.execute(
         "plan_exit",
-        {"setup": "orb", "entry": "102.00", "opening_range": {"low": "1", "complete": True}},
+        {"setup": "orb", "entry": "103.10", "opening_range": {"low": "1", "complete": True}},
     )
     assert err is True and spy == []
 
@@ -237,21 +237,22 @@ def test_entry_outside_session_range_refused(spy, setup, extra, entry):
 
 @pytest.mark.parametrize(("setup", "extra"), SETUPS)
 @pytest.mark.parametrize("entry", ["99.70", "103.20"])
-def test_entry_at_range_edges_reaches_exit_plan(spy, setup, extra, entry):
+def test_entry_at_range_edges_is_refused_as_not_last_close(spy, setup, extra, entry):
     s = make()
     s.execute("get_bars", {"symbol": "AAPL"})
     res, err = s.execute("plan_exit", {"setup": setup, "entry": entry, **extra})
-    assert err is False  # not the range error; exit_plan decided
-    assert len(spy) == 1
-    if entry == "103.20":
-        assert res["ok"] is True
+    assert err is False  # not the range error: the edge is a real price level
+    # but orders are market orders (issue #118): an edge that is not last_close is refused
+    # before exit_plan runs, and nothing is recorded
+    assert spy == [] and s.exit_plans == []
+    assert res["ok"] is False and res["reason"].startswith("entry must be last_close")
 
 
 @pytest.mark.parametrize(("setup", "extra"), SETUPS)
 def test_entry_inside_range_passes(setup, extra):
     s = make()
     s.execute("get_bars", {"symbol": "AAPL"})
-    res, err = s.execute("plan_exit", {"setup": setup, "entry": "102.00", **extra})
+    res, err = s.execute("plan_exit", {"setup": setup, "entry": "103.10", **extra})
     assert err is False and res["ok"] is True
 
 
