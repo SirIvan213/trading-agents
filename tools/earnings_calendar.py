@@ -28,6 +28,9 @@ from tools.http import get_json
 
 FMP_EARNINGS_URL = "https://financialmodelingprep.com/stable/earnings-calendar"
 REPORT_TIMES = frozenset({"bmo", "amc"})
+# FMP caps rows per request (believed 4000; unverified offline). A reply this long may be cut
+# short, so it is not proof that a symbol is absent.
+FMP_ROW_CAP = 4000
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
@@ -55,7 +58,7 @@ def fetch_fmp_earnings_calendar(
     return body
 
 
-def _row_error(row: object) -> str | None:
+def _row_error(row: object, start: date, end: date) -> str | None:
     """Why a row is malformed, or None. Every row needs a symbol and a YYYY-MM-DD date; the
     report-time key must be present (requested with includeReportTimes) and be "bmo", "amc"
     or null; `confirmed`, when present, must be a boolean."""
@@ -64,12 +67,15 @@ def _row_error(row: object) -> str | None:
     sym, day = row.get("symbol"), row.get("date")
     if not isinstance(sym, str) or not sym.strip():
         return "row has no symbol"
+    sym = sym.strip()[:16]  # server text reaches the journal: keep it short
     if not isinstance(day, str) or not _DATE.fullmatch(day):
         return f"row for {sym} has no valid date"
     try:
-        date.fromisoformat(day)
+        when = date.fromisoformat(day)
     except ValueError:
         return f"row for {sym} has no valid date"
+    if not start <= when <= end:
+        return f"row for {sym} is dated {day}, outside the requested {start}..{end}"
     if "time" not in row:
         return f"row for {sym} has no report time field"
     if row["time"] is not None and row["time"] not in REPORT_TIMES:
@@ -82,15 +88,23 @@ def _row_error(row: object) -> str | None:
 def parse_fmp_calendar(reply: object, fetched_at: datetime, start: date, end: date) -> dict:
     """Validate an FMP reply. Returns {"ok": True, "fetched_at", "from", "to", "rows"} with rows
     {"symbol", "date", "time", "confirmed"} (confirmed False when absent), or
-    {"ok": False, "reason"}. Any malformed row makes the whole reply malformed: a reply that is
-    partly wrong cannot prove a symbol clear."""
+    {"ok": False, "reason"}. Any malformed row (incl. one dated outside [start, end]) makes the
+    whole reply malformed: a reply that is partly wrong cannot prove a symbol clear. An empty
+    reply, or one at FMP's row cap, is not ok either (it may be cut short)."""
     if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
         return {"ok": False, "reason": "earnings calendar fetch time is not timezone-aware"}
     if not isinstance(reply, list):
         return {"ok": False, "reason": "earnings calendar reply is not a list"}
+    if not reply:
+        # A whole-market calendar is never empty for a two-week range: an empty reply is a
+        # plan restriction or a glitch, and must not read as "nobody reports" (#112 review).
+        return {"ok": False, "reason": "earnings calendar reply is empty"}
+    if len(reply) >= FMP_ROW_CAP:
+        return {"ok": False, "reason": (
+            f"earnings calendar reply has {len(reply)} rows (cap {FMP_ROW_CAP}): may be cut short")}
     rows = []
     for row in reply:
-        err = _row_error(row)
+        err = _row_error(row, start, end)
         if err:
             return {"ok": False, "reason": f"earnings calendar reply is malformed: {err}"}
         rows.append({

@@ -796,7 +796,7 @@ def test_plan_fields_pinned():
 
 def test_check_order_signature_pinned():
     # #112: the only addition is `gate`, the event-gate result (tools.event_gate); it defaults to
-    # None, and a missing gate is a BLOCK (tests/test_event_gate_blocks.py), never a pass
+    # None, and a missing gate is a BLOCK (tests/test_phase5_gate_d.py), never a pass
     assert _params(check_order, defaults_ok={"gate"}) == ["order", "limits", "state", "now", "gate"]
     assert inspect.signature(check_order).parameters["gate"].default is None
 

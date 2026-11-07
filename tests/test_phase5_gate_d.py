@@ -22,7 +22,7 @@ from pipeline.events import FmpCalendarCache, events_from
 from pipeline.order_flow import approve, propose, render_ticket
 from pipeline.scenarios import ScenarioData, load_scenario
 from tests.debate_helpers import reply
-from tests.fakes import NOON, FakeAllData, FakeClient
+from tests.fakes import NOON, FakeAllData, FakeClient, background_rows
 from tests.order_helpers import (
     NY,
     T0,
@@ -392,6 +392,9 @@ DAY = date(2026, 11, 9)
 RANGE_END = date(2026, 11, 23)
 
 
+BG = object()  # a valid whole-market reply: other companies' rows across the requested range
+
+
 class Fetch:
     def __init__(self, *outcomes):
         self.outcomes = list(outcomes)
@@ -402,6 +405,9 @@ class Fetch:
         out = self.outcomes[min(len(self.calls) - 1, len(self.outcomes) - 1)]
         if isinstance(out, Exception):
             raise out
+        if out is BG:
+            from tests.fakes import background_rows
+            return background_rows(start, end)
         return out
 
 
@@ -422,19 +428,19 @@ def test_the_cache_fetches_once_per_new_york_day(tmp_path):
 
 
 def test_a_second_cache_object_reads_the_same_file(tmp_path):
-    fetch = Fetch([])
+    fetch = Fetch(BG)
     cache_with(tmp_path, fetch).get(DAY, RANGE_END)
     cache_with(tmp_path, fetch).get(DAY, RANGE_END)
     assert len(fetch.calls) == 1
 
 
 def test_a_failed_fetch_is_not_cached_and_the_next_get_fetches_again(tmp_path):
-    fetch = Fetch(RuntimeError("HTTP 503 from /stable/earnings-calendar"), [])
+    fetch = Fetch(RuntimeError("HTTP 503 from /stable/earnings-calendar"), BG)
     cache = cache_with(tmp_path, fetch)
     with pytest.raises(RuntimeError, match="HTTP 503"):
         cache.get(DAY, RANGE_END)
     assert list(tmp_path.glob("*.json")) == []
-    assert cache.get(DAY, RANGE_END)["reply"] == []
+    assert cache.get(DAY, RANGE_END)["reply"] == background_rows(DAY, RANGE_END)
     assert len(fetch.calls) == 2
 
 
@@ -452,7 +458,7 @@ def test_an_unreadable_or_incomplete_cache_file_refetches_and_is_rewritten(tmp_p
 
 
 def test_a_different_day_fetches_again_and_has_its_own_file(tmp_path):
-    fetch = Fetch([])
+    fetch = Fetch(BG)
     cache = cache_with(tmp_path, fetch)
     cache.get(DAY, RANGE_END)
     cache.get(date(2026, 11, 10), date(2026, 11, 24))
@@ -462,7 +468,7 @@ def test_a_different_day_fetches_again_and_has_its_own_file(tmp_path):
 
 
 def test_a_cached_range_that_is_shorter_than_requested_is_fetched_again(tmp_path):
-    fetch = Fetch([])
+    fetch = Fetch(BG)
     cache = cache_with(tmp_path, fetch)
     cache.get(DAY, date(2026, 11, 12))
     cache.get(DAY, RANGE_END)
@@ -472,7 +478,7 @@ def test_a_cached_range_that_is_shorter_than_requested_is_fetched_again(tmp_path
 def test_an_unwritable_cache_dir_only_costs_another_fetch(tmp_path):
     blocker = tmp_path / "file"
     blocker.write_text("x", encoding="utf-8")
-    fetch = Fetch([])
+    fetch = Fetch(BG)
     cache = FmpCalendarCache(blocker / "sub", fetch, lambda: NOON)
     cache.get(DAY, RANGE_END)
     cache.get(DAY, RANGE_END)
@@ -507,7 +513,8 @@ def data_for(now, **over):
     """A data object that is clear unless a part is replaced."""
     d = dict(
         earnings_calendar=lambda s, e: {"fetched_at": (now - timedelta(minutes=1)).isoformat(),
-                                        "from": s.isoformat(), "to": e.isoformat(), "reply": []},
+                                        "from": s.isoformat(), "to": e.isoformat(),
+                                        "reply": background_rows(s, e)},
         submissions=lambda sym: filings_ok(now, symbol=sym)["submissions"],
         news=lambda syms, a, b: {"news": [], "next_page_token": None})
     d.update(over)

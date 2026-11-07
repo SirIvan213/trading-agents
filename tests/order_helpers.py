@@ -160,12 +160,18 @@ def fmp_row(symbol: str, day: str, time: str | None = "bmo", confirmed: bool = T
 
 
 def calendar_ok(now: datetime, rows=(), *, fetched_at: datetime | None = None,
-                start: date | None = None, end: date | None = None) -> dict:
-    """A parse_fmp_calendar result fetched a minute before `now`, covering [today, today+14]."""
+                start: date | None = None, end: date | None = None,
+                background: bool = True) -> dict:
+    """A parse_fmp_calendar result fetched a minute before `now`, covering [today, today+14].
+    Other companies' background rows across the range are added unless background=False (a
+    real whole-market reply is never empty or cut short; the gate treats those as UNKNOWN)."""
+    from tests.fakes import background_rows
     from tools.earnings_calendar import parse_fmp_calendar
     today = now.astimezone(NY).date()
-    return parse_fmp_calendar(list(rows), fetched_at or now - timedelta(minutes=1),
-                              start or today, end or today + timedelta(days=14))
+    start, end = start or today, end or today + timedelta(days=14)
+    extra = background_rows(start, end) if background else []
+    return parse_fmp_calendar([*rows, *extra], fetched_at or now - timedelta(minutes=1),
+                              start, end)
 
 
 def submissions_202(now: datetime, days_ago: float = 30, items: str = "2.02,9.01",
@@ -241,8 +247,9 @@ def events_of(**inputs):
 
 
 class QuietGateData:
-    """Wraps a fake data object so the event gate reads CLEAR from it: an FMP calendar with no
-    row for anyone, an item 2.02 filing 30 days ago, and the news without halt or earnings
+    """Wraps a fake data object so the event gate reads CLEAR from it: an FMP calendar with
+    only other companies' rows, an item 2.02 filing 30 days ago, and the news without halt or
+    earnings
     headlines. Every other attribute is the wrapped object's. Used where a test is about
     something else (the order flow) and runs through pipeline.decide.run_decision (#112)."""
 
@@ -255,8 +262,9 @@ class QuietGateData:
     def earnings_calendar(self, start: date, end: date) -> dict:
         fetched = datetime.combine(start, datetime.min.time().replace(hour=8, minute=30),
                                    tzinfo=NY)
+        from tests.fakes import background_rows
         return {"fetched_at": fetched.isoformat(), "from": start.isoformat(),
-                "to": end.isoformat(), "reply": []}
+                "to": end.isoformat(), "reply": background_rows(start, end)}
 
     def submissions(self, symbol: str):
         return submissions_202(datetime(2026, 11, 3, 12, 0, tzinfo=NY), 30, symbol=symbol)

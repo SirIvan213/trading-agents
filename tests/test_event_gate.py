@@ -341,10 +341,15 @@ def test_blocked_an_item_202_filed_today_is_an_event_even_with_a_clear_calendar(
         "EVENT (sec): 8-K item 2.02 (results of operations) filed today")
 
 
-def test_an_item_202_filed_after_now_is_not_counted_as_coverage():
-    subs = submissions_202(NOW, days_ago=-1)  # accepted tomorrow: a forged or skewed filing
+def test_an_item_202_dated_after_now_is_an_event_and_never_coverage():
+    """#112 review: a 2.02 dated today or later (time estimated as 23:59:59 ET, clock skew, or
+    forged) is EVENT; it never counts as the 100-day coverage proof."""
+    subs = submissions_202(NOW, days_ago=-1)  # accepted tomorrow
     gate, v = run(filings={"ok": True, "submissions": subs})
-    assert gate["status"] == "UNKNOWN" and v["verdict"] == "BLOCK"
+    assert gate["status"] == "EVENT" and v["verdict"] == "BLOCK"
+    reasons = [f["reason"] for f in gate["findings"] if f["source"] == "sec"]
+    assert "8-K item 2.02 (results of operations) filed today" in reasons
+    assert gate["earnings"]["last_item_202"] is None
 
 
 # ============================ news: halts ============================

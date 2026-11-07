@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -115,6 +115,22 @@ def merged_news() -> dict:
     return {"news": items}
 
 
+
+def background_rows(start: date, end: date) -> list[dict]:
+    """Other companies reporting on every day of [start, end] (#112 review): a real
+    whole-market FMP calendar is never empty and always has rows near its end, and the gate
+    now treats an empty or cut-short reply as UNKNOWN. None of these symbols is a test symbol."""
+    rows, day, n = [], start, 0
+    while day <= end:
+        n += 1
+        rows.append({"symbol": f"ZBG{n:02d}", "date": day.isoformat(), "epsActual": None,
+                     "epsEstimated": 0.5, "revenueActual": None, "revenueEstimated": 1000000,
+                     "time": "amc", "periodEnding": "2026-09-30", "fiscalPeriod": "Q3",
+                     "fiscalYear": 2026, "confirmed": True, "lastUpdated": "2026-11-02"})
+        day += timedelta(days=1)
+    return rows
+
+
 class FakeFilingsData:
     """NewsData + FilingsData over saved fixtures (ABCD, CIK 12345). Records every call."""
 
@@ -151,14 +167,16 @@ class FakeFilingsData:
         return None if self.no_cik else load_fixture("sec_submissions_8k.json")
 
     def earnings_calendar(self, start: date, end: date) -> dict:
-        """The FMP calendar as LiveData returns it: fetched 08:30 ET on `start`, with only the
-        given rows (default none, so no symbol is on it) (#112)."""
+        """The FMP calendar as LiveData returns it: fetched 08:30 ET on `start`, with the given
+        rows plus other companies' background rows across the range (so no test symbol is on
+        it by default, and the reply is neither empty nor cut short) (#112)."""
         self.calls.append(("earnings_calendar", start, end))
         if self.calendar_raises:
             raise self.calendar_raises
         fetched = datetime.combine(start, time(8, 30), tzinfo=NY)
         return {"fetched_at": fetched.isoformat(), "from": start.isoformat(),
-                "to": end.isoformat(), "reply": list(self.calendar_rows)}
+                "to": end.isoformat(),
+                "reply": [*self.calendar_rows, *background_rows(start, end)]}
 
     def company_facts(self, symbol: str) -> dict | None:
         self.calls.append(("company_facts", symbol))

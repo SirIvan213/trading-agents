@@ -41,7 +41,7 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from tools.market_calendar import CalendarError, session_hours
-from tools.news import digest, parse_8k_filings
+from tools.news import digest, headline_flags, parse_8k_filings
 
 NY = ZoneInfo("America/New_York")
 CLEAR, EVENT, UNKNOWN = "CLEAR", "EVENT", "UNKNOWN"
@@ -78,6 +78,26 @@ def _trading_days_after(day: date, n: int) -> date:
     return d
 
 
+def norm_ticker(text: object) -> str:
+    """Upper case with ".", "-" and "/" share-class separators unified ("BRK-B" == "BRK.B")."""
+    if not isinstance(text, str):
+        return ""
+    return text.strip().upper().replace("-", ".").replace("/", ".")
+
+
+def _aliases(symbol: str, filings: object) -> frozenset[str]:
+    """The symbol plus every ticker the SEC filer lists ("tickers" in its submissions), all
+    normalised: an FMP row under a share-class sibling (GOOG / GOOGL) is the same company's
+    report, so it must not read as "no earnings" for the other class (#112 review)."""
+    out = {norm_ticker(symbol)}
+    subs = filings.get("submissions") if isinstance(filings, dict) else None
+    tickers = subs.get("tickers") if isinstance(subs, dict) else None
+    if isinstance(tickers, list):
+        out.update(norm_ticker(t) for t in tickers if isinstance(t, str) and t.strip())
+    out.discard("")
+    return frozenset(out)
+
+
 def _parse_time(text: object) -> datetime | None:
     if not isinstance(text, str):
         return None
@@ -92,8 +112,8 @@ def _parse_time(text: object) -> datetime | None:
 # Earnings: FMP (primary), SEC item 2.02 (coverage), secondary signals (EVENT only)
 # --------------------------------------------------------------------------------------
 
-def _fmp_findings(symbol: str, now: datetime, window_end: datetime,
-                  calendar: object) -> tuple[list[Finding], bool]:
+def _fmp_findings(symbol: str, now: datetime, window_end: datetime, calendar: object,
+                  aliases: frozenset[str]) -> tuple[list[Finding], bool]:
     """(findings, proven_clear) from the FMP calendar."""
     def unknown(reason: str) -> tuple[list[Finding], bool]:
         return [_finding("earnings", "fmp", UNKNOWN, reason)], False
@@ -121,29 +141,43 @@ def _fmp_findings(symbol: str, now: datetime, window_end: datetime,
     need_to = max(window_end.astimezone(NY).date(), horizon)
     if start > today or end < need_to:
         return unknown(f"earnings calendar covers {start}..{end}, not {today}..{need_to}")
+    # The requested range is not proof by itself: a reply that is cut short (row cap, a
+    # shorter range served) has no rows near its end. A whole-market calendar always lists
+    # someone reporting on or after the last day we rely on (#112 review).
+    try:
+        latest = max(date.fromisoformat(str(r.get("date"))) for r in rows
+                     if isinstance(r, dict))
+    except ValueError:
+        return unknown("earnings calendar has no dated rows")
+    if latest < need_to:
+        return unknown(f"earnings calendar rows stop at {latest}, before {need_to}: "
+                       "the reply may be cut short")
 
     findings: list[Finding] = []
     window_day = window_end.astimezone(NY).date()
     for row in rows:
-        if not isinstance(row, dict) or row.get("symbol") != symbol:
+        if not isinstance(row, dict) or norm_ticker(row.get("symbol")) not in aliases:
             continue
         try:
             day = date.fromisoformat(str(row.get("date")))
         except ValueError:
             return unknown("earnings calendar is malformed")
         when = row.get("time") or "no report time given"
+        listed = norm_ticker(row.get("symbol"))
+        under = "" if listed == norm_ticker(symbol) else f", listed as {listed}"
         kind = "confirmed" if row.get("confirmed") is True else "estimated"
         if day == today:
             findings.append(_finding("earnings", "fmp", EVENT,
-                                     f"earnings today {day} ({when}, {kind})"))
+                                     f"earnings today {day} ({when}, {kind}{under})"))
         elif today < day <= window_day:
             findings.append(_finding("earnings", "fmp", EVENT,
-                                     f"earnings {day} inside the trade window ({when}, {kind})"))
+                                     f"earnings {day} inside the trade window "
+                                     f"({when}, {kind}{under})"))
         elif kind == "estimated" and today < day <= horizon:
             findings.append(_finding(
                 "earnings", "fmp", EVENT,
                 f"estimated earnings date {day} within {ESTIMATE_TRADING_DAYS} trading days "
-                "(estimated dates move)"))
+                f"(estimated dates move{under})"))
     return findings, not findings
 
 
@@ -165,20 +199,29 @@ def _sec_findings(symbol: str, now: datetime,
         return unknown("SEC filings are malformed")
     today = now.astimezone(NY).date()
     now_utc = now.astimezone(UTC)
-    results = []
+    results, today_or_later = [], False
     for f in recent:
         filed = _parse_time(f.get("filed_at"))
-        if filed is not None and filed.astimezone(UTC) <= now_utc and "2.02" in f.get("items", []):
+        if filed is None or "2.02" not in f.get("items", []):
+            continue
+        # A filing time estimated as 23:59:59 ET, or one a few minutes ahead of our clock, is
+        # still today's results: the EVENT check ignores `now` (#112 review). Coverage counts
+        # only filings already made.
+        if filed.astimezone(NY).date() >= today:
+            today_or_later = True
+        if filed.astimezone(UTC) <= now_utc:
             results.append(filed)
+    findings = []
+    if today_or_later:
+        findings.append(_finding("earnings", "sec", EVENT,
+                                 "8-K item 2.02 (results of operations) filed today"))
     if not results:
+        if findings:
+            return findings, False, None
         return unknown(
             f"no 8-K item 2.02 in the last {COVERAGE_DAYS} days: cannot prove {symbol} "
             "reports quarterly, so an empty calendar proves nothing")
     last = max(results)
-    findings = []
-    if any(r.astimezone(NY).date() == today for r in results):
-        findings.append(_finding("earnings", "sec", EVENT,
-                                 "8-K item 2.02 (results of operations) filed today"))
     return findings, True, last.astimezone(NY).date().isoformat()
 
 
@@ -223,7 +266,7 @@ def earnings_status(
         return {"status": UNKNOWN, "findings": [_finding(
             "earnings", "gate", UNKNOWN, "event gate called without a symbol, now or window")],
             "clear_through": None, "last_item_202": None}
-    fmp, fmp_clear = _fmp_findings(sym, now, window_end, calendar)
+    fmp, fmp_clear = _fmp_findings(sym, now, window_end, calendar, _aliases(sym, filings))
     sec, covered, last_202 = _sec_findings(sym, now, filings)
     extra: list[Finding] = []
     sources = {"calendar": calendar, "filings": filings, "news": news}
@@ -246,33 +289,52 @@ def earnings_status(
 
 
 def halt_status(symbol: str, now: datetime, news: object) -> dict:
-    """{"status": CLEAR|EVENT|UNKNOWN, "findings": [...]}: a "halt" headline dated today is
-    EVENT; a failed or malformed news fetch is UNKNOWN, never "no halts". Never raises."""
-    sym = symbol.strip().upper() if isinstance(symbol, str) else ""
+    """{"status": CLEAR|EVENT|UNKNOWN, "findings": [...]}. Never raises.
+
+    Scans EVERY raw news item (not the de-duplicated digest, which keeps a repeated headline's
+    earliest copy, so a halt that also ran yesterday would hide today's): an item for this
+    symbol flagged "halt" (halt, paused, LULD, trading suspended ...) dated today in New York
+    is EVENT. A failed or malformed fetch, or ANY item that cannot be read (not an object, no
+    symbols list, no headline, no valid time), is UNKNOWN: the fetch was for this symbol, so an
+    unreadable item might be today's halt. Clean news with no halt today is CLEAR."""
+    sym = norm_ticker(symbol)
     if not sym or not _aware(now):
         return {"status": UNKNOWN, "findings": [_finding(
             "halt", "gate", UNKNOWN, "event gate called without a symbol or now")]}
-    dg = _digest(sym, now, news)
-    if dg is None:
-        why = news.get("reason") if isinstance(news, dict) and news.get("ok") is not True \
-            else "malformed news reply"
+    ok = isinstance(news, dict) and news.get("ok") is True
+    reply = news.get("news") if ok else None
+    items = reply.get("news") if isinstance(reply, dict) else None
+    if not isinstance(items, list):
+        why = news.get("reason") if isinstance(news, dict) and not ok else "malformed news reply"
         return {"status": UNKNOWN, "findings": [_finding(
             "halt", "news", UNKNOWN, f"news unavailable ({why}): cannot rule out a halt today")]}
-    skipped = dg.get("counts", {}).get("malformed_skipped", 0)
-    if skipped:
-        # an item the digest could not read (no time, no headline) might be today's halt
-        return {"status": UNKNOWN, "findings": [_finding(
-            "halt", "news", UNKNOWN,
-            f"{skipped} news item(s) unreadable: cannot rule out a halt today")]}
     today = now.astimezone(NY).date()
-    findings = []
-    for h in dg["headlines"]:
-        when = _parse_time(h.get("time"))
-        if "halt" in h.get("flags", []) and when is not None and \
-                when.astimezone(NY).date() == today:
+    findings: list[Finding] = []
+    unreadable = 0
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("symbols"), list):
+            unreadable += 1
+            continue
+        if sym not in {norm_ticker(x) for x in item["symbols"]}:
+            continue
+        headline, when = item.get("headline"), _parse_time(item.get("created_at"))
+        if not isinstance(headline, str) or not headline.strip() or when is None:
+            unreadable += 1
+            continue
+        if "halt" in headline_flags(headline) and when.astimezone(NY).date() == today:
             findings.append(_finding("halt", "news", EVENT,
-                                     f"trading halt today: {h['headline']!r}"))
-    return {"status": EVENT if findings else CLEAR, "findings": findings}
+                                     f"trading halt today: {headline.strip()[:160]!r}"))
+    if unreadable:
+        findings.append(_finding(
+            "halt", "news", UNKNOWN,
+            f"{unreadable} news item(s) unreadable: cannot rule out a halt today"))
+    if any(f["status"] == EVENT for f in findings):
+        status = EVENT
+    elif findings:
+        status = UNKNOWN
+    else:
+        status = CLEAR
+    return {"status": status, "findings": findings}
 
 
 def event_gate(

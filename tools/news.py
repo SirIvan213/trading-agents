@@ -63,7 +63,9 @@ RED_FLAG_CATALYSTS = frozenset({"bankruptcy", "delisting_notice", "non_reliance_
 HEADLINE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "offering": ("offering", "offerings", "public offering", "public offerings",
                  "registered direct", "ATM"),
-    "halt": ("halt", "halts", "halted", "halting"),
+    # LULD volatility interruptions are officially "trading pauses" (#112)
+    "halt": ("halt", "halts", "halted", "halting", "paused", "trading pause", "trading pauses",
+             "LULD", "trading suspended", "suspends trading", "suspended trading"),
     "fda": ("FDA", "CRL"),
     "guidance": ("guidance", "outlook"),
     "analyst": ("downgrade", "downgrades", "downgraded", "downgrading",

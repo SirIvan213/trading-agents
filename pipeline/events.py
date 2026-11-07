@@ -67,19 +67,24 @@ class FmpCalendarCache:
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))
             if (isinstance(cached, dict) and cached.get("from") == start.isoformat()
-                    and cached.get("to", "") >= end.isoformat() and "reply" in cached):
+                    and isinstance(cached.get("to"), str) and cached["to"] >= end.isoformat()
+                    and isinstance(cached.get("fetched_at"), str) and "reply" in cached):
                 return cached
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError, TypeError):
+            pass  # unreadable or odd: fetch again rather than latch UNKNOWN for the day
         reply = self.fetch(start, end)
         now = (self.clock or (lambda: datetime.now(NY)))()
         record = {"fetched_at": now.astimezone(NY).isoformat(), "from": start.isoformat(),
                   "to": end.isoformat(), "reply": reply}
-        try:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(record), encoding="utf-8")
-        except OSError:
-            pass  # a cache that cannot be written only costs another fetch
+        # Only a reply that validates is cached: a bad one would hold UNKNOWN all day.
+        if parse_fmp_calendar(reply, now, start, end).get("ok") is True:
+            try:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(json.dumps(record), encoding="utf-8")
+                os.replace(tmp, path)  # atomic: a reader never sees half a file
+            except OSError:
+                pass  # a cache that cannot be written only costs another fetch
         return record
 
 
