@@ -42,7 +42,8 @@ class Loaded:
         self.bars = bars
         self.summary = summarize(bars)
         self.levels = price_levels(self.summary)
-        self.atr = Decimal(self.summary["atr"])
+        self.atr = Decimal(self.summary["atr"])  # 1-minute ATR (what exit_plan uses)
+        self.atr_5m = Decimal(self.summary["atr_5m"])  # 5-minute ATR (plan context)
 
     def level_plan(self, multiple: str = "2") -> dict:
         return exit_plan("level", Decimal(self.levels["last_close"]), LIMITS,
@@ -79,8 +80,9 @@ def test_clean_buy_opening_range_is_complete(clean):
 
 
 def test_clean_buy_close_is_above_vwap_but_not_extended(clean):
+    # "extended" is measured in 5-minute ATR units now
     last, vwap = Decimal(clean.summary["last_close"]), Decimal(clean.summary["vwap"])
-    assert vwap < last <= vwap + 2 * clean.atr
+    assert vwap < last <= vwap + 2 * clean.atr_5m
 
 
 def test_clean_buy_level_plan_is_tight_and_has_room_for_2r(clean):
@@ -88,9 +90,12 @@ def test_clean_buy_level_plan_is_tight_and_has_room_for_2r(clean):
     assert plan["ok"] is True
     assert plan["entry"] == clean.levels["last_close"] and plan["reward_to_risk"] == "2.00"
     risk = Decimal(plan["risk_per_share"])
-    assert 1 * clean.atr <= risk <= 2 * clean.atr  # tight and structural, not a noise stop
+    assert 1 * clean.atr_5m <= risk <= 2 * clean.atr_5m  # tight and structural, not a noise stop
     assert Decimal(plan["stop"]) < Decimal(plan["entry"]) < Decimal(plan["target"])
-    assert Decimal(plan["target"]) < Decimal(clean.levels["session_high"])  # room for 2R
+    # trending at its highs: the close is within 0.10 of the session high and
+    # session_high_vs_entry_atr_5m < 1, so the session high is not overhead resistance
+    gap = Decimal(clean.levels["session_high"]) - Decimal(plan["entry"])
+    assert 0 <= gap <= Decimal("0.10") and gap / clean.atr_5m < 1
 
 
 def test_clean_buy_news_is_positive_with_no_red_flags(clean):
@@ -115,7 +120,8 @@ def test_clean_buy_order_passes_the_risk_check(clean):
         "setup": "level", "entry": clean.levels["last_close"], "level": clean.levels["vwap"],
         "reward_multiple": "2"})
     assert err is False and res["ok"] is True and res["target"] == plan["target"]
-    assert res["target_vs_session_high"] == "below"
+    assert res["target_vs_session_high"] == "at_or_above"
+    assert Decimal(res["session_high_vs_entry_atr_5m"]) < 1
     sized = build_order(session.exit_plans[0], LIMITS, clean.now)
     assert sized["ok"] is True
     verdict = check_order(sized["order"], LIMITS, DayState(), clean.now)
@@ -129,7 +135,8 @@ def test_red_flag_chart_gives_the_same_ok_level_plan(flag):
     assert flag.summary["opening_range"]["complete"] is True
     plan = flag.level_plan("2")
     assert plan["ok"] is True and plan["reward_to_risk"] == "2.00"
-    assert Decimal(plan["target"]) < Decimal(flag.levels["session_high"])
+    gap = Decimal(flag.levels["session_high"]) - Decimal(flag.levels["last_close"])
+    assert 0 <= gap <= Decimal("0.10") and gap / flag.atr_5m < 1  # trending at its highs
 
 
 def test_red_flag_digest_has_halt_and_earnings(flag):
