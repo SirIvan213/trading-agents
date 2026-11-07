@@ -167,7 +167,8 @@ def test_trader_api_error_gives_exit_1(smoke, capsys):
 
 def test_trader_failure_codes_exclude_the_legitimate_passes():
     assert S.TRADER_FAILURES == {"invalid_output", "api_error", "exception", "config_error",
-                                 "cancelled"}
+                                 "cancelled", "debate_mismatch"}
+    assert not {"fatal_bear", "no_plans"} & S.TRADER_FAILURES  # legitimate PASSes
 
 
 def test_print_latency_reports_budget_and_over_budget(capsys):

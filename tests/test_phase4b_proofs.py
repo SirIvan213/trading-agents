@@ -435,8 +435,10 @@ def test_budget_is_recorded_against_max_plan_age(tmp_path):
     assert set(result.timings_ms) == {"analysts", "debate", "trader", "approval"}
 
 
-def test_plans_stale_before_the_trader_skip_the_trader_call(tmp_path):
-    clock = StepClock(NOON, NOON + timedelta(seconds=LIMITS.max_plan_age_s + 1))
+@pytest.mark.parametrize("age", [
+    LIMITS.max_plan_age_s - decide.MIN_APPROVAL_S + 1, LIMITS.max_plan_age_s + 1])
+def test_plans_stale_before_the_trader_skip_the_trader_call(tmp_path, age):
+    clock = StepClock(NOON, NOON + timedelta(seconds=age))
     result, router, journal = go(tmp_path, scripts(), clock=clock,
                                  ask=lambda _: pytest.fail("must not ask"))
     assert "trader" not in router.calls  # no billed Trader call
@@ -446,7 +448,9 @@ def test_plans_stale_before_the_trader_skip_the_trader_call(tmp_path):
 
 
 def test_budget_boundary_still_calls_the_trader(tmp_path):
-    clock = StepClock(NOON, NOON + timedelta(seconds=LIMITS.max_plan_age_s))
+    # exactly MIN_APPROVAL_S left for the human: the Trader is still called
+    clock = StepClock(NOON, NOON + timedelta(seconds=LIMITS.max_plan_age_s
+                                             - decide.MIN_APPROVAL_S))
     result, router, _ = go(tmp_path, scripts(), clock=clock, ask=lambda _: "no")
     assert "trader" in router.calls and result.trader.ok
 

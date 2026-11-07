@@ -77,7 +77,7 @@ TRADER = "trader"
 # Forced-PASS codes that mean the Trader itself failed (a fatal Bear or no plans is a
 # legitimate PASS, not a failure).
 TRADER_FAILURES = frozenset({"invalid_output", "api_error", "exception", "config_error",
-                             "cancelled"})
+                             "cancelled", "debate_mismatch"})
 
 
 class FixtureData(FixtureMarketData):

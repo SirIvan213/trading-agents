@@ -13,8 +13,9 @@ the debate, the Trader and the human together must fit inside it. Therefore:
   - the analysts' timeout must be below max_plan_age_s (default: half of it);
   - every agent config, the debate rounds and the limits are checked BEFORE any API call;
   - before the (billed) Trader call, the time elapsed since the analysts started is
-    compared with max_plan_age_s; if it is already used up, the Trader is not called and
-    the decision is a forced PASS ("stale_before_trader");
+    compared with max_plan_age_s; if less than MIN_APPROVAL_S (30 s) would be left for the
+    human, the Trader is not called and the decision is a forced PASS
+    ("stale_before_trader");
   - the ticket says when the plan expires, and the re-check after approval refuses a plan
     that went stale while the human read it.
 Elapsed time is measured from the analysts' start, which is no later than any plan's as_of,
@@ -49,6 +50,8 @@ from pipeline.order_flow import (
 from tools.scan import validate_symbols
 
 ALL_AGENTS = (*AGENTS, "bull", "bear", "trader")
+# Seconds the human must have left to read the ticket; with less, the Trader is not called.
+MIN_APPROVAL_S = 30
 
 
 @dataclass
@@ -133,7 +136,7 @@ def run_decision(
     age = _elapsed_s(started, clock())
     budget["age_before_trader_s"] = age
     t0 = time.monotonic()
-    if age > max_age:  # every plan is already stale: don't pay for a Trader call
+    if age > max_age - MIN_APPROVAL_S:  # no time left to approve: skip the billed call
         trader = forced_pass(packet.symbol, "stale_before_trader", cfgs["trader"])
     else:
         trader = run_trader(packet, debate, client=_client_for(clients, "trader"),
