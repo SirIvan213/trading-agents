@@ -63,7 +63,7 @@ def happy_queue():
     return [
         response([tool_use("t1", "get_bars", {"symbol": "AAPL"})], "tool_use"),
         response(
-            [tool_use("t2", "plan_exit", {"setup": "orb", "entry": "102.00"})], "tool_use"
+            [tool_use("t2", "plan_exit", {"setup": "orb", "entry": "103.10"})], "tool_use"
         ),
         good(),
     ]

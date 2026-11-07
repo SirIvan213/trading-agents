@@ -215,17 +215,50 @@ def atr_5m(bars: list[Bar], n: int = 14) -> Decimal | None:
     return atr(resample(bars, 5), n)
 
 
+# Finished 5-minute bars needed before a provisional 5-minute ATR is reported (issue #117):
+# three bars (09:30, 09:35, 09:40) exist at 09:45, when the entry window opens.
+PROVISIONAL_MIN_BARS = 3
+
+
+def atr_5m_seeded(
+    bars: list[Bar], n: int = 14, min_bars: int = PROVISIONAL_MIN_BARS
+) -> tuple[Decimal | None, bool]:
+    """(5-minute ATR, provisional) for plan CONTEXT and labels only (issue #117).
+
+    With n or more finished 5-minute bars this is atr_5m (Wilder), provisional False. With
+    min_bars to n-1 it is the simple mean of their true ranges (first bar TR = high-low),
+    provisional True. Fewer than min_bars: (None, False). Opening bars are usually wide, so a
+    provisional value tends to overstate the ATR. Never used for the stop buffer or a limit.
+    """
+    if min_bars < 1 or min_bars > n:
+        raise ValueError("min_bars must be between 1 and n")
+    five = resample(bars, 5)
+    if len(five) >= n:
+        return atr(five, n), False
+    if len(five) < min_bars:
+        return None, False
+    trs: list[Decimal] = []
+    for i, b in enumerate(five):
+        if i == 0:
+            trs.append(b.high - b.low)
+        else:
+            pc = five[i - 1].close
+            trs.append(max(b.high - b.low, abs(b.high - pc), abs(b.low - pc)))
+    return (sum(trs) / len(trs)).quantize(Decimal("0.0001")), True
+
+
 def summarize(bars: list[Bar], or_minutes: int = 15, atr_n: int = 14) -> dict:
     """JSON-serializable summary of a bar series (Decimals as strings)."""
     if not bars:
         return {
             "bars": 0, "first": None, "last": None, "last_close": None,
             "session_high": None, "session_low": None, "volume": 0,
-            "vwap": None, "atr": None, "atr_5m": None, "opening_range": None,
+            "vwap": None, "atr": None, "atr_5m": None, "atr_5m_provisional": False,
+            "opening_range": None,
         }
     v = vwap(bars)
     a = atr(bars, atr_n)
-    a5 = atr_5m(bars, atr_n)
+    a5, provisional = atr_5m_seeded(bars, atr_n, min(PROVISIONAL_MIN_BARS, atr_n))
     return {
         "bars": len(bars),
         "first": bars[0].ts.isoformat(),
@@ -236,7 +269,9 @@ def summarize(bars: list[Bar], or_minutes: int = 15, atr_n: int = 14) -> dict:
         "volume": sum(b.volume for b in bars),
         "vwap": None if v is None else str(v),
         "atr": None if a is None else str(a),  # 1-minute ATR (stop buffer, risk limits)
-        "atr_5m": None if a5 is None else str(a5),  # 5-minute ATR (context for the model)
+        # 5-minute ATR (context and plan labels only); provisional before n 5-minute bars
+        "atr_5m": None if a5 is None else str(a5),
+        "atr_5m_provisional": provisional,
         "opening_range": opening_range(bars, or_minutes),
     }
 

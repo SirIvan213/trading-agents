@@ -20,7 +20,7 @@ from tests.test_phase4_gate import LIMITS, packet_with
 # A self-consistent forgery: passes every price check by itself (stop < entry < target,
 # risk = entry - stop, whole cents). Sized directly it would give an order.
 FORGED = {"entry": "100.00", "stop": "99.00", "target": "101.00", "risk_per_share": "1.00",
-          "reward_to_risk": "1.00"}
+          "reward_to_risk": "1.00", "last_close": "100.00"}
 
 
 @pytest.fixture(autouse=True)

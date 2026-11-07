@@ -127,11 +127,12 @@ def test_summarize_atr_5m_present_and_equals_atr_5m():
 
 
 def test_summarize_atr_5m_none_for_short_or_empty():
-    short = summarize(flat(3, 0, 30))
-    assert short["atr_5m"] is None
+    short = summarize(flat(3, 0, 14))  # 2 finished 5-minute bars: below the provisional minimum
+    assert short["atr_5m"] is None and short["atr_5m_provisional"] is False
     assert short["atr"] is not None  # the 1-minute ATR is unchanged
     empty = summarize([])
     assert "atr_5m" in empty and empty["atr_5m"] is None
+    assert empty["atr_5m_provisional"] is False
 
 
 def test_summarize_clean_buy_has_both_atrs():
@@ -149,13 +150,15 @@ def test_clean_buy_plan_exit_context_exact_values():
     lvl, err = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
                                        "level": lv["vwap"], "reward_multiple": "2"})
     assert err is False
+    assert lvl["labels"]["suggested_multiple"] == "2"
     assert (lvl["risk_per_share"], lvl["stop"], lvl["target"]) == ("0.34", "80.38", "81.40")
     assert lvl["atr_5m"] == "0.1868"
     assert lvl["risk_atr_5m"] == "1.82"             # 0.34 / 0.1868 = 1.820
     assert lvl["entry_vs_vwap_atr_5m"] == "1.71"    # 0.32 / 0.1868 = 1.713
     assert lvl["session_high_vs_entry_atr_5m"] == "0.26"  # 0.05 / 0.1868 = 0.267, floored
-    orb, _ = s.execute("plan_exit", {"setup": "orb", "entry": lv["last_close"],
-                                     "reward_multiple": "2"})
+    # the orb stop is not tight (risk 4.55 x atr_5m), so its suggestion, and ceiling, is 1
+    orb, _ = s.execute("plan_exit", {"setup": "orb", "entry": lv["last_close"]})
+    assert orb["labels"]["tight_stop"] is False and orb["reward_to_risk"] == "1.00"
     assert orb["risk_per_share"] == "0.85" and orb["risk_atr_5m"] == "4.55"
     assert orb["entry_vs_vwap_atr_5m"] == "1.71" and orb["target_vs_session_high"] == "at_or_above"
 
@@ -202,9 +205,10 @@ def test_exit_plan_still_gets_the_1_minute_atr(spy, setup):
     if setup == "level":
         inp["level"] = lv["vwap"]
     s.execute("plan_exit", inp)
-    ((_, kw),) = spy
-    assert kw["atr"] == D(s.summary["atr"]) == D("0.1301")
-    assert kw["atr"] != D(s.summary["atr_5m"])
+    assert spy  # one labelling call plus one at the chosen multiple
+    for _, kw in spy:
+        assert kw["atr"] == D(s.summary["atr"]) == D("0.1301")
+        assert kw["atr"] != D(s.summary["atr_5m"])
 
 
 def test_stop_buffer_uses_the_1_minute_atr_not_atr_5m():
@@ -289,10 +293,10 @@ def test_clean_buy_close_near_the_high(clean):
 def test_clean_buy_both_plans_valid_and_both_orders_pass(clean):
     s = session("clean-buy")
     lv = price_levels(s.summary)
-    for setup, extra in (("level", {"level": lv["vwap"]}), ("orb", {})):
-        res, err = s.execute("plan_exit", {"setup": setup, "entry": lv["last_close"],
-                                           "reward_multiple": "2", **extra})
-        assert err is False and res["ok"] is True and res["reward_to_risk"] == "2.00"
+    # the vwap-level plan earns 2R; the orb stop is not tight, so it stays at 1R
+    for setup, extra, rr in (("level", {"level": lv["vwap"]}, "2.00"), ("orb", {}, "1.00")):
+        res, err = s.execute("plan_exit", {"setup": setup, "entry": lv["last_close"], **extra})
+        assert err is False and res["ok"] is True and res["reward_to_risk"] == rr
         sized = build_order(s.exit_plans[-1], LIMITS, s.now)
         assert sized["ok"] is True, sized
         assert check_order(sized["order"], LIMITS, DayState(), s.now) == {
@@ -317,7 +321,7 @@ PROMPT = (Path(__file__).resolve().parents[1] / "agents" / "prompts" / "technica
 def test_technical_prompt_uses_the_5_minute_fields():
     assert "atr_5m" in PROMPT
     assert "session_high_vs_entry_atr_5m" in PROMPT
-    assert "risk_atr_5m" in PROMPT and "entry_vs_vwap_atr_5m" in PROMPT
+    assert "labels" in PROMPT and "suggested_multiple" in PROMPT
     assert "`risk_atr`" not in PROMPT and "`entry_vs_vwap_atr`" not in PROMPT  # old names gone
 
 
@@ -362,25 +366,45 @@ def test_a_fully_missing_bucket_is_skipped_not_invented():
     assert len(fives) == 17
 
 
-def test_early_session_has_no_5m_context_and_null_fields():
+def _early_session(minute_cutoff: str):
     from pipeline.scenarios import ScenarioData, load_scenario
     data = ScenarioData(load_scenario("clean-buy"))
     early = [b for b in B.regular_session(B.parse_bars(data._bars))
-             if b.ts.astimezone(NY).strftime("%H:%M") < "10:15"]
+             if b.ts.astimezone(NY).strftime("%H:%M") < minute_cutoff]
     summ = summarize(early)
-    assert summ["atr"] is not None and summ["atr_5m"] is None  # 9 finished 5-minute bars
     s = session("clean-buy")
     lv = price_levels(summ)
     s.summary = {**summ, "price_levels": lv}
+    return summ, s, lv
+
+
+def test_very_early_session_has_no_5m_context_and_null_fields():
+    summ, s, lv = _early_session("09:44")  # 14 bars: 2 finished 5-minute bars
+    assert summ["atr"] is not None and summ["atr_5m"] is None
+    assert summ["atr_5m_provisional"] is False
     res, err = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
-                                       "level": lv["vwap"]})
+                                       "level": lv["or_low"]})
     assert err is False, res
     assert res["atr_5m"] is None
     assert res["risk_atr_5m"] is None and res["entry_vs_vwap_atr_5m"] is None
     assert res["session_high_vs_entry_atr_5m"] is None
+    assert res["labels"]["extended"] is None and res["labels"]["tight_stop"] is None
+    assert res["labels"]["suggested_multiple"] == "1"  # unknown never earns the higher multiple
 
 
-def test_prompt_says_null_5m_fields_mean_minimum_multiple():
+def test_early_session_uses_the_provisional_5m_atr_and_non_null_labels():
+    summ, s, lv = _early_session("10:15")  # 9 finished 5-minute bars
+    assert summ["atr"] is not None and summ["atr_5m"] is not None
+    assert summ["atr_5m_provisional"] is True
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
+                                       "level": lv["vwap"]})
+    assert err is False, res
+    assert res["atr_5m"] == summ["atr_5m"]
+    assert res["labels"]["atr_5m_provisional"] is True
+    assert res["labels"]["extended"] is not None and res["labels"]["tight_stop"] is not None
+
+
+def test_prompt_says_null_means_unknown_and_labels_decide_the_multiple():
     from agents.technical import PROMPT
-    assert "If they are null" in PROMPT and "stay at the minimum multiple" in PROMPT
-    assert "not the 1-minute `atr`" in PROMPT
+    assert "`null` means unknown, not good" in PROMPT
+    assert "do NOT judge extension or stop tightness yourself" in PROMPT

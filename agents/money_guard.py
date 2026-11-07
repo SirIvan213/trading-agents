@@ -35,6 +35,10 @@ $98.50:00" and "buy at 101:50" are still flagged):
   - "per share", "/share" and "a share" are a price unit, not a size: "Risk is 2.39 per share"
     is not a (b) mention, but the number is treated as a price and must be an allowed value.
 
+Dates (broader than the exemptions above): a number inside a YYYY-MM-DD date is skipped in
+EVERY pattern except a `$` amount, so "8-K filed 2026-11-02, shares rose" is not the share
+count "02,".
+
 Allowed values (issue #87):
   - Plan values: entry, stop, target, risk_per_share and reward_to_risk of every plan, matched
     Decimal-equal ("101.5" == "101.50"). They never allow a (b) size: "104 shares" is flagged
@@ -93,6 +97,8 @@ _C = re.compile(
 )
 _D = re.compile(r"(?<![\d.,])(\d+\.\d{2})(?!\d)(?!\s*%)(?!\s*x\b)", re.I)
 _ITEM = re.compile(r"item[\s_-]*$", re.I)
+# A calendar date in debate text; digit boundaries so "12026-11-021" is not one.
+_DATE_IN_TEXT = re.compile(r"(?<![\d.,])\d{4}-\d{2}-\d{2}(?!\d)(?!\.\d)")
 _CLOCK_AFTER = re.compile(r":\d\d")
 
 
@@ -160,6 +166,14 @@ def _scan_at(text: str) -> dict[int, tuple[str, str, str]]:
     for pattern in (_B, _B_REV):
         for m in pattern.finditer(text):
             found[m.start(1)] = ("b", m.group(0).strip(), m.group(1))
+    # A number inside a YYYY-MM-DD date is a label, not a value: "8-K filed 2026-11-02, shares
+    # rose" must not read "02," as a share count. A `$` amount is never skipped.
+    dates = [range(m.start(), m.end()) for m in _DATE_IN_TEXT.finditer(text)]
+    if dates:
+        found = {
+            k: v for k, v in found.items()
+            if v[0] == "a" or not any(k in r for r in dates)
+        }
     return found
 
 

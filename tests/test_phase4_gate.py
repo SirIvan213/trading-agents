@@ -155,13 +155,24 @@ def test_price_levels_always_two_decimal_strings(raw):
 
 # ===================== #39: entry =====================
 
+def assert_last_close_only(spy, s, res, name, setup):
+    """Issue #118: orders are market orders, so only last_close reaches exit_plan; any other
+    returned price is refused with a non-error reason and nothing is recorded."""
+    if name == "last_close":
+        assert spy  # the gate let it through (a labelling call, then the chosen multiple)
+        assert spy[0][0][0] == setup
+        assert all(c[0][1] == D(AAPL_LEVELS[name]) for c in spy)
+    else:
+        assert res["ok"] is False and res["reason"].startswith("entry must be last_close")
+        assert spy == [] and s.exit_plans == []
+
+
 @pytest.mark.parametrize(("name", "entry"), ALL_SPELLINGS)
 def test_each_allowed_value_as_entry_reaches_exit_plan_orb(spy, name, entry):
     s = loaded()
     res, err = s.execute("plan_exit", {"setup": "orb", "entry": entry})
     assert err is False and "error" not in res
-    assert len(spy) == 1  # exit_plan may refuse structurally, but the gate let it through
-    assert spy[0][0][0] == "orb" and spy[0][0][1] == D(AAPL_LEVELS[name])
+    assert_last_close_only(spy, s, res, name, "orb")
 
 
 @pytest.mark.parametrize(("name", "entry"), ALL_SPELLINGS)
@@ -169,20 +180,27 @@ def test_each_allowed_value_as_entry_reaches_exit_plan_level(spy, name, entry):
     s = loaded()
     res, err = s.execute("plan_exit", {"setup": "level", "entry": entry, "level": "99.70"})
     assert err is False and "error" not in res
-    assert len(spy) == 1 and spy[0][0][1] == D(AAPL_LEVELS[name])
+    assert_last_close_only(spy, s, res, name, "level")
 
 
-@pytest.mark.parametrize("name", ["or_high", "session_high", "last_close", "vwap"])
-def test_allowed_entry_above_structure_gives_ok_plan(name):
-    res, err = loaded().execute("plan_exit", {"setup": "orb", "entry": AAPL_LEVELS[name]})
+def test_last_close_entry_above_structure_gives_ok_plan():
+    res, err = loaded().execute("plan_exit", {"setup": "orb", "entry": AAPL_LEVELS["last_close"]})
     assert err is False and res["ok"] is True
 
 
-def test_entry_spellings_of_or_high_all_equal():
-    for sp in ("102", "102.0", "102.00", "102.000"):
+@pytest.mark.parametrize("name", ["or_high", "session_high", "vwap"])
+def test_other_returned_prices_are_refused_as_entry_without_an_error(name):
+    s = loaded()
+    res, err = s.execute("plan_exit", {"setup": "orb", "entry": AAPL_LEVELS[name]})
+    assert err is False and res["ok"] is False and "last_close" in res["reason"]
+    assert s.exit_plans == []
+
+
+def test_entry_spellings_of_last_close_all_equal():
+    for sp in ("103.1", "103.10", "103.100"):
         res, err = loaded().execute("plan_exit", {"setup": "orb", "entry": sp})
         assert err is False and res["ok"] is True
-        assert D(res["entry"]) == D("102.00")  # exit_plan echoes the spelling it was given
+        assert res["entry"] == "103.10"  # exit_plan echoes the spelling it was given
 
 
 IN_RANGE_NOT_RETURNED = ["102.50", "99.71", "103.19", "101.6001", "101.59", "101.61", "100",
@@ -217,10 +235,9 @@ def test_raw_vwap_is_refused_as_entry_and_level(spy):
 @pytest.mark.parametrize(("name", "level"), ALL_SPELLINGS)
 def test_each_allowed_value_as_level_is_accepted(spy, name, level):
     s = loaded()
-    res, err = s.execute("plan_exit", {"setup": "level", "entry": "103.20", "level": level})
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": level})
     assert err is False and "error" not in res
-    assert len(spy) == 1
-    assert spy[0][1]["level"] == D(AAPL_LEVELS[name])
+    assert spy and all(c[1]["level"] == D(AAPL_LEVELS[name]) for c in spy)
 
 
 @pytest.mark.parametrize("level", IN_RANGE_NOT_RETURNED + OUT_OF_RANGE)
@@ -233,7 +250,7 @@ def test_level_not_a_returned_price_is_refused(spy, level):
 
 def test_valid_entry_does_not_excuse_invalid_level(spy):
     res, err = loaded().execute(
-        "plan_exit", {"setup": "level", "entry": "102.00", "level": "102.50"})
+        "plan_exit", {"setup": "level", "entry": "103.10", "level": "102.50"})
     assert err is True and res == {"error": LEVEL_MSG}
     assert spy == []
 
@@ -243,7 +260,7 @@ def test_refusal_lists_available_level_names():
     for name in AAPL_LEVELS:
         assert name in res["error"]
     res, _ = loaded().execute(
-        "plan_exit", {"setup": "level", "entry": "102.00", "level": "102.50"})
+        "plan_exit", {"setup": "level", "entry": "103.10", "level": "102.50"})
     for name in AAPL_LEVELS:
         assert name in res["error"]
 
@@ -272,7 +289,7 @@ def test_plan_exit_without_price_levels_in_summary_refuses(spy):
 
 def test_ok_plan_adds_record_with_sequential_ids_and_result_has_plan_id():
     s = loaded()
-    r1, _ = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    r1, _ = s.execute("plan_exit", {"setup": "orb", "entry": "103.10"})
     r2, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "101.60"})
     assert r1["plan_id"] == "plan-1" and r2["plan_id"] == "plan-2"
     assert [p.plan_id for p in s.exit_plans] == ["plan-1", "plan-2"]
@@ -294,11 +311,11 @@ def test_record_matches_a_direct_exit_plan_call():
     s = loaded()
     # The model spells the entry "102"; the gate passes exit_plan the canonical
     # price_levels string ("102.00"), so the record always carries cent prices.
-    s.execute("plan_exit", {"setup": "orb", "entry": "102"})
+    s.execute("plan_exit", {"setup": "orb", "entry": "103.1"})
     (rec,) = s.exit_plans
-    assert rec.entry == "102.00"
+    assert rec.entry == "103.10"
     direct = real_exit_plan(
-        "orb", D("102.00"), s.limits, opening_range=s.summary["opening_range"],
+        "orb", D("103.10"), s.limits, opening_range=s.summary["opening_range"],
         atr=D(s.summary["atr"]))
     for f in ("entry", "stop", "target", "risk_per_share", "reward_to_risk", "time_exit"):
         assert getattr(rec, f) == direct[f], f
@@ -306,13 +323,13 @@ def test_record_matches_a_direct_exit_plan_call():
 
 def test_record_level_names():
     s = loaded()
-    s.execute("plan_exit", {"setup": "orb", "entry": "102"})
+    s.execute("plan_exit", {"setup": "orb", "entry": "103.1"})
     s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "101.6"})
-    s.execute("plan_exit", {"setup": "level", "entry": "103.2", "level": "99.70"})
+    s.execute("plan_exit", {"setup": "level", "entry": "103.1", "level": "99.70"})
     orb, lvl, lvl2 = s.exit_plans
-    assert (orb.entry_level, orb.structure_level) == ("or_high", "or_low")
+    assert (orb.entry_level, orb.structure_level) == ("last_close", "or_low")
     assert (lvl.entry_level, lvl.structure_level) == ("last_close", "vwap")
-    assert lvl2.entry_level == "session_high"
+    assert lvl2.entry_level == "last_close"
     # 99.70 is both session_low and or_low; either name is a truthful match
     assert lvl2.structure_level in ("session_low", "or_low")
 
@@ -320,31 +337,33 @@ def test_record_level_names():
 def test_refused_plan_adds_no_record():
     s = loaded()
     s.execute("plan_exit", {"setup": "orb", "entry": "102.50"})
-    s.execute("plan_exit", {"setup": "level", "entry": "102.00", "level": "102.50"})
-    s.execute("plan_exit", {"setup": "level", "entry": "102.00"})
-    s.execute("plan_exit", {"setup": "bogus", "entry": "102.00"})
-    s.execute("plan_exit", {"setup": "orb", "entry": "102.00", "atr": "0.01"})
+    s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "102.50"})
+    s.execute("plan_exit", {"setup": "level", "entry": "103.10"})
+    s.execute("plan_exit", {"setup": "bogus", "entry": "103.10"})
+    s.execute("plan_exit", {"setup": "orb", "entry": "103.10", "atr": "0.01"})
+    s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})  # valid price, not last_close
     assert s.exit_plans == []
 
 
 def test_ok_false_plan_adds_no_record_and_no_plan_id():
     s = loaded()
-    res, err = s.execute("plan_exit", {"setup": "orb", "entry": "99.70"})  # entry at structure
+    # the level equals the entry: no stop under it, so the plan is not ok
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "103.10"})
     assert err is False and res["ok"] is False and "plan_id" not in res
     assert s.exit_plans == []
-    res, _ = s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    res, _ = s.execute("plan_exit", {"setup": "orb", "entry": "103.10"})
     assert res["plan_id"] == "plan-1"  # failed attempts do not consume ids
 
 
 def test_no_ledger_before_get_bars():
     s = make()
-    s.execute("plan_exit", {"setup": "orb", "entry": "102.00"})
+    s.execute("plan_exit", {"setup": "orb", "entry": "103.10"})
     assert s.exit_plans == []
 
 
 # ===================== #40: AnalystRun / DecisionPacket =====================
 
-def bars_then_plan(entry="102.00"):
+def bars_then_plan(entry="103.10"):
     return [
         response([tool_use("b", "get_bars", {"symbol": "AAPL"})], "tool_use"),
         response([tool_use("p", "plan_exit", {"setup": "orb", "entry": entry})], "tool_use"),
@@ -364,7 +383,7 @@ def test_analyst_run_exit_plans_filled_when_ok():
     run = run_tech([*bars_then_plan(), good_report()])
     assert run.ok is True
     assert [p.plan_id for p in run.exit_plans] == ["plan-1"]
-    assert run.exit_plans[0].entry == "102.00" and run.exit_plans[0].symbol == "AAPL"
+    assert run.exit_plans[0].entry == "103.10" and run.exit_plans[0].symbol == "AAPL"
 
 
 def test_analyst_run_exit_plans_empty_when_neutral_fallback():
@@ -381,7 +400,7 @@ def test_plan_survives_when_first_report_rejected_and_retry_validates():
     run = run_tech([*bars_then_plan(), rejected, good_report()])
     assert run.ok is True and run.reason is None
     assert [p.plan_id for p in run.exit_plans] == ["plan-1"]
-    assert run.exit_plans[0].entry == "102.00"
+    assert run.exit_plans[0].entry == "103.10"
 
 
 def test_plan_survives_when_first_report_has_invalid_catalyst_and_retry_validates():
@@ -445,7 +464,7 @@ def packet_via_orchestrator(technical_queue, timeout_s=5):
 def abcd_plan_queue(*tail):
     return [
         response([tool_use("b", "get_bars", {"symbol": "ABCD"})], "tool_use"),
-        response([tool_use("p", "plan_exit", {"setup": "orb", "entry": "102.00"})], "tool_use"),
+        response([tool_use("p", "plan_exit", {"setup": "orb", "entry": "103.10"})], "tool_use"),
         *tail,
     ]
 
@@ -526,7 +545,7 @@ def plan_record(plan_id="plan-1", **over) -> ExitPlanRecord:
         "plan_id": plan_id, "symbol": "TSLA", "setup": "level", "entry": "364.18",
         "stop": "358.32", "target": "370.04", "risk_per_share": "5.86",
         "reward_to_risk": "1.00", "time_exit": "15:55", "entry_level": "last_close",
-        "structure_level": "vwap", "as_of": "2026-10-19T10:15:00-04:00",
+        "structure_level": "vwap", "as_of": "2026-10-19T10:15:00-04:00", "last_close": "364.18",
     }
     d.update(over)
     return ExitPlanRecord(**d)
@@ -943,7 +962,8 @@ def test_wiring_guard_would_catch_an_extra_argument(monkeypatch):
 def test_exit_plan_record_fields_pinned():
     assert tuple(ExitPlanRecord.model_fields) == (
         "plan_id", "symbol", "setup", "entry", "stop", "target", "risk_per_share",
-        "reward_to_risk", "time_exit", "entry_level", "structure_level", "as_of")
+        "reward_to_risk", "time_exit", "entry_level", "structure_level", "as_of", "last_close",
+        "labels")
 
 
 def test_exit_plan_record_is_frozen():

@@ -16,15 +16,19 @@ from tools.exit_plan import exit_plan as real_exit_plan
 from tools.scan import ScanCriteria
 
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
+# The AAPL fixture's stops are wider than max_stop_atr_5m x ATR, so its plans' suggestion (the
+# ceiling on reward_multiple) is the minimum. These label thresholds, not risk limits, are
+# widened so every menu value is a legal choice; max_reward_multiple is unchanged.
+WIDE = replace(LIMITS, max_stop_atr_5m=Decimal("10"), good_setup_multiple=Decimal("3"))
 MENU = ["1", "1.5", "2", "2.5", "3"]
-ORB = {"setup": "orb", "entry": "102.00"}
+ORB = {"setup": "orb", "entry": "103.10"}
 LEVEL = {"setup": "level", "entry": "103.10", "level": "99.70"}
 SETUPS = [pytest.param(ORB, id="orb"), pytest.param(LEVEL, id="level")]
 PROMPT = (Path(__file__).resolve().parent.parent / "agents" / "prompts" / "technical.md"
           ).read_text(encoding="utf-8")
 
 
-def make(limits=LIMITS, ledger=None) -> ToolSession:
+def make(limits=WIDE, ledger=None) -> ToolSession:
     s = ToolSession(symbol="AAPL", now=NOW, data=FakeMarketData(), limits=limits,
                     criteria=ScanCriteria(), ledger=ledger)
     s.execute("get_bars", {"symbol": "AAPL"})
@@ -109,39 +113,52 @@ def test_refused_multiple_records_nothing_in_the_ledger(spy):
 
 @pytest.mark.parametrize("inp", SETUPS)
 def test_multiple_above_max_reward_multiple_is_refused_by_exit_plan(spy, inp):
-    capped = replace(LIMITS, max_reward_multiple=Decimal("2"))
+    # replace() skips validation: good_setup_multiple 3 above the cap 2 leaves the cap itself
+    # (exit_plan's own check) as the only thing refusing 2.5
+    capped = replace(WIDE, max_reward_multiple=Decimal("2"))
     s = make(capped)
     res, err = s.execute("plan_exit", {**inp, "reward_multiple": "2.5"})
     assert err is False  # a plan refusal, not a tool error
     assert res["ok"] is False and "exceeds max_reward_multiple 2" in res["reason"]
-    assert len(spy) == 1 and spy[0][1]["reward_multiple"] == Decimal("2.5")
+    assert spy[-1][1]["reward_multiple"] == Decimal("2.5")
     assert s.exit_plans == []
 
 
 @pytest.mark.parametrize("inp", SETUPS)
 def test_multiple_exactly_at_the_cap_is_allowed(inp):
-    capped = replace(LIMITS, max_reward_multiple=Decimal("2"))
+    capped = replace(WIDE, max_reward_multiple=Decimal("2"))
     res, err = make(capped).execute("plan_exit", {**inp, "reward_multiple": "2"})
     assert err is False and res["ok"] is True and res["reward_to_risk"] == "2.00"
 
 
-# ---- omitted: the minimum, and exit_plan is called as before ----
+# ---- omitted: the plan's suggested multiple ----
 
 @pytest.mark.parametrize("inp", SETUPS)
-def test_omitting_it_uses_the_minimum_and_passes_no_kwarg(spy, inp):
+def test_omitting_it_uses_the_suggested_multiple_passed_explicitly(spy, inp):
     res, err = make().execute("plan_exit", inp)
     assert err is False and res["ok"] is True
-    assert "reward_multiple" not in spy[0][1]
+    assert res["labels"]["suggested_multiple"] == "3"
+    assert spy[0][1]["reward_multiple"] is None  # the labelling call, at the minimum
+    assert spy[-1][1]["reward_multiple"] == Decimal("3")
+    assert res["reward_to_risk"] == "3.00"
+    want = expected_plan(inp, "3")
+    assert {k: res[k] for k in ("stop", "target", "risk_per_share")} == {
+        k: want[k] for k in ("stop", "target", "risk_per_share")}
+
+
+@pytest.mark.parametrize("inp", SETUPS)
+def test_omitting_it_with_a_minimum_suggestion_gives_the_minimum(spy, inp):
+    res, err = make(LIMITS).execute("plan_exit", inp)  # wide stops: suggestion is "1"
+    assert err is False and res["ok"] is True
+    assert res["labels"]["suggested_multiple"] == "1"
     assert res["reward_to_risk"] == "1.00"  # limits.min_reward_to_risk is 1.0
-    assert {k: v for k, v in res.items() if k in ("stop", "target", "risk_per_share")} == {
-        k: v for k, v in expected_plan(inp, None).items()
-        if k in ("stop", "target", "risk_per_share")}
+    assert spy[-1][1]["reward_multiple"] == Decimal("1")
 
 
 def test_menu_multiple_is_forwarded_to_exit_plan_as_a_decimal(spy):
     make().execute("plan_exit", {**LEVEL, "reward_multiple": "1.5"})
-    assert spy[0][1]["reward_multiple"] == Decimal("1.5")
-    assert isinstance(spy[0][1]["reward_multiple"], Decimal)
+    assert spy[-1][1]["reward_multiple"] == Decimal("1.5")
+    assert isinstance(spy[-1][1]["reward_multiple"], Decimal)
 
 
 # ---- target_vs_session_high ----

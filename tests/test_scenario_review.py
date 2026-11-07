@@ -53,25 +53,35 @@ def test_the_close_is_above_the_opening_range_and_within_a_dime_of_the_high(name
     assert D(lv["session_high"]) - D(lv["last_close"]) <= D("0.10")
 
 
-def test_clean_buy_breakout_plan_at_or_high_is_valid_at_2r_with_room_at_the_highs():
+def test_clean_buy_breakout_plan_at_or_high_stop_is_valid_but_loose_so_capped_at_1r():
+    """The stop under the broken or_high is a structural stop, but 2.0+ ATR wide: its
+    suggestion (and ceiling) is the minimum, so 2R is refused and the default is 1R."""
     s = session("clean-buy")
     lv = price_levels(s.summary)
-    res, err = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
-                                       "level": lv["or_high"], "reward_multiple": "2"})
-    assert err is False and res["ok"] is True
+    inp = {"setup": "level", "entry": lv["last_close"], "level": lv["or_high"]}
+    refused, err = s.execute("plan_exit", {**inp, "reward_multiple": "2"})
+    assert err is False and refused["ok"] is False and s.exit_plans == []
+    assert refused["labels"]["tight_stop"] is False
+    assert refused["labels"]["suggested_multiple"] == "1"
+    res, err = s.execute("plan_exit", inp)
+    assert err is False and res["ok"] is True and res["reward_to_risk"] == "1.00"
     # trending at its highs: the target is above the session high, which is not resistance
     assert res["target_vs_session_high"] == "at_or_above"
     assert D(res["session_high_vs_entry_atr_5m"]) < 1
     assert D(res["stop"]) < D(lv["or_high"])  # stop under the broken level
 
 
-def test_clean_buy_3r_plan_also_passes_the_risk_check():
+def test_clean_buy_vwap_plan_passes_the_risk_check_at_its_suggested_2r():
     led = PlanLedger("BRKO")
     s = session("clean-buy", led)
     lv = price_levels(s.summary)
     res, err = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
-                                       "level": lv["vwap"], "reward_multiple": "3"})
-    assert err is False and res["ok"] is True and res["reward_to_risk"] == "3.00"
+                                       "level": lv["vwap"]})
+    assert err is False and res["ok"] is True and res["reward_to_risk"] == "2.00"
+    # 3R is above this plan's suggestion: refused, not recorded
+    over, _ = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
+                                      "level": lv["vwap"], "reward_multiple": "3"})
+    assert over["ok"] is False and len(s.exit_plans) == 1
     led.seal(accept=True)
     sized = build_order(select_plan(led, res["plan_id"]), LIMITS, s.now)
     assert sized["ok"] is True
@@ -147,7 +157,7 @@ def test_prompts_say_reward_to_risk_is_not_evidence_of_edge():
     from agents.technical import PROMPT as TECH
     from agents.trader import PROMPT as TRADER
     assert "not evidence of edge" in TECH
-    assert "risk_atr_5m" in TECH and "entry_vs_vwap_atr_5m" in TECH
+    assert "suggested_multiple" in TECH and "labels" in TECH
     for p in (BULL, BEAR, TRADER):
         assert "it is not evidence of edge" in p
 

@@ -1,0 +1,17 @@
+{
+ "name": "extended-chase",
+ "symbol": "CHSW",
+ "description": "The clean-buy chart and news (opening range 79.89-80.27, trend up, a light-volume pullback that holds VWAP), but from 10:44 ET the stock rips straight up to close at 81.40, 0.05 under the 81.45 session high. VWAP is about 80.47 and atr_5m 0.2294, so the close is about 4.05 five-minute ATRs above VWAP, well past the 2.0 extension threshold. Every plan's entry (last_close) is labelled extended, so plan_exit suggests only the minimum multiple. News is positive (analyst upgrade, supply contract, raised guidance), a material-agreement 8-K, no red flags.",
+ "files": {
+  "bars": "bars.json",
+  "snapshot": "snapshot.json",
+  "news": "news.json",
+  "submissions": "submissions.json",
+  "companyfacts": "companyfacts.json"
+ },
+ "expected": {
+  "action": "PASS",
+  "fatal_bear": null,
+  "why": "Same clean setup and catalysts as clean-buy, but buying at market chases a move about 4 five-minute ATRs above VWAP; every plan is labelled extended. Guards against the PASS-bias fix turning into always BUY."
+ }
+}

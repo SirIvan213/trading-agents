@@ -1,4 +1,5 @@
-"""Regenerate the synthetic scenario fixtures (clean-buy, red-flag). Offline, deterministic.
+"""Regenerate the synthetic scenario fixtures (clean-buy, red-flag, extended-chase). Offline,
+deterministic.
 
     .venv/Scripts/python tests/fixtures/scenarios/build.py
 
@@ -43,6 +44,9 @@ def _path(points: list[tuple[int, float]]) -> list[float]:
 # near the session high. No spike-and-fade.
 SHAPE = [(0, 0.00), (14, 0.20), (40, 0.55), (50, 0.62), (64, 0.43), (70, 0.46), (89, 0.72)]
 WOBBLE = [0.00, 0.03, -0.02, 0.02, -0.03, 0.02, -0.01, 0.01]
+# extended-chase: the same chart until the pullback ends (minute 70), then a vertical rip from
+# minute 74 that closes at the high about 4 five-minute ATRs above VWAP (threshold 2.0).
+CHASE_SHAPE = [p for p in SHAPE if p[0] < 74] + [(74, 0.50), (89, 1.40)]
 
 
 def _volume_and_wick(m: int) -> tuple[int, float]:
@@ -55,8 +59,9 @@ def _volume_and_wick(m: int) -> tuple[int, float]:
     return 15000 + 400 * (m - 68), 0.05
 
 
-def bars(base: float, *, gap: range | None = None) -> dict:
-    closes = _path(SHAPE)
+def bars(base: float, *, gap: range | None = None,
+         shape: list[tuple[int, float]] | None = None) -> dict:
+    closes = _path(SHAPE if shape is None else shape)
     out = []
     # three pre-market bars (dropped by the regular-session filter)
     for i in range(3):
@@ -178,6 +183,27 @@ def build() -> None:
     ]))
     write("red-flag", "companyfacts.json",
           company_facts(9900002, "Ventara", 0.08, filed_before="2026-10-01"))
+
+    # ---- extended-chase: CHSW, the clean-buy chart and news, but the last 15 minutes rip
+    # straight up to close at the high far above VWAP. Every market entry is extended.
+    b = bars(80.0, shape=CHASE_SHAPE)
+    write("extended-chase", "bars.json", b)
+    write("extended-chase", "snapshot.json", snapshot("CHSW", b, prev_close=78.20))
+    write("extended-chase", "news.json", news("CHSW", [
+        ("2026-11-03T15:20:00Z", "Analyst upgrade: broker raises Chasewater Labs to buy",
+         "The broker cited order growth and a cleaner balance sheet."),
+        ("2026-11-03T13:10:00Z", "Chasewater Labs wins multi-year supply contract",
+         "The company signed a five-year optical module supply agreement."),
+        ("2026-11-02T21:30:00Z", "Chasewater Labs raises full-year guidance",
+         "Management lifted its revenue outlook on stronger bookings."),
+    ]))
+    write("extended-chase", "submissions.json", submissions(
+        "CHSW", "9900003", "Chasewater Labs", [
+            ("2026-11-02T21:05:00.000Z", "8-K", "1.01,9.01", "chsw-8k_20261102.htm"),
+            ("2026-10-29T20:05:00.000Z", "10-Q", "", "chsw-20260930.htm"),
+        ]))
+    write("extended-chase", "companyfacts.json",
+          company_facts(9900003, "Chasewater Labs", 0.05))
 
 
 if __name__ == "__main__":

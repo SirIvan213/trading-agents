@@ -83,6 +83,7 @@ def test_money_field_accepts_small_positive(field):
     d = cfg(**{field: "0.01"})
     if field == "max_reward_multiple":
         d["min_reward_to_risk"] = "0.01"
+        d["good_setup_multiple"] = "0.01"
     assert limits_from_dict(d)
 
 

@@ -504,7 +504,8 @@ def test_order_changed_when_limits_differ_on_the_second_load_only(journal, monke
 def test_plan_changed_between_ticket_and_re_check(ledger, journal):
     p = good(ledger, journal)
     other = sealed_ledger([plan(entry="364.00", stop="358.14", risk_per_share="5.86",
-                                target="369.86")])  # a different plan under the same id
+                                target="369.86", last_close="364.00")])
+    # ^ a different plan under the same id
     out = approve(p, other, journal=journal, ask=yes, clock=clock_at(T0))
     assert out.status == "changed_after_approval"
     assert APPROVED not in [e["status"] for e in raw_lines(journal)]
