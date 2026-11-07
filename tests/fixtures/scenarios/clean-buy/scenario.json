@@ -1,13 +1,14 @@
 {
  "name": "clean-buy",
  "symbol": "BRKO",
- "description": "Steady trend up from the open (opening range 79.89-80.27), a light-volume pullback whose lows hold above VWAP, then a push back up to close at 80.72, 0.05 under the 80.77 session high. In 5-minute ATRs (atr_5m 0.1868): the close is about 1.7 above VWAP 80.40; a level plan at VWAP risks 0.34 (about 1.8); an opening-range plan risks 0.85 (about 4.5). Both plans are valid; in a trending stock at its highs the 2R targets sit above the session high, which is not overhead resistance. News is positive (analyst upgrade, supply contract, raised guidance), a material-agreement 8-K, no red flags.",
+ "description": "Steady trend up from the open (opening range 79.89-80.27), a light-volume pullback whose lows hold above VWAP, then a push back up to close at 80.72, 0.05 under the 80.77 session high. In 5-minute ATRs (atr_5m 0.1868): the close is about 1.7 above VWAP 80.40; a level plan at VWAP risks 0.34 (about 1.8); an opening-range plan risks 0.85 (about 4.5). Both plans are valid; in a trending stock at its highs the 2R targets sit above the session high, which is not overhead resistance. News is positive (analyst upgrade, supply contract, raised guidance), a material-agreement 8-K, no red flags. Q3 results were filed on 2026-10-29 (8-K item 2.02); the FMP calendar has no report for the symbol in the next two weeks.",
  "files": {
   "bars": "bars.json",
   "snapshot": "snapshot.json",
   "news": "news.json",
   "submissions": "submissions.json",
-  "companyfacts": "companyfacts.json"
+  "companyfacts": "companyfacts.json",
+  "earnings_calendar": "earnings_calendar.json"
  },
  "expected": {
   "action": "BUY",
