@@ -46,19 +46,22 @@ def session(name: str, ledger: PlanLedger | None = None) -> ToolSession:
 # ---------------- clean-buy is a breakout ----------------
 
 @pytest.mark.parametrize("name", ["clean-buy", "red-flag"])
-def test_the_close_breaks_the_opening_range_high_below_the_session_high(name):
+def test_the_close_is_above_the_opening_range_and_within_a_dime_of_the_high(name):
     s, lv, _ = summary(name)
     assert s["opening_range"]["complete"] is True
-    assert D(lv["or_high"]) < D(lv["last_close"]) < D(lv["session_high"])
+    assert D(lv["or_low"]) < D(lv["or_high"]) < D(lv["last_close"]) <= D(lv["session_high"])
+    assert D(lv["session_high"]) - D(lv["last_close"]) <= D("0.10")
 
 
-def test_clean_buy_breakout_plan_at_or_high_has_room_for_2r():
+def test_clean_buy_breakout_plan_at_or_high_is_valid_at_2r_with_room_at_the_highs():
     s = session("clean-buy")
     lv = price_levels(s.summary)
     res, err = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
                                        "level": lv["or_high"], "reward_multiple": "2"})
     assert err is False and res["ok"] is True
-    assert res["target_vs_session_high"] == "below"
+    # trending at its highs: the target is above the session high, which is not resistance
+    assert res["target_vs_session_high"] == "at_or_above"
+    assert D(res["session_high_vs_entry_atr_5m"]) < 1
     assert D(res["stop"]) < D(lv["or_high"])  # stop under the broken level
 
 
@@ -77,27 +80,32 @@ def test_clean_buy_3r_plan_also_passes_the_risk_check():
 
 # ---------------- ATR context from plan_exit ----------------
 
-def test_plan_exit_reports_atr_multiples_from_the_tool():
+def test_plan_exit_reports_atr_5m_multiples_from_the_tool():
     s = session("clean-buy")
     lv = price_levels(s.summary)
-    atr = D(s.summary["atr"])
+    atr5 = D(s.summary["atr_5m"])
     res, _ = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
                                      "level": lv["vwap"]})
-    risk_atr = (D(res["risk_per_share"]) / atr).quantize(D("0.01"), "ROUND_FLOOR")
-    ext = ((D(res["entry"]) - D(lv["vwap"])) / atr).quantize(D("0.01"), "ROUND_FLOOR")
-    assert res["risk_atr"] == str(risk_atr) and res["entry_vs_vwap_atr"] == str(ext)
-    assert D("1") <= D(res["risk_atr"]) <= D("2")      # tight structural stop
-    assert D("0") < D(res["entry_vs_vwap_atr"]) <= D("2")  # above VWAP, not extended
+
+    def per(x):
+        return str((x / atr5).quantize(D("0.01"), "ROUND_FLOOR"))
+    assert res["risk_atr_5m"] == per(D(res["risk_per_share"]))
+    assert res["entry_vs_vwap_atr_5m"] == per(D(res["entry"]) - D(lv["vwap"]))
+    assert res["session_high_vs_entry_atr_5m"] == per(D(lv["session_high"]) - D(res["entry"]))
+    assert "risk_atr" not in res and "entry_vs_vwap_atr" not in res  # old 1-minute fields gone
+    assert D("1") <= D(res["risk_atr_5m"]) <= D("2")      # tight structural stop
+    assert D("0") < D(res["entry_vs_vwap_atr_5m"]) <= D("2")  # above VWAP, not extended
 
 
-def test_atr_context_is_none_without_atr():
+def test_atr_context_is_none_without_atr_5m():
     s = session("clean-buy")
-    s.summary = {**s.summary, "atr": None}
+    s.summary = {**s.summary, "atr_5m": None}
     lv = price_levels(s.summary)
     res, err = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
                                        "level": lv["vwap"]})
     assert err is False and res["ok"] is True
-    assert res["risk_atr"] is None and res["entry_vs_vwap_atr"] is None
+    assert res["risk_atr_5m"] is None and res["entry_vs_vwap_atr_5m"] is None
+    assert res["session_high_vs_entry_atr_5m"] is None
 
 
 # ---------------- red-flag: Q3 not yet reported ----------------
@@ -139,7 +147,7 @@ def test_prompts_say_reward_to_risk_is_not_evidence_of_edge():
     from agents.technical import PROMPT as TECH
     from agents.trader import PROMPT as TRADER
     assert "not evidence of edge" in TECH
-    assert "risk_atr" in TECH and "entry_vs_vwap_atr" in TECH
+    assert "risk_atr_5m" in TECH and "entry_vs_vwap_atr_5m" in TECH
     for p in (BULL, BEAR, TRADER):
         assert "it is not evidence of edge" in p
 

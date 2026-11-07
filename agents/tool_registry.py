@@ -32,7 +32,8 @@ TOOLS: list[dict[str, Any]] = [
         "name": "get_bars",
         "description": (
             "Fetch today's 1-minute bars for the symbol and return a regular-session "
-            "summary: last_close, session_high/low, volume, vwap, atr, opening_range, "
+            "summary: last_close, session_high/low, volume, vwap, atr (1-minute), atr_5m "
+            "(5-minute bars), opening_range, "
             "and price_levels (the only prices plan_exit accepts). Call this first."
         ),
         "strict": True,
@@ -51,8 +52,10 @@ TOOLS: list[dict[str, Any]] = [
             "entry and level must be copied exactly from get_bars price_levels. "
             "reward_multiple (optional, default the configured minimum) picks the target "
             "multiple of risk from a fixed menu. The result says whether the target is below "
-            "the session high (target_vs_session_high) and, when ATR is known, risk per "
-            "share and entry minus VWAP as multiples of ATR (risk_atr, entry_vs_vwap_atr). "
+            "the session high (target_vs_session_high) and, in units of the 5-minute ATR, "
+            "the risk per share, entry minus VWAP and session high minus entry "
+            "(risk_atr_5m, entry_vs_vwap_atr_5m, session_high_vs_entry_atr_5m) and atr_5m "
+            "itself; these are null until 70 minutes of 5-minute bars exist. "
             "Returns {ok: false, reason} if the setup is refused."
         ),
         "strict": True,
@@ -209,18 +212,34 @@ def _summary_atr(summary: dict) -> Decimal | None:
     return None if raw is None else Decimal(raw)
 
 
-def _atr_context(result: dict, levels: dict[str, str], atr: Decimal | None) -> dict:
-    """risk_atr = risk_per_share / ATR and entry_vs_vwap_atr = (entry - vwap) / ATR, to the
-    cent (rounded down), so the model compares tool numbers instead of dividing prices.
-    None when ATR is missing or zero (or there is no VWAP)."""
-    if atr is None or atr <= 0:
-        return {"risk_atr": None, "entry_vs_vwap_atr": None}
-    risk = Decimal(result["risk_per_share"]) / atr
-    vwap = levels.get("vwap")
-    ext = None if vwap is None else (Decimal(result["entry"]) - Decimal(vwap)) / atr
+def _summary_atr_5m(summary: dict) -> Decimal | None:
+    raw = summary.get("atr_5m")
+    return None if raw is None else Decimal(raw)
+
+
+def _atr_context(result: dict, levels: dict[str, str], atr_5m: Decimal | None) -> dict:
+    """Plan context in units of the 5-MINUTE ATR (labelled _atr_5m), to the cent (rounded
+    down), so the model compares tool numbers instead of dividing prices:
+      risk_atr_5m                   risk_per_share / atr_5m
+      entry_vs_vwap_atr_5m          (entry - vwap) / atr_5m
+      session_high_vs_entry_atr_5m  (session_high - entry) / atr_5m
+    The 1-minute ATR is too small for this: a normal stop reads as 6+ ATR. It still sets
+    the stop buffer and limits.min_risk_atr_multiple inside exit_plan, unchanged.
+    Each field is None when atr_5m is missing or zero, or the level it needs is missing.
+    Rounding down can understate a ratio by at most 0.01 ATR."""
+    keys = ("risk_atr_5m", "entry_vs_vwap_atr_5m", "session_high_vs_entry_atr_5m")
+    if atr_5m is None or atr_5m <= 0:
+        return dict.fromkeys(keys)
+    entry = Decimal(result["entry"])
+
+    def per_atr(value: Decimal | None) -> str | None:
+        return None if value is None else str((value / atr_5m).quantize(CENT, ROUND_FLOOR))
+
+    vwap, high = levels.get("vwap"), levels.get("session_high")
     return {
-        "risk_atr": str(risk.quantize(CENT, ROUND_FLOOR)),
-        "entry_vs_vwap_atr": None if ext is None else str(ext.quantize(CENT, ROUND_FLOOR)),
+        "risk_atr_5m": per_atr(Decimal(result["risk_per_share"])),
+        "entry_vs_vwap_atr_5m": per_atr(None if vwap is None else entry - Decimal(vwap)),
+        "session_high_vs_entry_atr_5m": per_atr(None if high is None else Decimal(high) - entry),
     }
 
 
@@ -292,7 +311,8 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
         s.exit_plans.append(record)
         result = {**result, "plan_id": record.plan_id,
                   "target_vs_session_high": _vs_session_high(result["target"], levels),
-                  **_atr_context(result, levels, atr)}
+                  **_atr_context(result, levels, _summary_atr_5m(s.summary)),
+                  "atr_5m": s.summary.get("atr_5m")}
     return result, False
 
 
