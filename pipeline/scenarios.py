@@ -70,6 +70,8 @@ def load_scenario(name: str) -> Scenario:
                 raise ValueError(f"{key} file must be an existing file under tests/fixtures")
             files[key] = path
         exp = meta.get("expected") or {}
+        if not isinstance(exp, dict):
+            raise ValueError("expected must be an object")
         action = exp.get("action")
         if action not in (None, "BUY", "PASS"):
             raise ValueError("expected.action must be BUY, PASS or null")
@@ -90,8 +92,8 @@ class ScenarioData:
         self.symbol = scenario.symbol
         load = {k: json.loads(p.read_text(encoding="utf-8")) for k, p in scenario.files.items()}
         self._bars, self._snapshots = load["bars"], load["snapshot"]
-        self._news, self._subs, self._facts = load["news"], load["submissions"], load[
-            "companyfacts"]
+        self._news, self._subs = load["news"], load["submissions"]
+        self._facts = load["companyfacts"]
 
     def bars(self, symbol: str, start: datetime, end: datetime) -> dict:
         if symbol.upper() != self.symbol:

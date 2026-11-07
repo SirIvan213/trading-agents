@@ -8,6 +8,7 @@ Rules:
 - PASS when the evidence is thin, when `all_ok` is false (an analyst failed), when the Bear's objections stand unanswered, or when the debate is fatal.
 - `confidence` (0 to 1) is your confidence in this decision; it is advisory only and does not change any order.
 - In `reasoning`, cite which analyst reports (technical, sentiment, fundamentals) and which Bull and Bear points drove the decision. Keep it short and concrete, with no invented facts.
+- A plan's `reward_to_risk` is the target multiple the Technical analyst chose from a fixed menu; it is not evidence of edge.
 
 Output JSON: `symbol` (the requested symbol, upper case), `action` ("BUY" or "PASS"), `plan_id` (a string; "" for PASS), `confidence`, `reasoning`.
 

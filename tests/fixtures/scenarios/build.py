@@ -38,12 +38,24 @@ def _path(points: list[tuple[int, float]]) -> list[float]:
     return out
 
 
-# The shared chart (prices relative to a base): an opening spike that sets the session high,
-# a fade into a quiet base around VWAP, then an orderly, rising-volume push off the base.
-# Minute 0 = 09:30 ET, minute 89 = 10:59 ET.
-SHAPE = [(0, 0.50), (2, 1.90), (4, 0.70), (14, -0.25), (30, 0.05), (45, -0.05),
-         (60, 0.10), (75, 0.20), (89, 0.42)]
-WOBBLE = [0.00, 0.04, -0.03, 0.02, -0.04, 0.03, -0.01, 0.02]
+# The shared chart (prices relative to a base). Minute 0 = 09:30 ET, minute 89 = 10:59 ET.
+# A quiet opening range (09:30-09:45), a news spike just after it that sets the session high
+# and fades, a quiet base under the opening-range high, then an orderly, rising-volume
+# breakout through the opening-range high (the level being broken), still far below the
+# session high.
+SHAPE = [(0, 0.00), (5, 0.10), (10, -0.20), (14, 0.02), (16, 0.30), (18, 2.00), (22, 0.90),
+         (32, 0.02), (50, -0.02), (65, 0.05), (76, 0.08), (89, 0.42)]
+WOBBLE = [0.00, 0.03, -0.02, 0.01, -0.03, 0.02, -0.01, 0.01]
+
+
+def _volume_and_wick(m: int) -> tuple[int, float]:
+    if m < 15:
+        return 30000, 0.06
+    if m < 25:
+        return 45000 - 2000 * (m - 15), 0.10
+    if m < 60:
+        return 9000 + 37 * (m % 7), 0.04
+    return 14000 + 450 * (m - 60), 0.04
 
 
 def bars(base: float, *, gap: range | None = None) -> dict:
@@ -52,20 +64,13 @@ def bars(base: float, *, gap: range | None = None) -> dict:
     # three pre-market bars (dropped by the regular-session filter)
     for i in range(3):
         ts = UTC_OPEN - timedelta(minutes=3 - i)
-        out.append(_bar(ts, base + 0.30, base + 0.32, 0.03, 1500 + 200 * i))
-    prev = base + 0.40
+        out.append(_bar(ts, base - 0.10, base - 0.08, 0.03, 1500 + 200 * i))
+    prev = base - 0.05
     for m, rel in enumerate(closes):
         if gap is not None and m in gap:
             continue  # trading halted: no bars
-        c = base + rel + (WOBBLE[m % len(WOBBLE)] if 5 <= m < 85 else 0.0)
-        if m < 5:
-            v, wick = 60000 - 8000 * m, 0.12
-        elif m < 15:
-            v, wick = 22000, 0.07
-        elif m < 60:
-            v, wick = 9000 + 37 * (m % 7), 0.04
-        else:
-            v, wick = 14000 + 450 * (m - 60), 0.04
+        c = base + rel + (WOBBLE[m % len(WOBBLE)] if 24 <= m < 76 else 0.0)
+        v, wick = _volume_and_wick(m)
         out.append(_bar(UTC_OPEN + timedelta(minutes=m), prev, c, wick, v))
         prev = c
     return {"bars": out, "symbol": None, "next_page_token": None}
@@ -112,14 +117,19 @@ def submissions(symbol: str, cik: str, name: str, rows: list[tuple[str, str, str
     }
 
 
-def company_facts(cik: int, name: str, scale: float) -> dict:
+def company_facts(cik: int, name: str, scale: float, *, filed_before: str | None = None) -> dict:
+    """The TSLA facts with dollar AND share values scaled (so EPS stays consistent). With
+    `filed_before`, every fact filed on or after that date is removed (a quarter not yet
+    reported)."""
     facts = copy.deepcopy(json.loads((FIXTURES / "sec_companyfacts_tsla.json").read_text(
         encoding="utf-8")))
     facts["cik"], facts["entityName"] = cik, f"{name} (fixture)"
     for concepts in facts["facts"].values():
         for concept in concepts.values():
             for unit, rows in concept.get("units", {}).items():
-                if unit == "USD":
+                if filed_before is not None:
+                    rows[:] = [r for r in rows if r.get("filed", "") < filed_before]
+                if unit in ("USD", "shares"):
                     for r in rows:
                         r["val"] = int(r["val"] * scale)
     return facts
@@ -132,7 +142,8 @@ def write(folder: str, name: str, obj: dict) -> None:
 
 
 def build() -> None:
-    # ---- clean-buy: BRKO, orderly push off a VWAP base, room below the opening spike high
+    # ---- clean-buy: BRKO, orderly breakout through the opening-range high, room below the
+    # post-open spike high
     b = bars(80.0)
     write("clean-buy", "bars.json", b)
     write("clean-buy", "snapshot.json", snapshot("BRKO", b, prev_close=78.20))
@@ -146,12 +157,13 @@ def build() -> None:
     ]))
     write("clean-buy", "submissions.json", submissions("BRKO", "9900001", "Brookfield Optics", [
         ("2026-11-02T21:05:00.000Z", "8-K", "1.01,9.01", "brko-8k_20261102.htm"),
-        ("2026-10-28T20:05:00.000Z", "10-Q", "", "brko-20260930.htm"),
+        ("2026-10-29T20:05:00.000Z", "10-Q", "", "brko-20260930.htm"),
     ]))
     write("clean-buy", "companyfacts.json", company_facts(9900001, "Brookfield Optics", 0.05))
 
     # ---- red-flag: VNTR, the same chart shifted, a five-minute halt in the bars, a halt
-    # headline and an earnings release scheduled inside the trade window
+    # headline and third-quarter earnings scheduled inside the trade window. Q3 is NOT yet
+    # reported: no Q3 10-Q, and the company facts stop at the quarter ended 2026-06-30.
     b = bars(92.0, gap=range(35, 40))  # 10:05-10:09 ET: halted, no bars
     write("red-flag", "bars.json", b)
     write("red-flag", "snapshot.json", snapshot("VNTR", b, prev_close=90.10))
@@ -166,9 +178,10 @@ def build() -> None:
     ]))
     write("red-flag", "submissions.json", submissions("VNTR", "9900002", "Ventara", [
         ("2026-11-02T21:40:00.000Z", "8-K", "8.01", "vntr-8k_20261102.htm"),
-        ("2026-10-27T20:05:00.000Z", "10-Q", "", "vntr-20260930.htm"),
+        ("2026-07-23T20:05:00.000Z", "10-Q", "", "vntr-20260630.htm"),
     ]))
-    write("red-flag", "companyfacts.json", company_facts(9900002, "Ventara", 0.08))
+    write("red-flag", "companyfacts.json",
+          company_facts(9900002, "Ventara", 0.08, filed_before="2026-10-01"))
 
 
 if __name__ == "__main__":

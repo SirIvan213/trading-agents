@@ -1,7 +1,7 @@
 {
  "name": "clean-buy",
  "symbol": "BRKO",
- "description": "Orderly push off a quiet VWAP base after an opening spike. Last close 80.42 is about 1.2 ATR above VWAP 80.28 (not extended); a level plan at VWAP has risk 0.16 (about 1.3 ATR, a tight structural stop) and a 2R target of 80.74, well below the 82.02 session high. News is positive (analyst upgrade, supply contract, raised guidance), a material-agreement 8-K, no red flags.",
+ "description": "Orderly breakout: a quiet opening range (79.74-80.16), a news spike just after it that sets the 82.10 session high and fades, a quiet base under the opening-range high, then a rising-volume push through it. Last close 80.42 is above or_high 80.16 and about 1.4 ATR above VWAP 80.27 (not extended). A level plan at VWAP risks 0.17 (about 1.5 ATR, a tight structural stop); at or_high it risks 0.28 (about 2.5 ATR). Both 2R targets (80.76, 80.98) sit well below the 82.10 session high. News is positive (analyst upgrade, supply contract, raised guidance), a material-agreement 8-K, no red flags.",
  "files": {
   "bars": "bars.json",
   "snapshot": "snapshot.json",
@@ -12,6 +12,6 @@
  "expected": {
   "action": "BUY",
   "fatal_bear": null,
-  "why": "Clean structure, room for 2R before the session high, positive catalysts, no red flags."
+  "why": "Clean breakout, tight stop, room for 2R before the session high, positive catalysts, no red flags."
  }
 }

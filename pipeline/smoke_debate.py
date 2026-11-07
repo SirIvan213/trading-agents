@@ -332,7 +332,10 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     print_latency(stage_s, load_checked_limits().max_plan_age_s)
     print_money_debug(rejections)
     print(f"\n-- Expected vs actual ({scenario.name}) --")
-    print(compare(scenario.expected, trader.decision.action, debate.fatal)[0])
+    verdict = compare(scenario.expected, trader.decision.action, debate.fatal)[0]
+    if trader.forced_pass in TRADER_FAILURES or not packet.all_ok or not debate.all_ok:
+        verdict += "  (run failed: the decision is a fail-closed default, not a judgment)"
+    print(verdict)
 
     calls = [c for r in packet.runs.values() for c in r.calls]
     calls += [c for t in debate.turns for c in t.run.calls]

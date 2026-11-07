@@ -51,7 +51,8 @@ TOOLS: list[dict[str, Any]] = [
             "entry and level must be copied exactly from get_bars price_levels. "
             "reward_multiple (optional, default the configured minimum) picks the target "
             "multiple of risk from a fixed menu. The result says whether the target is below "
-            "the session high (target_vs_session_high). "
+            "the session high (target_vs_session_high) and, when ATR is known, risk per "
+            "share and entry minus VWAP as multiples of ATR (risk_atr, entry_vs_vwap_atr). "
             "Returns {ok: false, reason} if the setup is refused."
         ),
         "strict": True,
@@ -208,6 +209,21 @@ def _summary_atr(summary: dict) -> Decimal | None:
     return None if raw is None else Decimal(raw)
 
 
+def _atr_context(result: dict, levels: dict[str, str], atr: Decimal | None) -> dict:
+    """risk_atr = risk_per_share / ATR and entry_vs_vwap_atr = (entry - vwap) / ATR, to the
+    cent (rounded down), so the model compares tool numbers instead of dividing prices.
+    None when ATR is missing or zero (or there is no VWAP)."""
+    if atr is None or atr <= 0:
+        return {"risk_atr": None, "entry_vs_vwap_atr": None}
+    risk = Decimal(result["risk_per_share"]) / atr
+    vwap = levels.get("vwap")
+    ext = None if vwap is None else (Decimal(result["entry"]) - Decimal(vwap)) / atr
+    return {
+        "risk_atr": str(risk.quantize(CENT, ROUND_FLOOR)),
+        "entry_vs_vwap_atr": None if ext is None else str(ext.quantize(CENT, ROUND_FLOOR)),
+    }
+
+
 def _vs_session_high(target: str, levels: dict[str, str]) -> str:
     """"below" when the target sits under today's session high (room before it matters),
     "at_or_above" otherwise, "unknown" without a session high. Compared in Decimal."""
@@ -275,7 +291,8 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
             s.ledger.record(record)  # LedgerError -> a tool error via ToolSession.execute
         s.exit_plans.append(record)
         result = {**result, "plan_id": record.plan_id,
-                  "target_vs_session_high": _vs_session_high(result["target"], levels)}
+                  "target_vs_session_high": _vs_session_high(result["target"], levels),
+                  **_atr_context(result, levels, atr)}
     return result, False
 
 
