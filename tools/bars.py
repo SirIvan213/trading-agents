@@ -178,16 +178,52 @@ def atr(bars: list[Bar], n: int = 14) -> Decimal | None:
     return value.quantize(Decimal("0.0001"))
 
 
+def resample(bars: list[Bar], minutes: int = 5) -> list[Bar]:
+    """Aggregate 1-minute bars into `minutes`-minute bars aligned to the New York clock
+    (09:30, 09:35, ...): first open, max high, min low, last close, summed volume. A bucket
+    with missing minutes (e.g. a halt) still counts; a trailing bucket that has not reached
+    its last minute yet is dropped, so the series holds only finished bars. Input order is
+    kept; bars from different days never share a bucket."""
+    if minutes < 1:
+        raise ValueError("minutes must be at least 1")
+    buckets: dict[datetime, list[Bar]] = {}
+    for b in bars:
+        ny = b.ts.astimezone(NY)
+        start = ny.replace(minute=ny.minute - ny.minute % minutes, second=0, microsecond=0)
+        buckets.setdefault(start, []).append(b)
+    out: list[Bar] = []
+    for start in sorted(buckets):
+        group = buckets[start]
+        out.append(Bar(
+            ts=start, open=group[0].open, high=max(g.high for g in group),
+            low=min(g.low for g in group), close=group[-1].close,
+            volume=sum(g.volume for g in group),
+        ))
+    if out:
+        last_start = max(buckets)
+        last_minute = max(b.ts.astimezone(NY) for b in buckets[last_start])
+        if last_minute < last_start + timedelta(minutes=minutes - 1):
+            out.pop()  # unfinished bucket
+    return out
+
+
+def atr_5m(bars: list[Bar], n: int = 14) -> Decimal | None:
+    """Wilder ATR over 5-minute bars resampled from 1-minute `bars` (see `resample`).
+    None until n finished 5-minute bars exist (n=14: 70 minutes)."""
+    return atr(resample(bars, 5), n)
+
+
 def summarize(bars: list[Bar], or_minutes: int = 15, atr_n: int = 14) -> dict:
     """JSON-serializable summary of a bar series (Decimals as strings)."""
     if not bars:
         return {
             "bars": 0, "first": None, "last": None, "last_close": None,
             "session_high": None, "session_low": None, "volume": 0,
-            "vwap": None, "atr": None, "opening_range": None,
+            "vwap": None, "atr": None, "atr_5m": None, "opening_range": None,
         }
     v = vwap(bars)
     a = atr(bars, atr_n)
+    a5 = atr_5m(bars, atr_n)
     return {
         "bars": len(bars),
         "first": bars[0].ts.isoformat(),
@@ -197,7 +233,8 @@ def summarize(bars: list[Bar], or_minutes: int = 15, atr_n: int = 14) -> dict:
         "session_low": str(min(b.low for b in bars)),
         "volume": sum(b.volume for b in bars),
         "vwap": None if v is None else str(v),
-        "atr": None if a is None else str(a),
+        "atr": None if a is None else str(a),  # 1-minute ATR (stop buffer, risk limits)
+        "atr_5m": None if a5 is None else str(a5),  # 5-minute ATR (context for the model)
         "opening_range": opening_range(bars, or_minutes),
     }
 

@@ -39,23 +39,20 @@ def _path(points: list[tuple[int, float]]) -> list[float]:
 
 
 # The shared chart (prices relative to a base). Minute 0 = 09:30 ET, minute 89 = 10:59 ET.
-# A quiet opening range (09:30-09:45), a news spike just after it that sets the session high
-# and fades, a quiet base under the opening-range high, then an orderly, rising-volume
-# breakout through the opening-range high (the level being broken), still far below the
-# session high.
-SHAPE = [(0, 0.00), (5, 0.10), (10, -0.20), (14, 0.02), (16, 0.30), (18, 2.00), (22, 0.90),
-         (32, 0.02), (50, -0.02), (65, 0.05), (76, 0.08), (89, 0.42)]
-WOBBLE = [0.00, 0.03, -0.02, 0.01, -0.03, 0.02, -0.01, 0.01]
+# A steady trend up from the open, a pullback that holds VWAP, then a push back up to close
+# near the session high. No spike-and-fade.
+SHAPE = [(0, 0.00), (14, 0.20), (40, 0.55), (50, 0.62), (64, 0.43), (70, 0.46), (89, 0.72)]
+WOBBLE = [0.00, 0.03, -0.02, 0.02, -0.03, 0.02, -0.01, 0.01]
 
 
 def _volume_and_wick(m: int) -> tuple[int, float]:
     if m < 15:
-        return 30000, 0.06
-    if m < 25:
-        return 45000 - 2000 * (m - 15), 0.10
-    if m < 60:
-        return 9000 + 37 * (m % 7), 0.04
-    return 14000 + 450 * (m - 60), 0.04
+        return 30000 - 600 * m, 0.06
+    if m < 50:
+        return 16000 + 60 * (m - 15), 0.05
+    if m < 68:
+        return 11000, 0.04  # the pullback comes on lighter volume
+    return 15000 + 400 * (m - 68), 0.05
 
 
 def bars(base: float, *, gap: range | None = None) -> dict:
@@ -69,7 +66,7 @@ def bars(base: float, *, gap: range | None = None) -> dict:
     for m, rel in enumerate(closes):
         if gap is not None and m in gap:
             continue  # trading halted: no bars
-        c = base + rel + (WOBBLE[m % len(WOBBLE)] if 24 <= m < 76 else 0.0)
+        c = base + rel + (WOBBLE[m % len(WOBBLE)] if 3 <= m < 86 else 0.0)
         v, wick = _volume_and_wick(m)
         out.append(_bar(UTC_OPEN + timedelta(minutes=m), prev, c, wick, v))
         prev = c
@@ -142,8 +139,7 @@ def write(folder: str, name: str, obj: dict) -> None:
 
 
 def build() -> None:
-    # ---- clean-buy: BRKO, orderly breakout through the opening-range high, room below the
-    # post-open spike high
+    # ---- clean-buy: BRKO, steady trend up, a pullback that holds VWAP, close near the high
     b = bars(80.0)
     write("clean-buy", "bars.json", b)
     write("clean-buy", "snapshot.json", snapshot("BRKO", b, prev_close=78.20))
