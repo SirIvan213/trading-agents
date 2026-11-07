@@ -74,7 +74,7 @@ def load_scenario(name: str) -> Scenario:
         if action not in (None, "BUY", "PASS"):
             raise ValueError("expected.action must be BUY, PASS or null")
         fatal = exp.get("fatal_bear")
-        if fatal not in (None, True, False):
+        if fatal is not None and not isinstance(fatal, bool):  # 1 == True, so no `in`
             raise ValueError("expected.fatal_bear must be true, false or null")
         expected = Expected(action, fatal, str(exp.get("why", "")))
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
