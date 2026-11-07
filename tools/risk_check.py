@@ -26,11 +26,29 @@ class DayState:
     risk_used_today: Decimal = Decimal("0")  # sum of max-loss-at-stop of today's entries
 
 
+def _state_problem(state: object) -> str | None:
+    """Why `state` is not a usable DayState (#31), or None. trades_today must be a
+    non-negative int (bool rejected); risk_used_today a finite, non-negative Decimal."""
+    if not isinstance(state, DayState):
+        return "day state must be a DayState"
+    trades = state.trades_today
+    if isinstance(trades, bool) or not isinstance(trades, int) or trades < 0:
+        return "day state trades_today must be a non-negative whole number"
+    risk = state.risk_used_today
+    if not isinstance(risk, Decimal) or not risk.is_finite() or risk < 0:
+        return "day state risk_used_today must be a finite, non-negative Decimal"
+    return None
+
+
 def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> dict:
     """Return {"verdict": "PASS"|"BLOCK", "reasons": [...]}.
 
     `order` is the bracket order written by tools.size.size_position.
-    `now` must be timezone-aware; it is converted to New York time.
+    `now` must be timezone-aware; it is converted to New York time. A naive or non-datetime
+    `now`, or a DayState whose trades_today is not a non-negative int or whose
+    risk_used_today is not a finite, non-negative Decimal, is an early BLOCK (#31).
+    `limits.trading_enabled` other than True (the kill switch, #32) and `limits.paper` other
+    than True each add a BLOCK reason.
     Minimum stop distance: entry - stop below limits.min_risk_per_share is blocked,
     because a stop a few cents from entry is a noise stop that sizing pushes to the
     position cap. No ATR is available here, so only the absolute minimum is enforced.
@@ -42,10 +60,32 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
     evaluating later rules.
     """
     reasons: list[str] = []
-    ny = now.astimezone(NY)
 
-    if limits.paper is not True:
+    if getattr(limits, "paper", None) is not True:
         reasons.append("live trading is disabled in this phase (paper must be true)")
+    # Kill switch (#32): anything but exactly True blocks, with the paper check.
+    if getattr(limits, "trading_enabled", None) is not True:
+        reasons.append("trading is disabled (kill switch: trading_enabled is not true)")
+
+    # Fail closed on the clock and the day's state (#31): block, never raise.
+    bad_input = False
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        reasons.append("now must be a timezone-aware datetime")
+        bad_input = True
+    state_problem = _state_problem(state)
+    if state_problem is not None:
+        reasons.append(state_problem)
+        bad_input = True
+    if not isinstance(limits, Limits):
+        reasons.append("limits must be a Limits")
+        bad_input = True
+    if bad_input:
+        return {"verdict": "BLOCK", "reasons": reasons}
+    try:
+        ny = now.astimezone(NY)
+    except (OverflowError, ValueError):  # an aware datetime at the edge of the date range
+        reasons.append("now must be a timezone-aware datetime")
+        return {"verdict": "BLOCK", "reasons": reasons}
 
     # Fail closed: hand-built limits (NaN, Infinity, floats...) must never pass an order.
     try:

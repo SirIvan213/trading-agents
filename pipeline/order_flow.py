@@ -189,7 +189,9 @@ def approve(
     the re-built order differs in any field from the one shown, there is no order.
     Raises JournalError if an entry for a declined, refused, changed or approved outcome
     cannot be written; for an approval nothing then counts as approved. A not-ok proposal's
-    "no_order" entry is best effort.
+    "no_order" entry is best effort. The re-check and its journal entry run under
+    journal.exclusive() (#107); if that lock cannot be taken, JournalError is raised and
+    nothing is approved.
     """
     if not p.ok:
         try:  # audit trail for a refused BUY; a broken journal must not hide the refusal
@@ -205,17 +207,24 @@ def approve(
         journal.append(_entry(p, "declined", "not approved"))
         return Outcome("declined", "not approved", p)
 
-    again = propose(ledger, p.plan_id, journal=journal, clock=clock)
-    if not again.ok:
-        reason = f"re-check failed at {again.stage}: {again.reason}"
-        journal.append(_entry(p, "refused_after_approval", reason, recheck_at=again.checked_at))
-        return Outcome("refused_after_approval", reason, p, again)
-    if again.sized != p.sized or again.plan != p.plan:
-        reason = "the re-built order differs from the approved ticket"
-        journal.append(_entry(p, "changed_after_approval", reason, recheck_at=again.checked_at))
-        return Outcome("changed_after_approval", reason, p, again)
+    # #107: the re-check (which reads today's DayState from the journal) and the approved
+    # append happen under the journal's cross-process lock, so two concurrent approvers can
+    # never both fit into the last trade or the last of the daily loss budget.
+    with journal.exclusive():
+        again = propose(ledger, p.plan_id, journal=journal, clock=clock)
+        if not again.ok:
+            reason = f"re-check failed at {again.stage}: {again.reason}"
+            journal.append(
+                _entry(p, "refused_after_approval", reason, recheck_at=again.checked_at))
+            return Outcome("refused_after_approval", reason, p, again)
+        if again.sized != p.sized or again.plan != p.plan:
+            reason = "the re-built order differs from the approved ticket"
+            journal.append(
+                _entry(p, "changed_after_approval", reason, recheck_at=again.checked_at))
+            return Outcome("changed_after_approval", reason, p, again)
 
-    approved_at = datetime.fromisoformat(again.checked_at)
-    age = _plan_age_s(again.plan, approved_at) if again.plan else None
-    journal.append(_entry(again, APPROVED, None, approved_at=again.checked_at, plan_age_s=age))
-    return Outcome(APPROVED, None, p, again, again.checked_at, age)
+        approved_at = datetime.fromisoformat(again.checked_at)
+        age = _plan_age_s(again.plan, approved_at) if again.plan else None
+        journal.append(
+            _entry(again, APPROVED, None, approved_at=again.checked_at, plan_age_s=age))
+        return Outcome(APPROVED, None, p, again, again.checked_at, age)

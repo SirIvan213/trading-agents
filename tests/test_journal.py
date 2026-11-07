@@ -36,7 +36,8 @@ def test_append_serialises_unknown_types_with_str(j):
 def test_append_failure_is_a_journal_error(tmp_path):
     blocker = tmp_path / "blocker"
     blocker.write_text("a file, not a directory")
-    with pytest.raises(JournalError, match="journal write failed"):
+    # The lock file sits next to the journal, so its creation fails first (#107).
+    with pytest.raises(JournalError, match="journal (write|lock) failed"):
         Journal(blocker / "decisions.jsonl").append({"status": "x"})
 
 
