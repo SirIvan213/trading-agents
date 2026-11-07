@@ -12,7 +12,9 @@ tests/fixtures/ (synthetic data in the real API shapes, for a run "as of" 2026-1
 Nothing is sent unless --billed is given (CLAUDE.md rule 6); without it the script prints
 what it would run and exits 3. Every retried attempt's rejection reason is printed under its
 agent's API calls (a debate money-check reason is count-only and never quotes the rejected
-value; an analyst reason may name the field or catalyst the model got wrong). The API key
+value; an analyst reason may name the field or catalyst the model got wrong). After the
+report, a DEBUG section lists each money-check rejection's offending tokens, the pattern that
+matched and an excerpt; it is printed only and never stored in the debate record. The API key
 is read from ANTHROPIC_API_KEY, loaded from .env in the repo root (or --env-file PATH;
 --no-dotenv skips it) if present (a non-empty exported variable wins). The key is never
 printed. Without flags each agent uses its own configured model and effort (config_for:
@@ -45,7 +47,7 @@ from datetime import datetime
 from typing import Any
 
 from agents.debate import resolve_rounds, run_debate
-from agents.debate_common import MONEY_REASON
+from agents.debate_common import MONEY_REASON, money_debug
 from agents.llm import EFFORTS, AgentConfig, config_for, make_client
 from agents.orchestrator import AGENTS, run_analysts
 from agents.schemas import CallRecord, DebateRecord, DecisionPacket, RetryRecord
@@ -117,6 +119,30 @@ def _print_retries(label: str, retries: list[RetryRecord]) -> None:
     # name a source or catalyst, as the final `reason` already does.
     for r in retries:
         print(f"  {label} RETRY after attempt {r.attempt}: {r.reason_code}: {r.reason}")
+
+
+Rejection = tuple[str, list[tuple[str, Any]]]  # (side, [(field, ViolationDetail), ...])
+
+
+def print_money_debug(rejections: list[Rejection]) -> None:
+    """Console-only detail of every money-check rejection: token, pattern, excerpt.
+
+    This is debugging output for this script alone. It is printed and dropped: it is never
+    written into the DebateRecord, a retry reason, the model hint or anything the Trader reads.
+    """
+    print("\n-- Money-check rejections (DEBUG, console only, not stored) --")
+    if not rejections:
+        print("none")
+        return
+    seen: dict[str, int] = {}
+    for side, items in rejections:
+        seen[side] = seen.get(side, 0) + 1
+        print(f"\n{side} rejected attempt #{seen[side]}: {len(items)} offending mention(s)")
+        for field_name, d in items:
+            note = "  (equals a plan value; rejected as a size)" if d.plan_value else ""
+            print(f"  {field_name}: token {d.number!r} in {d.mention!r}{note}")
+            print(f"    pattern: {d.pattern}")
+            print(f"    excerpt: {d.excerpt}")
 
 
 def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, AgentConfig]) -> None:
@@ -234,10 +260,13 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     except ValueError as exc:  # e.g. "limits config is invalid", before any analyst starts
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    debate = run_debate(packet, clients=client,
-                        configs={a: configs[a] for a in DEBATERS}, rounds=rounds)
+    rejections: list[Rejection] = []
+    with money_debug(lambda side, items: rejections.append((side, items))):
+        debate = run_debate(packet, clients=client,
+                            configs={a: configs[a] for a in DEBATERS}, rounds=rounds)
 
     report(packet, debate, configs)
+    print_money_debug(rejections)
 
     calls = [c for r in packet.runs.values() for c in r.calls]
     calls += [c for t in debate.turns for c in t.run.calls]
