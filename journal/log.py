@@ -10,7 +10,11 @@ Entries hold the order, the verdict and ids. They never hold analyst or trader t
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -27,23 +31,111 @@ class JournalError(RuntimeError):
     """The journal could not be read or written."""
 
 
+LOCK_TIMEOUT_S = 10.0
+
+
+def _try_lock(fh) -> bool:  # noqa: ANN001 - a binary file object
+    """Take an exclusive, non-blocking OS lock on `fh`. True if taken."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(fh) -> None:  # noqa: ANN001
+    if os.name == "nt":
+        import msvcrt
+
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 class Journal:
     """Append-only JSONL journal."""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path is not None else DEFAULT_PATH
-        self._lock = threading.Lock()
+        self._tx_lock = threading.Lock()
+        self._holder: int | None = None  # thread ident holding the lock through this object
+        self._depth = 0
+
+    @property
+    def lock_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".lock")
+
+    @contextmanager
+    def exclusive(self, timeout_s: float | None = None) -> Iterator[None]:
+        """Hold the journal's cross-process lock (#107) for a read-check-append.
+
+        An OS file lock on `<journal>.lock` (msvcrt on Windows, flock elsewhere), so two
+        processes, or two Journal objects on one file, cannot interleave an approval's
+        day_state re-check and its append, nor two appends. Re-entrant for the thread that
+        already holds it through this object (append() inside an approval's exclusive block).
+        Raises JournalError if the lock cannot be taken within `timeout_s` (default
+        LOCK_TIMEOUT_S, read at call time), so a contended or broken lock means no write and no
+        approval.
+        """
+        me = threading.get_ident()
+        if self._holder == me:
+            self._depth += 1
+            try:
+                yield
+            finally:
+                self._depth -= 1
+            return
+        if timeout_s is None:
+            timeout_s = LOCK_TIMEOUT_S
+        deadline = time.monotonic() + timeout_s
+        if not self._tx_lock.acquire(timeout=max(timeout_s, 0)):
+            raise JournalError("journal lock timed out")
+        try:
+            try:
+                self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+                fh = self.lock_path.open("a+b")
+            except OSError as exc:
+                raise JournalError(f"journal lock failed ({type(exc).__name__})") from None
+            try:
+                while not _try_lock(fh):
+                    if time.monotonic() >= deadline:
+                        raise JournalError("journal lock timed out")
+                    time.sleep(0.01)
+                self._holder, self._depth = me, 1
+                try:
+                    yield
+                finally:
+                    self._holder, self._depth = None, 0
+                    _unlock(fh)
+            finally:
+                fh.close()
+        finally:
+            self._tx_lock.release()
 
     def append(self, entry: dict) -> None:
-        """Append one entry. Raises JournalError if it cannot be written."""
+        """Append one entry under the cross-process lock, so concurrent writers (other
+        processes or Journal objects) can never overwrite each other's line. Raises
+        JournalError if it cannot be written or the lock cannot be taken."""
         line = json.dumps(entry, sort_keys=True, default=str)
-        try:
-            with self._lock:
+        with self.exclusive():
+            try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 with self.path.open("a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
-        except OSError as exc:
-            raise JournalError(f"journal write failed ({type(exc).__name__})") from None
+            except OSError as exc:
+                raise JournalError(
+                    f"journal write failed ({type(exc).__name__})") from None
 
     def entries(self) -> list[dict]:
         """Every entry, oldest first. Raises JournalError for an unreadable or corrupt file."""

@@ -1,5 +1,6 @@
 {
   "paper": true,
+  "trading_enabled": true,
   "account_cash": "5000.00",
   "cash_buffer_pct": "10",
   "max_loss_per_trade": "50.00",

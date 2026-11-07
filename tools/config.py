@@ -48,6 +48,9 @@ class Limits:
     max_extension_atr_5m: Decimal = Decimal("2.0")  # entry - VWAP above this: extended
     max_stop_atr_5m: Decimal = Decimal("2.5")       # risk per share at or below this: tight
     good_setup_multiple: Decimal = Decimal("2")     # suggested when not extended, tight, structural
+    # Kill switch (#32): false blocks every order in risk_check, including the approval
+    # re-check. A missing key means true, so existing configs keep working.
+    trading_enabled: bool = True
 
 
 def _hhmm(s: str) -> time:
@@ -90,6 +93,9 @@ def validate_limits(limits: Limits) -> None:
     deliberately bad Limits). Checks only ever tighten: nothing here relaxes a limit.
     """
     problems: list[str] = []
+    for flag in ("paper", "trading_enabled"):
+        if not isinstance(getattr(limits, flag), bool):
+            problems.append(f"{flag} must be a boolean, got {getattr(limits, flag)!r}")
 
     def positive(name: str) -> None:
         v = getattr(limits, name)
@@ -166,8 +172,18 @@ def validate_limits(limits: Limits) -> None:
         raise ValueError("invalid limits: " + "; ".join(problems))
 
 
+def _json_bool(value: object, name: str) -> bool:
+    """Exactly a JSON true/false (#30): "false", 0, 1, "" and null are config errors, never
+    coerced with bool()."""
+    if not isinstance(value, bool):
+        raise ValueError(f"{name}: must be a JSON boolean (true or false), got {value!r}")
+    return value
+
+
 def limits_from_dict(d: dict) -> Limits:
-    """Build and validate Limits. Unparseable values raise ValueError naming the field."""
+    """Build and validate Limits. Unparseable values raise ValueError naming the field.
+
+    `paper` is required and `trading_enabled` defaults to true; both must be JSON booleans."""
     try:
         start, end = d["entry_window"]
     except (TypeError, ValueError):
@@ -199,7 +215,7 @@ def limits_from_dict(d: dict) -> Limits:
     if max_age is None:
         raise ValueError(f"max_plan_age_s: not an integer: {raw_age!r}")
     limits = Limits(
-        paper=bool(d["paper"]),
+        paper=_json_bool(d["paper"], "paper"),
         account_cash=_dec(d, "account_cash"),
         cash_buffer_pct=_dec(d, "cash_buffer_pct"),
         max_loss_per_trade=_dec(d, "max_loss_per_trade"),
@@ -218,6 +234,7 @@ def limits_from_dict(d: dict) -> Limits:
         max_extension_atr_5m=_dec(d, "max_extension_atr_5m", "2.0"),
         max_stop_atr_5m=_dec(d, "max_stop_atr_5m", "2.5"),
         good_setup_multiple=_dec(d, "good_setup_multiple", "2"),
+        trading_enabled=_json_bool(d.get("trading_enabled", True), "trading_enabled"),
     )
     validate_limits(limits)
     return limits

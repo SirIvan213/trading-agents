@@ -281,19 +281,19 @@ def test_blocked_symbol_check_ignores_order_symbol_case():
     assert r["verdict"] == "BLOCK" and "GME is on the blocked list" in r["reasons"]
 
 
-# ---------- how `paper` parses today (documented, not endorsed) ----------
-# limits_from_dict uses bool(value). Only a falsy value turns paper off, and
-# risk_check then blocks every order. Any non-empty string is truthy, which is
-# the safe side: the string "false" does NOT switch to live.
+# ---------- how `paper` parses (#30) ----------
+# `paper` must be exactly a JSON boolean. "false", 0, 1, "" and null used to be coerced
+# with bool(); they are now config errors naming the field.
 
-@pytest.mark.parametrize(
-    "raw,expected",
-    [(True, True), ("true", True), ("false", True), ("no", True), (1, True),
-     (False, False), (0, False), ("", False), (None, False)],
-    ids=repr,
-)
-def test_paper_parsing_is_plain_bool(raw, expected):
-    assert limits_from_dict(cfg(paper=raw)).paper is expected
+@pytest.mark.parametrize("raw", ["true", "false", "no", 1, 0, "", None], ids=repr)
+def test_paper_non_bool_is_rejected_naming_paper(raw):
+    msg = rejects(cfg(paper=raw), "paper")
+    assert "JSON boolean" in msg
+
+
+@pytest.mark.parametrize("raw", [True, False])
+def test_paper_real_bool_loads(raw):
+    assert limits_from_dict(cfg(paper=raw)).paper is raw
 
 
 def test_paper_missing_key_raises():
@@ -303,8 +303,8 @@ def test_paper_missing_key_raises():
         limits_from_dict(d)
 
 
-def test_paper_zero_end_to_end_blocks_with_live_disabled_reason():
-    lim = limits_from_dict(cfg(paper=0))
+def test_paper_false_end_to_end_blocks_with_live_disabled_reason():
+    lim = limits_from_dict(cfg(paper=False))
     assert lim.paper is False
     r = check_order(order_for("AAPL", lim), lim, DayState(), MON_1015)
     assert r == {
@@ -313,7 +313,6 @@ def test_paper_zero_end_to_end_blocks_with_live_disabled_reason():
     }
 
 
-def test_paper_string_false_stays_paper_and_passes_end_to_end():
-    lim = limits_from_dict(cfg(paper="false"))
-    assert lim.paper is True
+def test_paper_true_end_to_end_passes():
+    lim = limits_from_dict(cfg(paper=True))
     assert check_order(order_for("AAPL", lim), lim, DayState(), MON_1015)["verdict"] == "PASS"
