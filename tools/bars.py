@@ -181,11 +181,13 @@ def atr(bars: list[Bar], n: int = 14) -> Decimal | None:
 def resample(bars: list[Bar], minutes: int = 5) -> list[Bar]:
     """Aggregate 1-minute bars into `minutes`-minute bars aligned to the New York clock
     (09:30, 09:35, ...): first open, max high, min low, last close, summed volume. A bucket
-    with missing minutes (e.g. a halt) still counts; a trailing bucket that has not reached
-    its last minute yet is dropped, so the series holds only finished bars. Input order is
-    kept; bars from different days never share a bucket."""
-    if minutes < 1:
-        raise ValueError("minutes must be at least 1")
+    with missing minutes (e.g. a halt) still counts; a bucket with no bars at all is skipped,
+    never invented. A trailing bucket that has not reached its last minute yet is dropped, so
+    the series holds only finished bars. Bars within a bucket are ordered by time; bars from
+    different days never share a bucket. `minutes` must divide 60 (1, 2, 3, 5, ..., 30), so
+    buckets line up with the 09:30 open."""
+    if minutes < 1 or 60 % minutes != 0 or minutes == 60:
+        raise ValueError("minutes must divide 60 (1 to 30)")
     buckets: dict[datetime, list[Bar]] = {}
     for b in bars:
         ny = b.ts.astimezone(NY)
@@ -193,7 +195,7 @@ def resample(bars: list[Bar], minutes: int = 5) -> list[Bar]:
         buckets.setdefault(start, []).append(b)
     out: list[Bar] = []
     for start in sorted(buckets):
-        group = buckets[start]
+        group = sorted(buckets[start], key=lambda g: g.ts)
         out.append(Bar(
             ts=start, open=group[0].open, high=max(g.high for g in group),
             low=min(g.low for g in group), close=group[-1].close,

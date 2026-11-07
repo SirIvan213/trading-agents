@@ -329,3 +329,58 @@ def test_technical_prompt_asks_for_both_an_orb_and_a_vwap_level_plan():
 
 def test_technical_prompt_never_lets_the_model_write_prices():
     assert "never write stop or target numbers yourself" in PROMPT
+
+
+# ---------------- review additions ----------------
+
+@pytest.mark.parametrize("bad", [0, -5, 7, 45, 60, 90])
+def test_resample_minutes_must_divide_60(bad):
+    with pytest.raises(ValueError, match="divide 60"):
+        resample(flat(3, 0, 10), bad)
+
+
+def test_resample_sorts_bars_within_a_bucket():
+    a = bar(3, 9, 30, "10", "11", "9", "10.5")
+    b = bar(3, 9, 34, "10.5", "12", "10", "11.5")
+    (one,) = resample([b, a], 5)
+    assert (one.open, one.close) == (D("10"), D("11.5"))
+
+
+def test_daylight_time_utc_input_lands_in_the_0930_bucket():
+    from datetime import UTC
+    raw = {"bars": [{"t": f"2026-10-30T13:{m:02d}:00Z", "o": 10, "h": 11, "l": 9, "c": 10,
+                     "v": 5} for m in range(30, 40)]}
+    out = resample(B.parse_bars(raw), 5)
+    assert hhmm(out) == ["09:30", "09:35"]
+    assert out[0].ts.astimezone(UTC).hour == 13  # EDT: 09:30 ET is 13:30Z
+
+
+def test_a_fully_missing_bucket_is_skipped_not_invented():
+    L = Loaded("red-flag")  # halted 10:05-10:09: no 10:05 bucket at all
+    fives = resample(L.bars, 5)
+    assert "10:05" not in hhmm(fives) and "10:00" in hhmm(fives) and "10:10" in hhmm(fives)
+    assert len(fives) == 17
+
+
+def test_early_session_has_no_5m_context_and_null_fields():
+    from pipeline.scenarios import ScenarioData, load_scenario
+    data = ScenarioData(load_scenario("clean-buy"))
+    early = [b for b in B.regular_session(B.parse_bars(data._bars))
+             if b.ts.astimezone(NY).strftime("%H:%M") < "10:15"]
+    summ = summarize(early)
+    assert summ["atr"] is not None and summ["atr_5m"] is None  # 9 finished 5-minute bars
+    s = session("clean-buy")
+    lv = price_levels(summ)
+    s.summary = {**summ, "price_levels": lv}
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
+                                       "level": lv["vwap"]})
+    assert err is False, res
+    assert res["atr_5m"] is None
+    assert res["risk_atr_5m"] is None and res["entry_vs_vwap_atr_5m"] is None
+    assert res["session_high_vs_entry_atr_5m"] is None
+
+
+def test_prompt_says_null_5m_fields_mean_minimum_multiple():
+    from agents.technical import PROMPT
+    assert "If they are null" in PROMPT and "stay at the minimum multiple" in PROMPT
+    assert "not the 1-minute `atr`" in PROMPT

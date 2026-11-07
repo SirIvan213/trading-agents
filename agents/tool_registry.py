@@ -54,7 +54,8 @@ TOOLS: list[dict[str, Any]] = [
             "multiple of risk from a fixed menu. The result says whether the target is below "
             "the session high (target_vs_session_high) and, in units of the 5-minute ATR, "
             "the risk per share, entry minus VWAP and session high minus entry "
-            "(risk_atr_5m, entry_vs_vwap_atr_5m, session_high_vs_entry_atr_5m). "
+            "(risk_atr_5m, entry_vs_vwap_atr_5m, session_high_vs_entry_atr_5m) and atr_5m "
+            "itself; these are null until 70 minutes of 5-minute bars exist. "
             "Returns {ok: false, reason} if the setup is refused."
         ),
         "strict": True,
@@ -224,7 +225,8 @@ def _atr_context(result: dict, levels: dict[str, str], atr_5m: Decimal | None) -
       session_high_vs_entry_atr_5m  (session_high - entry) / atr_5m
     The 1-minute ATR is too small for this: a normal stop reads as 6+ ATR. It still sets
     the stop buffer and limits.min_risk_atr_multiple inside exit_plan, unchanged.
-    Each field is None when atr_5m is missing or zero, or the level it needs is missing."""
+    Each field is None when atr_5m is missing or zero, or the level it needs is missing.
+    Rounding down can understate a ratio by at most 0.01 ATR."""
     keys = ("risk_atr_5m", "entry_vs_vwap_atr_5m", "session_high_vs_entry_atr_5m")
     if atr_5m is None or atr_5m <= 0:
         return dict.fromkeys(keys)

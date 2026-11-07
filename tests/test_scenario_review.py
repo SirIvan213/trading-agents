@@ -147,7 +147,7 @@ def test_prompts_say_reward_to_risk_is_not_evidence_of_edge():
     from agents.technical import PROMPT as TECH
     from agents.trader import PROMPT as TRADER
     assert "not evidence of edge" in TECH
-    assert "risk_atr" in TECH and "entry_vs_vwap_atr" in TECH
+    assert "risk_atr_5m" in TECH and "entry_vs_vwap_atr_5m" in TECH
     for p in (BULL, BEAR, TRADER):
         assert "it is not evidence of edge" in p
 
