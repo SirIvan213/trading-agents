@@ -63,7 +63,7 @@ def _record(side: str, cfg: AgentConfig, run: StructuredRun) -> AgentRunRecord:
     return AgentRunRecord(
         agent=side, requested_model=cfg.model, effort=cfg.effort, ok=run.ok,
         reason=run.reason, reason_code=run.reason_code, duration_ms=run.duration_ms,
-        calls=run.calls,
+        calls=run.calls, retries=run.retries,
     )
 
 

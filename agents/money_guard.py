@@ -1,8 +1,9 @@
 r"""Deterministic scan for money values in debate text (CLAUDE.md rule 2).
 
-Bull/Bear text may quote a plan record's exact entry, stop, target or risk_per_share, and
-nothing else: no other price, and never a size or share count. This module is a conservative
-regex filter, not a parser: nothing it finds is ever used to build an order.
+Bull/Bear text may quote a number only if it appears in the decision packet: a plan record's
+entry, stop, target, risk_per_share or reward_to_risk, or a number written verbatim in an
+analyst's evidence. Any other price, size, stop or target is rejected. This module is a
+conservative regex filter, not a parser: nothing it finds is ever used to build an order.
 
 Patterns (a number is `\d[\d,]*(\.\d+)?`):
   (a) `$` followed by a number                      "$101.50", "$ 5"
@@ -34,9 +35,20 @@ $98.50:00" and "buy at 101:50" are still flagged):
   - "per share", "/share" and "a share" are a price unit, not a size: "Risk is 2.39 per share"
     is not a (b) mention, but the number is treated as a price and must be an allowed value.
 
-Allowed values: entry, stop, target, risk_per_share and reward_to_risk of every plan.
-Share counts from analyst text (e.g. "CEO sold 50,000 shares") are still flagged: conservative
-by design; the model must rephrase ("a large insider sale") without the count.
+Allowed values (issue #87):
+  - Plan values: entry, stop, target, risk_per_share and reward_to_risk of every plan, matched
+    Decimal-equal ("101.5" == "101.50"). They never allow a (b) size: "104 shares" is flagged
+    even when 104.00 is a plan's target.
+  - Quoted values: any number written in the evidence of an analyst report whose run is ok,
+    matched VERBATIM as a string ("2.54" allows "2.54" but not "2.540" or "2,54"; "50,000"
+    allows "50,000" but not "50000"). A quoted value is allowed in every pattern, sizes
+    included: "CEO sold 50,000 shares" passes when an analyst's evidence says "50,000".
+    Repeating a number the analysts already reported adds no new money value; the guard's job
+    is to stop the debaters inventing prices, sizes, stops or targets.
+Any other number in a money pattern is a violation. Share counts NOT in the evidence (e.g. a
+model-invented "CEO sold 50,000 shares") are flagged; the model must rephrase without them.
+Accepted consequence: a small integer in evidence ("2 of 3 analysts") also allows it in a
+money pattern ("buy 2"). Nothing in debate text is ever used to build an order (rule 2).
 
 Known false positives (accepted, the guard errs on the side of flagging): a ratio such as
 "2.50" in prose unless it equals a plan value; "stop 3 times"; "target 2 analysts";
@@ -45,6 +57,7 @@ Known false positives (accepted, the guard errs on the side of flagging): a rati
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from decimal import Decimal, InvalidOperation
 
 from agents.schemas import DecisionPacket
@@ -156,15 +169,47 @@ def allowed_values(packet: DecisionPacket) -> set[Decimal]:
     return out
 
 
+_TOKEN = re.compile(r"(?<![\d.,])\d[\d,]*(?:\.\d+)?")
+
+
+def _verbatim(raw: str) -> str:
+    """A number as written, minus a trailing comma ("102," in "entry 102, stop" -> "102")."""
+    return raw.rstrip(",")
+
+
+def quoted_values(packet: DecisionPacket) -> frozenset[str]:
+    """Every number written in analyst evidence, verbatim, from reports whose run is ok.
+
+    A report whose run failed (the neutral fallback) contributes nothing: its single evidence
+    point is runner text, not analysis.
+    """
+    out: set[str] = set()
+    for agent, report in packet.reports.items():
+        run = packet.runs.get(agent)
+        if run is None or not run.ok:
+            continue
+        for ev in report.evidence:
+            out.update(_verbatim(m.group(0)) for m in _TOKEN.finditer(ev.point))
+    return frozenset(out)
+
+
 def money_mentions(text: str) -> list[str]:
     """Every substring that looks like a price, size or money value (patterns a-d above)."""
     return [mention for _, mention, _ in _scan(text)]
 
 
-def money_violations(text: str, allowed: set[Decimal]) -> list[str]:
-    """Mentions whose value is not Decimal-equal to an allowed value; (b) sizes always count."""
+def money_violations(
+    text: str, allowed: set[Decimal], quoted: Collection[str] = frozenset()
+) -> list[str]:
+    """Mentions that are neither a verbatim quoted value nor Decimal-equal to a plan value.
+
+    `allowed` are plan values (prices only: a (b) size is never allowed by them); `quoted`
+    are verbatim numbers from analyst evidence (allowed in any pattern, sizes included).
+    """
     bad: list[str] = []
     for kind, mention, number in _scan(text):
+        if _verbatim(number) in quoted:
+            continue
         value = _to_decimal(number)
         if kind == "b" or value is None or value not in allowed:
             bad.append(mention)

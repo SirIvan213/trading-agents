@@ -46,6 +46,10 @@ ITEM_CATALYSTS: dict[str, str] = {
     "7.01": "reg_fd",
     "8.01": "other_event",
 }
+# 8-K items that are never catalysts. 9.01 "Financial Statements and Exhibits" only lists
+# what is attached to the filing (it rides along with 2.02, 8.01 and the rest), so on its
+# own it says nothing about the company (issue #87). It stays in `items`.
+NON_CATALYST_ITEMS = frozenset({"9.01"})
 # Catalysts that are red flags when they come from a filing.
 RED_FLAG_CATALYSTS = frozenset({"bankruptcy", "delisting_notice", "non_reliance_restatement"})
 
@@ -322,7 +326,9 @@ def parse_8k_filings(submissions: dict, since: datetime) -> list[dict]:
         if when < since.astimezone(UTC):
             continue
         codes = [c.strip() for c in str(items or "").split(",") if c.strip()]
-        catalysts = [ITEM_CATALYSTS.get(c, f"item_{c}") for c in codes]
+        catalysts = [
+            ITEM_CATALYSTS.get(c, f"item_{c}") for c in codes if c not in NON_CATALYST_ITEMS
+        ]
         out.append((when, {
             "accession": acc,
             "form": form,

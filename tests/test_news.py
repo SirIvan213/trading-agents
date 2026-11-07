@@ -383,7 +383,7 @@ def test_8k_item_to_catalyst_map():
     r = by_acc(filings())
     a = r["000010"]
     assert a["items"] == ["2.02", "9.01"]
-    assert a["catalysts"] == ["earnings", "item_9.01"]  # 9.01 is not mapped
+    assert a["catalysts"] == ["earnings"]  # 9.01 (exhibits) is not a catalyst (#87)
     assert a["red_flags"] == []
     b = r["000009"]
     assert b["items"] == ["3.02"] and b["catalysts"] == ["unregistered_equity_sale"]

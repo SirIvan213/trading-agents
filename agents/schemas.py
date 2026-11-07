@@ -21,7 +21,7 @@ class Catalyst(BaseModel):
     name: str = Field(
         description=(
             "copied exactly from the cited tool's `catalysts` or `red_flags` list "
-            "(e.g. earnings, item_9.01, halt)"
+            "(e.g. earnings, officer_change, halt)"
         )
     )
     source: str = Field(description="The tool that returned it")
@@ -98,6 +98,18 @@ class CallRecord(BaseModel):
     iterations: list[IterationRecord] = Field(default_factory=list)
 
 
+class RetryRecord(BaseModel):
+    """Why one attempt was rejected and retried (issue #87).
+
+    `reason` is the stored, count-only reason: it never quotes a rejected money value (the
+    detailed hint goes only to the model in the retry message).
+    """
+
+    attempt: int = Field(description="1-based attempt that failed and was retried")
+    reason: str
+    reason_code: ReasonCode
+
+
 class AgentRunRecord(BaseModel):
     """Audit record of one analyst run (all of its API calls)."""
 
@@ -109,6 +121,9 @@ class AgentRunRecord(BaseModel):
     reason_code: ReasonCode | None = None  # None when ok
     duration_ms: int
     calls: list[CallRecord] = Field(default_factory=list)
+    retries: list[RetryRecord] = Field(
+        default_factory=list, description="attempts rejected before the final one"
+    )
 
 
 class ExitPlanRecord(BaseModel):
