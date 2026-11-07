@@ -61,6 +61,7 @@ from agents.orchestrator import AGENTS, load_checked_limits, run_analysts
 from agents.schemas import CallRecord, DebateRecord, DecisionPacket, RetryRecord
 from agents.trader import TraderRun, run_trader
 from journal.log import Journal
+from pipeline.events import events_from
 from pipeline.ledger import PlanLedger
 from pipeline.order_flow import Proposal, propose, quotes_from, render_ticket
 from pipeline.scenarios import DEFAULT as DEFAULT_SCENARIO
@@ -343,7 +344,7 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         with tempfile.TemporaryDirectory() as tmp:
             proposal = propose(ledger, trader.decision.plan_id,
                                journal=Journal(Path(tmp) / "smoke.jsonl"), clock=lambda: now,
-                               quotes=fixture_quotes(data, now))
+                               quotes=fixture_quotes(data, now), events=events_from(data))
 
     report(packet, debate, configs)
     print_trader(trader, proposal)
