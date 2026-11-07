@@ -1,0 +1,30 @@
+[
+ {
+  "symbol": "TSLA",
+  "date": "2026-11-09",
+  "epsActual": null,
+  "epsEstimated": 1.12,
+  "revenueActual": null,
+  "revenueEstimated": 412000000,
+  "time": "amc",
+  "periodEnding": "2026-09-30",
+  "fiscalPeriod": "Q3",
+  "fiscalYear": 2026,
+  "confirmed": true,
+  "lastUpdated": "2026-11-06"
+ },
+ {
+  "symbol": "AXLE",
+  "date": "2026-11-09",
+  "epsActual": null,
+  "epsEstimated": 1.12,
+  "revenueActual": null,
+  "revenueEstimated": 412000000,
+  "time": "bmo",
+  "periodEnding": "2026-09-30",
+  "fiscalPeriod": "Q3",
+  "fiscalYear": 2026,
+  "confirmed": true,
+  "lastUpdated": "2026-11-06"
+ }
+]

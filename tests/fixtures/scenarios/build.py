@@ -137,7 +137,29 @@ def company_facts(cik: int, name: str, scale: float, *, filed_before: str | None
     return facts
 
 
-def write(folder: str, name: str, obj: dict) -> None:
+def fmp_row(symbol: str, day: str, time: str | None, confirmed: bool, period: str = "Q3",
+            fiscal_year: int = 2026, period_ending: str = "2026-09-30") -> dict:
+    """One FMP /stable/earnings-calendar row as returned with includeReportTimes=true (shape
+    from a contract fixture recorded against the live API; see tools/earnings_calendar.py)."""
+    return {"symbol": symbol, "date": day, "epsActual": None, "epsEstimated": 1.12,
+            "revenueActual": None, "revenueEstimated": 412000000, "time": time,
+            "periodEnding": period_ending, "fiscalPeriod": period, "fiscalYear": fiscal_year,
+            "confirmed": confirmed, "lastUpdated": "2026-11-02"}
+
+
+# Other companies reporting in the fixture window [2026-11-03, 2026-11-17]. None of the
+# scenario symbols appears unless the scenario has an earnings event.
+OTHER_REPORTS = [
+    fmp_row("AXLE", "2026-11-03", "bmo", True),
+    fmp_row("CORV", "2026-11-03", "amc", True),
+    fmp_row("DUNE", "2026-11-04", None, False),
+    fmp_row("EMBR", "2026-11-05", "amc", True),
+    fmp_row("FJRD", "2026-11-10", "bmo", False),
+    fmp_row("GLYF", "2026-11-12", "amc", True),
+]
+
+
+def write(folder: str, name: str, obj: dict | list) -> None:
     path = HERE / folder / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=1) + "\n", encoding="utf-8")
@@ -159,7 +181,11 @@ def build() -> None:
     write("clean-buy", "submissions.json", submissions("BRKO", "9900001", "Brookfield Optics", [
         ("2026-11-02T21:05:00.000Z", "8-K", "1.01,9.01", "brko-8k_20261102.htm"),
         ("2026-10-29T20:05:00.000Z", "10-Q", "", "brko-20260930.htm"),
+        # Q3 results (item 2.02): proves BRKO reports quarterly, so the calendar's silence
+        # about BRKO means "no earnings in the window" (#112)
+        ("2026-10-29T20:01:00.000Z", "8-K", "2.02,9.01", "brko-8k_20261029.htm"),
     ]))
+    write("clean-buy", "earnings_calendar.json", OTHER_REPORTS)
     write("clean-buy", "companyfacts.json", company_facts(9900001, "Brookfield Optics", 0.05))
 
     # ---- red-flag: VNTR, the same chart shifted, a five-minute halt in the bars, a halt
@@ -180,7 +206,10 @@ def build() -> None:
     write("red-flag", "submissions.json", submissions("VNTR", "9900002", "Ventara", [
         ("2026-11-02T21:40:00.000Z", "8-K", "8.01", "vntr-8k_20261102.htm"),
         ("2026-07-23T20:05:00.000Z", "10-Q", "", "vntr-20260630.htm"),
+        ("2026-07-23T20:01:00.000Z", "8-K", "2.02,9.01", "vntr-8k_20260723.htm"),
     ]))
+    write("red-flag", "earnings_calendar.json",
+          [fmp_row("VNTR", "2026-11-03", None, True), *OTHER_REPORTS])
     write("red-flag", "companyfacts.json",
           company_facts(9900002, "Ventara", 0.08, filed_before="2026-10-01"))
 
@@ -201,7 +230,12 @@ def build() -> None:
         "CHSW", "9900003", "Chasewater Labs", [
             ("2026-11-02T21:05:00.000Z", "8-K", "1.01,9.01", "chsw-8k_20261102.htm"),
             ("2026-10-29T20:05:00.000Z", "10-Q", "", "chsw-20260930.htm"),
+            ("2026-10-29T20:01:00.000Z", "8-K", "2.02,9.01", "chsw-8k_20261029.htm"),
         ]))
+    write("extended-chase", "earnings_calendar.json", OTHER_REPORTS)
+    # The TSLA baseline's calendar for the same window (TSLA reported on 2026-10-22).
+    (FIXTURES / "fmp_earnings_calendar_tsla.json").write_text(
+        json.dumps(OTHER_REPORTS, indent=1) + "\n", encoding="utf-8")
     write("extended-chase", "companyfacts.json",
           company_facts(9900003, "Chasewater Labs", 0.05))
 

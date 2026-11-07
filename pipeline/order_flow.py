@@ -24,9 +24,11 @@ from datetime import UTC, datetime, timedelta
 from agents.orchestrator import load_checked_limits
 from agents.schemas import ExitPlanRecord
 from journal.log import APPROVED, Journal, JournalError
+from pipeline.events import EventSource
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
 from pipeline.orders import build_order, select_plan
+from tools.market_calendar import CalendarError, day_times
 from tools.risk_check import check_order
 
 Clock = Callable[[], datetime]
@@ -68,6 +70,7 @@ class Proposal:
     verdict: dict | None
     checked_at: str
     expires_at: str | None = None  # plan as_of + limits.max_plan_age_s (New York time)
+    gate: dict | None = None  # event-gate result (#112): status CLEAR / EVENT / UNKNOWN
 
     @property
     def order(self) -> dict | None:
@@ -98,23 +101,39 @@ def _expires_at(plan: ExitPlanRecord, max_age_s: int) -> str | None:
         return None
 
 
+def _window_end(now: datetime, limits: object) -> datetime:
+    """Today's flat-by in New York (12:55 on an early close): the end of an intraday trade.
+    On a day the calendar cannot answer, `now` (risk_check blocks that day anyway)."""
+    day = now.astimezone(NY).date()
+    try:
+        flat = day_times(day, limits)[2]  # type: ignore[arg-type]
+    except CalendarError:
+        return now
+    return datetime.combine(day, flat, tzinfo=NY)
+
+
 def propose(
     ledger: PlanLedger, plan_id: str | None, *, journal: Journal, clock: Clock = wall_clock,
-    quotes: Quotes | None = None,
+    quotes: Quotes | None = None, events: EventSource | None = None,
 ) -> Proposal:
     """Size and risk-check the ledger plan `plan_id` at `clock()`. Never raises.
 
     The symbol's live quote is read from `quotes` after the clock (#68); without a quote source
     or a usable quote there is no order (stage "quote" when the source fails, "size" when the
-    quote is missing, stale, crossed or the price moved past the slippage allowance)."""
+    quote is missing, stale, crossed or the price moved past the slippage allowance).
+
+    The event gate (#112) is read from `events` (symbol, now, today's flat-by) and passed to
+    check_order. Without an events source the result is missing and check_order BLOCKs; a
+    source that raises is refused at stage "events". The result rides on the Proposal."""
     now = clock()
     run_id = ledger.run_id if isinstance(ledger, PlanLedger) else ""
 
     def refuse(
         stage: str, reason: str, plan: ExitPlanRecord | None = None,
-        sized: dict | None = None, verdict: dict | None = None,
+        sized: dict | None = None, verdict: dict | None = None, gate: dict | None = None,
     ) -> Proposal:
-        return Proposal(False, stage, reason, run_id, plan_id, plan, sized, verdict, _iso(now))
+        return Proposal(False, stage, reason, run_id, plan_id, plan, sized, verdict, _iso(now),
+                        gate=gate)
 
     if now.tzinfo is None or now.utcoffset() is None:
         return refuse("plan", "clock must be timezone-aware")
@@ -139,12 +158,18 @@ def propose(
         state = journal.day_state(now)
     except JournalError as exc:
         return refuse("journal", str(exc), plan, sized)
-    verdict = check_order(sized["order"], limits, state, now)
+    gate: dict | None = None
+    if events is not None:
+        try:
+            gate = events(plan.symbol, now, _window_end(now, limits))
+        except Exception as exc:  # noqa: BLE001 - a data error must never raise out of propose
+            return refuse("events", f"event gate failed ({type(exc).__name__})", plan, sized)
+    verdict = check_order(sized["order"], limits, state, now, gate)
     if verdict.get("verdict") != "PASS":
         return refuse("risk", "; ".join(verdict.get("reasons", [])) or "blocked",
-                      plan, sized, verdict)
+                      plan, sized, verdict, gate)
     return Proposal(True, None, None, run_id, plan_id, plan, sized, verdict, _iso(now),
-                    _expires_at(plan, limits.max_plan_age_s))
+                    _expires_at(plan, limits.max_plan_age_s), gate)
 
 
 def render_ticket(p: Proposal) -> str:
@@ -168,6 +193,8 @@ def render_ticket(p: Proposal) -> str:
         f"  Size decided by the limit: {sized['decided_by']}.",
         f"  Plan {plan.plan_id} ({plan.setup} setup), made {plan.as_of}; "
         f"flat by {plan.time_exit} ET.",
+        f"  Event gate: {(p.gate or {}).get('status', 'n/a')} "
+        f"({(p.gate or {}).get('reason', 'no result')}).",
         f"  Risk check: {p.verdict['verdict'] if p.verdict else 'n/a'}. "
         f"Checked {p.checked_at}. Run {p.run_id}.",
         f"  Approve before {p.expires_at or 'n/a'}: after that the plan is stale and the "
@@ -191,6 +218,9 @@ def _entry(p: Proposal, status: str, reason: str | None, **extra: object) -> dic
         "max_loss": (p.sized or {}).get("max_loss") if p.ok else None,
         "decided_by": (p.sized or {}).get("decided_by") if p.ok else None,
         "quote": (p.sized or {}).get("quote") if p.ok else None,
+        # #112: the gate's status and reason, so EVENT and UNKNOWN blocks stay distinct facts
+        "gate": ({"status": p.gate.get("status"), "reason": p.gate.get("reason")}
+                 if isinstance(p.gate, dict) else None),
         "verdict": p.verdict, "checked_at": p.checked_at, **extra,
     }
 
@@ -213,6 +243,7 @@ def _plan_age_s(plan: ExitPlanRecord, now: datetime) -> int | None:
 def approve(
     p: Proposal, ledger: PlanLedger, *, journal: Journal, ask: Ask = input,
     clock: Clock = wall_clock, quotes: Quotes | None = None,
+    events: EventSource | None = None,
 ) -> Outcome:
     """Ask a human to approve `p`, re-check it, and journal the result. Never sends an order.
 
@@ -245,7 +276,8 @@ def approve(
     # append happen under the journal's cross-process lock, so two concurrent approvers can
     # never both fit into the last trade or the last of the daily loss budget.
     with journal.exclusive():
-        again = propose(ledger, p.plan_id, journal=journal, clock=clock, quotes=quotes)
+        again = propose(ledger, p.plan_id, journal=journal, clock=clock, quotes=quotes,
+                        events=events)
         if not again.ok:
             reason = f"re-check failed at {again.stage}: {again.reason}"
             journal.append(

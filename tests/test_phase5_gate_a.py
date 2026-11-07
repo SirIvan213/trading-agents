@@ -18,7 +18,14 @@ import pytest
 import pipeline.order_flow as of
 from journal.log import APPROVED, Journal, JournalError
 from pipeline.order_flow import approve, propose
-from tests.order_helpers import T0, quotes_at, raw_lines, sealed_ledger
+from tests.order_helpers import (
+    T0,
+    events_clear,
+    gate_for_order,
+    quotes_at,
+    raw_lines,
+    sealed_ledger,
+)
 from tools.config import CONFIG_DIR, Limits, limits_from_dict, load_limits, validate_limits
 from tools.risk_check import DayState, check_order
 from tools.size import Plan, size_position
@@ -50,7 +57,8 @@ _DEFAULT = object()
 
 
 def check(limits=LIMITS, state=_DEFAULT, now=MON_1015):
-    return check_order(order(), limits, DayState() if state is _DEFAULT else state, now)
+    return check_order(order(), limits, DayState() if state is _DEFAULT else state, now,
+        gate=gate_for_order(order(), now))
 
 
 # ============================ #30 paper ============================
@@ -148,30 +156,34 @@ def statuses(j):
 def test_32_flow_propose_with_switch_off_is_refused_at_risk(monkeypatch, tmp_path):
     set_limits(monkeypatch, replace(LIMITS, trading_enabled=False))
     p = propose(sealed_ledger(), "plan-1", journal=Journal(tmp_path / "j.jsonl"),
-                clock=clock_at(T0), quotes=quotes_at(T0))
+                clock=clock_at(T0), quotes=quotes_at(T0), events=events_clear())
     assert p.ok is False and p.stage == "risk" and "kill switch" in p.reason
 
 
 def test_32_flow_switch_on_throughout_is_approved(monkeypatch, tmp_path):
     set_limits(monkeypatch, LIMITS)
     led, j = sealed_ledger(), Journal(tmp_path / "j.jsonl")
-    p = propose(led, "plan-1", journal=j, clock=clock_at(T0), quotes=quotes_at(T0))
+    p = propose(led, "plan-1", journal=j, clock=clock_at(T0), quotes=quotes_at(T0),
+        events=events_clear())
     assert p.ok
-    out = approve(p, led, journal=j, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0))
+    out = approve(p, led, journal=j, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0),
+        events=events_clear())
     assert out.status == APPROVED and statuses(j) == [APPROVED]
 
 
 def test_32_flow_flipped_between_ticket_and_yes_refuses(monkeypatch, tmp_path):
     set_limits(monkeypatch, LIMITS)
     led, j = sealed_ledger(), Journal(tmp_path / "j.jsonl")
-    p = propose(led, "plan-1", journal=j, clock=clock_at(T0), quotes=quotes_at(T0))
+    p = propose(led, "plan-1", journal=j, clock=clock_at(T0), quotes=quotes_at(T0),
+        events=events_clear())
     assert p.ok
 
     def flip_then_yes(_):
         set_limits(monkeypatch, replace(LIMITS, trading_enabled=False))
         return "yes"
 
-    out = approve(p, led, journal=j, ask=flip_then_yes, clock=clock_at(T0), quotes=quotes_at(T0))
+    out = approve(p, led, journal=j, ask=flip_then_yes, clock=clock_at(T0), quotes=quotes_at(T0),
+        events=events_clear())
     assert out.status == "refused_after_approval" and out.recheck.stage == "risk"
     assert "kill switch" in out.reason
     assert APPROVED not in statuses(j) and statuses(j) == ["refused_after_approval"]
@@ -255,8 +267,10 @@ def _no_lock(self, timeout_s=0.0):
 def test_107_single_approver_approved_and_lock_released(monkeypatch, tmp_path):
     set_limits(monkeypatch, LIMITS)
     led, j = sealed_ledger(), Journal(tmp_path / "j.jsonl")
-    p = propose(led, "plan-1", journal=j, clock=clock_at(T0), quotes=quotes_at(T0))
-    out = approve(p, led, journal=j, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0))
+    p = propose(led, "plan-1", journal=j, clock=clock_at(T0), quotes=quotes_at(T0),
+        events=events_clear())
+    out = approve(p, led, journal=j, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0),
+        events=events_clear())
     assert out.status == APPROVED and statuses(j) == [APPROVED]
     with j.exclusive(timeout_s=0.5):  # same object again
         pass
@@ -332,15 +346,17 @@ def test_107_approve_with_lock_held_elsewhere_raises_and_approves_nothing(monkey
     monkeypatch.setattr(Journal, "exclusive", _with_default_timeout(0.05))
     led = sealed_ledger()
     j = Journal(tmp_path / "j.jsonl")
-    p = propose(led, "plan-1", journal=j, clock=clock_at(T0), quotes=quotes_at(T0))
+    p = propose(led, "plan-1", journal=j, clock=clock_at(T0), quotes=quotes_at(T0),
+        events=events_clear())
     holder = Journal(j.path)
     with holder.exclusive(timeout_s=1):
         with pytest.raises(JournalError, match="timed out"):
-            approve(p, led, journal=j, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0))
+            approve(p, led, journal=j, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0),
+                events=events_clear())
     assert APPROVED not in statuses(j)
     # once released, the same ticket can be approved
     assert approve(p, led, journal=j, ask=yes, clock=clock_at(T0),
-            quotes=quotes_at(T0)).status == APPROVED
+            quotes=quotes_at(T0), events=events_clear()).status == APPROVED
 
 
 def race(monkeypatch, tmp_path, lim: Limits, *, lock: bool):
@@ -370,7 +386,8 @@ def race(monkeypatch, tmp_path, lim: Limits, *, lock: bool):
         barrier.wait()
         return "yes"
 
-    props = [propose(led, "plan-1", journal=Journal(path), clock=clock_at(T0), quotes=quotes_at(T0))
+    props = [propose(led, "plan-1", journal=Journal(path), clock=clock_at(T0), quotes=quotes_at(T0),
+        events=events_clear())
              for _ in range(2)]
     assert all(p.ok for p in props)
     armed.set()
@@ -380,7 +397,7 @@ def race(monkeypatch, tmp_path, lim: Limits, *, lock: bool):
     def worker(i):
         try:
             outs[i] = approve(props[i], led, journal=Journal(path), ask=ask, clock=clock_at(T0),
-                    quotes=quotes_at(T0))
+                    quotes=quotes_at(T0), events=events_clear())
         except Exception as exc:  # noqa: BLE001 - surfaced by the assertion below
             errs.append(exc)
 
@@ -433,7 +450,7 @@ def test_31_out_of_range_aware_now_blocks_instead_of_raising(edge):
 
 @pytest.mark.parametrize("bad", [None, {}, EXAMPLE], ids=["none", "dict", "raw-config"])
 def test_31_limits_that_are_not_a_limits_block_instead_of_raising(bad):
-    res = check_order(order(), bad, DayState(), MON_1015)
+    res = check_order(order(), bad, DayState(), MON_1015, gate=gate_for_order(order(), MON_1015))
     assert res["verdict"] == "BLOCK" and "limits must be a Limits" in res["reasons"]
 
 

@@ -216,14 +216,19 @@ def test_quote_above_entry_plus_allowance_is_refused_as_price_moved(smoke, capsy
     assert "refused at size" in out and "Buy 37 shares" not in out
 
 
-def test_red_flag_mismatch_when_the_trader_buys(smoke, capsys):
+def test_red_flag_mismatch_when_the_trader_buys_is_refused_by_the_event_gate(smoke, capsys):
     sym = "VNTR"
     replies = [*debaters(sym), reply(trader(sym))]
     code, out, _, _ = smoke("red-flag", replies, capsys)
     assert code == 0
     _, line = tail(out, "red-flag")
     assert line.endswith("actual BUY (fatal Bear: no) -> MISMATCH")
-    assert "Buy 32 shares of VNTR" in out  # the ticket is only a ticket; nothing is sent
+    # #112: the event gate refuses it deterministically (earnings today, a halt today), so no
+    # ticket is built even though every model said BUY; the label still reads MISMATCH
+    assert "Buy 32 shares of VNTR" not in out and "ORDER TICKET" not in out
+    assert "NO ORDER for plan plan-1: event gate EVENT:" in out
+    assert "earnings today 2026-11-03" in out and "trading halt today" in out
+    assert "refused at risk" in out
 
 
 def test_tsla_baseline_has_no_verdict(smoke, capsys):

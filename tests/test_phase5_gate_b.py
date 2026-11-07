@@ -12,6 +12,7 @@ import pytest
 import pipeline.market as market
 from agents.tool_registry import ToolSession
 from tests.fakes import FakeMarketData, load_fixture, merged_bars
+from tests.order_helpers import gate_for_order
 from tools import bars as B
 from tools import market_calendar as cal
 from tools.config import CONFIG_DIR, limits_from_dict, load_limits
@@ -39,7 +40,8 @@ def order(limits=LIMITS):
 
 
 def check(now, limits=LIMITS):
-    return check_order(order(limits), limits, DayState(), now)
+    return check_order(order(limits), limits, DayState(), now,
+        gate=gate_for_order(order(limits), now))
 
 
 # ============================ #11 calendar tables ============================

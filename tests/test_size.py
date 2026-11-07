@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from tests.order_helpers import gate_for_order
 from tools.config import CONFIG_DIR, load_limits
 from tools.risk_check import DayState, check_order
 from tools.size import Plan, size_position
@@ -66,7 +67,8 @@ def test_padded_symbol_chain_is_blocked_by_risk_check():
     sized = size_position(plan, limits, slippage=minimum_allowance(plan.entry, limits))
     assert sized["ok"]
     now = datetime(2026, 10, 19, 10, 15, tzinfo=ZoneInfo("America/New_York"))
-    r = check_order(sized["order"], limits, DayState(), now)
+    r = check_order(sized["order"], limits, DayState(), now,
+        gate=gate_for_order(sized["order"], now))
     assert r == {"verdict": "BLOCK", "reasons": ["GME is on the blocked list"]}
 
 
@@ -75,5 +77,6 @@ def test_padded_other_symbol_chain_passes():
     plan = Plan(" aapl ", D("20.00"), D("19.00"), D("21.00"))
     sized = size_position(plan, limits, slippage=minimum_allowance(plan.entry, limits))
     now = datetime(2026, 10, 19, 10, 15, tzinfo=ZoneInfo("America/New_York"))
-    assert check_order(sized["order"], limits, DayState(), now) == {
+    assert check_order(sized["order"], limits, DayState(), now,
+        gate=gate_for_order(sized["order"], now)) == {
         "verdict": "PASS", "reasons": []}

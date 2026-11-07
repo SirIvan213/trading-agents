@@ -6,7 +6,7 @@ with every reason. No agent can override a BLOCK.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -43,7 +43,47 @@ def _state_problem(state: object) -> str | None:
     return None
 
 
-def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> dict:
+GATE_STATUSES = ("CLEAR", "EVENT", "UNKNOWN")
+GATE_SKEW = timedelta(seconds=5)
+
+
+def _gate_problem(gate: object, symbol: str, limits: Limits, now: datetime) -> str | None:
+    """Why the event gate result does not let this order through (#112), or None when it is a
+    fresh CLEAR for this symbol. A missing result is a BLOCK, so a caller that forgets to wire
+    the gate cannot open it. EVENT and UNKNOWN keep their own label and reason."""
+    if not isinstance(gate, dict):
+        return "event gate result missing (earnings and halts not checked)"
+    status = gate.get("status")
+    if status not in GATE_STATUSES:
+        return "event gate result is malformed"
+    if str(gate.get("symbol", "")).strip().upper() != symbol:
+        return "event gate result is for another symbol"
+    try:
+        checked = datetime.fromisoformat(str(gate.get("checked_at")))
+        if checked.tzinfo is None or checked.utcoffset() is None:
+            raise ValueError
+    except (ValueError, OverflowError):
+        return "event gate result is malformed"
+    age = now.astimezone(UTC) - checked.astimezone(UTC)
+    if (age > timedelta(seconds=limits.max_plan_age_s) or age < -GATE_SKEW
+            or checked.astimezone(NY).date() != now.astimezone(NY).date()):
+        return "event gate result is stale"
+    if status != "CLEAR":
+        return f"event gate {status}: {gate.get('reason') or 'no reason given'}"
+    findings = gate.get("findings")
+    parts = (gate.get("earnings"), gate.get("halt"))
+    if (not isinstance(findings, list)
+            or any(not isinstance(f, dict) or f.get("status") != "CLEAR" for f in findings)
+            or any(not isinstance(p, dict) or p.get("status") != "CLEAR" for p in parts)):
+        # defence in depth: a CLEAR must carry its findings list (empty) and CLEAR earnings
+        # and halt parts; anything else is not clear
+        return "event gate result is inconsistent (CLEAR with open findings)"
+    return None
+
+
+def check_order(
+    order: dict, limits: Limits, state: DayState, now: datetime, gate: object = None
+) -> dict:
     """Return {"verdict": "PASS"|"BLOCK", "reasons": [...]}.
 
     `order` is the bracket order written by tools.size.size_position.
@@ -51,10 +91,14 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
     `now`, or a DayState whose trades_today is not a non-negative int or whose
     risk_used_today is not a finite, non-negative Decimal, is an early BLOCK (#31).
     `limits.trading_enabled` other than True (the kill switch, #32) and `limits.paper` other
-    than True each add a BLOCK reason. Market hours come from the NYSE calendar
-    (tools.market_calendar, #11): a full holiday or weekend, a time outside that day's session
-    (13:00 close on an early close), a time outside the day's entry window (it ends before the
-    12:55 flat-by on an early close) or a year the calendar does not cover BLOCK.
+    than True each add a BLOCK reason.
+    `gate` is the event-gate result (tools.event_gate.event_gate, #112). Only a fresh CLEAR for
+    the order's symbol passes; EVENT, UNKNOWN, a stale or malformed result and a MISSING one
+    (None, the default) each add a BLOCK reason. No setting changes that.
+    Market hours come from the NYSE calendar (tools.market_calendar, #11): a full holiday or
+    weekend, a time outside that day's session (13:00 close on an early close), a time outside
+    the day's entry window (it ends before the 12:55 flat-by on an early close) or a year the
+    calendar does not cover BLOCK.
     Minimum stop distance: entry - stop below limits.min_risk_per_share is blocked,
     because a stop a few cents from entry is a noise stop that sizing pushes to the
     position cap. No ATR is available here, so only the absolute minimum is enforced.
@@ -157,6 +201,10 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
     except ArithmeticError:
         reasons.append("order arithmetic failed")
         return {"verdict": "BLOCK", "reasons": reasons}
+
+    gate_problem = _gate_problem(gate, symbol, limits, now)
+    if gate_problem is not None:
+        reasons.append(gate_problem)
 
     if state.trades_today >= limits.max_trades_per_day:
         reasons.append(

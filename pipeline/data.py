@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Protocol
 
+from pipeline.events import FmpCalendarCache
 from pipeline.market import NY, ny_today
 from tools.bars import fetch_bars
 from tools.earnings import cik_for_symbol, fetch_company_facts
@@ -44,12 +45,21 @@ class FilingsData(Protocol):
         ...
 
 
-class LiveData:
-    """Live MarketData + NewsData + FilingsData over the tools/ fetchers."""
+class EarningsData(Protocol):
+    """Source of the earnings calendar (FMP), for the event gate (#112)."""
 
-    def __init__(self) -> None:
+    def earnings_calendar(self, start: date, end: date) -> dict:
+        """{"fetched_at": NY ISO, "from", "to", "reply": FMP's raw JSON list}."""
+        ...
+
+
+class LiveData:
+    """Live MarketData + NewsData + FilingsData + EarningsData over the tools/ fetchers."""
+
+    def __init__(self, calendar_cache: FmpCalendarCache | None = None) -> None:
         self._cik_map: dict[str, str] | None = None
         self._lock = threading.Lock()  # analysts run in threads; fetch the map once
+        self._calendar = calendar_cache or FmpCalendarCache()
 
     def _cik(self, symbol: str) -> str | None:
         with self._lock:
@@ -74,6 +84,11 @@ class LiveData:
     def company_facts(self, symbol: str) -> dict | None:
         cik = self._cik(symbol)
         return None if cik is None else fetch_company_facts(cik)
+
+    def earnings_calendar(self, start: date, end: date) -> dict:
+        """FMP calendar, fetched at most once per NY day (FmpCalendarCache). Billed on FMP's
+        side: a live call needs Ivan's approval (CLAUDE.md rule 6)."""
+        return self._calendar.get(start, end)
 
 
 class AlpacaMarketData(LiveData):

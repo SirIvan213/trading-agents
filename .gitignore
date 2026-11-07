@@ -18,3 +18,4 @@ trader/
 # decision journal (runtime data)
 journal/*.jsonl
 journal/*.lock
+journal/cache/

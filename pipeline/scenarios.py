@@ -2,11 +2,12 @@
 
 Each scenario lives in tests/fixtures/scenarios/<name>/scenario.json:
     {"name", "symbol", "description",
-     "files": {"bars", "snapshot", "news", "submissions", "companyfacts"},  # relative paths
+     "files": {"bars", "snapshot", "news", "submissions", "companyfacts",
+               "earnings_calendar"},  # relative paths; earnings_calendar = an FMP reply list
      "expected": {"action": "BUY" | "PASS" | null, "fatal_bear": true | false | null, "why"}}
 File paths are relative to the scenario folder and must stay inside tests/fixtures/.
 `ScenarioData` serves them through the same methods the live data classes have (bars,
-snapshots, news, submissions, company_facts); it makes no network calls.
+snapshots, news, submissions, company_facts, earnings_calendar); it makes no network calls.
 
 The expected outcome is a label for humans reading the smoke output. It never feeds an
 agent, a prompt, sizing or the risk check.
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from pipeline.market import NY
@@ -25,7 +26,8 @@ from tools.scan import validate_symbols
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
 SCENARIOS_DIR = FIXTURES / "scenarios"
-FILE_KEYS = ("bars", "snapshot", "news", "submissions", "companyfacts")
+FILE_KEYS = ("bars", "snapshot", "news", "submissions", "companyfacts", "earnings_calendar")
+CALENDAR_FETCH_TIME = time(8, 30)  # the scenario day's once-a-day FMP fetch, before the open
 DEFAULT = "tsla"
 
 
@@ -94,6 +96,7 @@ class ScenarioData:
         self._bars, self._snapshots = load["bars"], load["snapshot"]
         self._news, self._subs = load["news"], load["submissions"]
         self._facts = load["companyfacts"]
+        self._calendar = load["earnings_calendar"]
 
     def bars(self, symbol: str, start: datetime, end: datetime) -> dict:
         if symbol.upper() != self.symbol:
@@ -113,6 +116,17 @@ class ScenarioData:
 
     def company_facts(self, symbol: str) -> dict | None:
         return self._facts if symbol.upper() == self.symbol else None
+
+    def earnings_calendar(self, start: date, end: date) -> dict:
+        """The saved FMP reply, as LiveData returns it: fetched at 08:30 ET on the scenario day,
+        holding the fixture rows dated inside [start, end] (as FMP would)."""
+        day = self.as_of().date()
+        fetched = datetime.combine(day, CALENDAR_FETCH_TIME, tzinfo=NY)
+        # Like FMP, only rows inside the requested range (the fixture may hold more)
+        lo, hi = start.isoformat(), end.isoformat()
+        rows = [r for r in self._calendar
+                if isinstance(r, dict) and lo <= str(r.get("date", "")) <= hi]
+        return {"fetched_at": fetched.isoformat(), "from": lo, "to": hi, "reply": rows}
 
     def as_of(self) -> datetime:
         """One minute after the last fixture bar, in New York time."""

@@ -14,7 +14,7 @@ from pipeline import order_flow as of
 from pipeline.ledger import LedgerError
 from pipeline.order_flow import approve, propose
 from pipeline.orders import build_order, select_plan
-from tests.order_helpers import T0, fresh_quote, plan, quotes_at, sealed_ledger
+from tests.order_helpers import T0, events_clear, fresh_quote, plan, quotes_at, sealed_ledger
 from tests.test_phase4_gate import LIMITS, packet_with
 
 # A self-consistent forgery: passes every price check by itself (stop < entry < target,
@@ -46,7 +46,8 @@ def ledger(real):
 
 @pytest.fixture
 def reference(ledger, journal):
-    p = propose(ledger, "plan-1", journal=journal, clock=lambda: T0, quotes=QUOTES)
+    p = propose(ledger, "plan-1", journal=journal, clock=lambda: T0, quotes=QUOTES,
+        events=events_clear())
     assert p.ok and p.order["entry"] == "364.18"
     return p
 
@@ -74,7 +75,8 @@ def test_model_copy_forgery_in_the_packet_is_ignored(real, ledger, reference, jo
     forged = real.model_copy(update=FORGED)  # same plan_id, no validation
     packet = packet_with([forged], fake=False)
     assert packet.exit_plans[0].stop == "99.00"
-    p = propose(ledger, packet.exit_plans[0].plan_id, journal=journal, clock=clock, quotes=QUOTES)
+    p = propose(ledger, packet.exit_plans[0].plan_id, journal=journal, clock=clock, quotes=QUOTES,
+        events=events_clear())
     same_as_reference(p, reference)
     assert select_plan(ledger, forged.plan_id) == real
 
@@ -83,7 +85,8 @@ def test_model_construct_forgery_in_the_packet_is_ignored(real, ledger, referenc
     forged = ExitPlanRecord.model_construct(**{**real.model_dump(), **FORGED})
     packet = packet_with([forged], fake=False)
     assert packet.exit_plans[0].entry == "100.00"
-    p = propose(ledger, packet.exit_plans[0].plan_id, journal=journal, clock=clock, quotes=QUOTES)
+    p = propose(ledger, packet.exit_plans[0].plan_id, journal=journal, clock=clock, quotes=QUOTES,
+        events=events_clear())
     same_as_reference(p, reference)
 
 
@@ -92,7 +95,8 @@ def test_hand_appended_plan_with_a_new_id_is_refused(real, ledger, journal):
     forged = real.model_copy(update={**FORGED, "plan_id": "plan-2"})
     packet.exit_plans.append(forged)
     assert [p.plan_id for p in packet.exit_plans] == ["plan-1", "plan-2"]
-    p = propose(ledger, "plan-2", journal=journal, clock=clock, quotes=QUOTES)
+    p = propose(ledger, "plan-2", journal=journal, clock=clock, quotes=QUOTES,
+        events=events_clear())
     assert p.ok is False and p.stage == "plan" and p.reason == "unknown plan_id"
     assert p.order is None
     with pytest.raises(KeyError):
@@ -107,7 +111,8 @@ def test_packet_rebuilt_from_json_with_altered_prices_is_ignored(real, ledger, r
     blob["exit_plans"][0].update(FORGED)
     rebuilt = DecisionPacket.model_validate(blob)
     assert rebuilt.exit_plans[0].stop == "99.00"
-    p = propose(ledger, rebuilt.exit_plans[0].plan_id, journal=journal, clock=clock, quotes=QUOTES)
+    p = propose(ledger, rebuilt.exit_plans[0].plan_id, journal=journal, clock=clock, quotes=QUOTES,
+        events=events_clear())
     same_as_reference(p, reference)
 
 
@@ -116,7 +121,8 @@ def test_packet_rebuilt_from_json_with_extra_plan_cannot_order_it(real, ledger, 
     blob["exit_plans"].append({**blob["exit_plans"][0], **FORGED, "plan_id": "plan-7"})
     rebuilt = DecisionPacket.model_validate(blob)
     assert {p.plan_id for p in rebuilt.exit_plans} == {"plan-1", "plan-7"}
-    p = propose(ledger, "plan-7", journal=journal, clock=clock, quotes=QUOTES)
+    p = propose(ledger, "plan-7", journal=journal, clock=clock, quotes=QUOTES,
+        events=events_clear())
     assert p.ok is False and p.reason == "unknown plan_id"
 
 
@@ -126,10 +132,11 @@ def test_a_decision_packet_can_never_yield_an_order(real, journal):
     for pkt in (packet, rebuilt):
         with pytest.raises(KeyError, match="unknown plan_id"):
             select_plan(pkt, "plan-1")  # type: ignore[arg-type]
-        p = propose(pkt, "plan-1", journal=journal, clock=clock, quotes=QUOTES)  # type: ignore[arg-type]
+        p = propose(pkt, "plan-1", journal=journal, clock=clock, quotes=QUOTES,
+            events=events_clear())  # type: ignore[arg-type]
         assert p.ok is False and p.stage == "plan" and p.order is None and p.run_id == ""
         out = approve(p, sealed_ledger(), journal=journal, ask=lambda _: "yes", clock=clock,
-                      quotes=QUOTES)
+                      quotes=QUOTES, events=events_clear())
         assert out.status == "no_order"
     entries = journal.entries()  # only "no_order" audit lines, never an approval
     assert [e["status"] for e in entries] == ["no_order", "no_order"]
@@ -158,14 +165,17 @@ def test_mutating_the_ledger_copy_or_the_packet_plan_cannot_change_the_next_orde
     got = select_plan(ledger, "plan-1")
     object.__setattr__(got, "stop", "1.00")
     object.__setattr__(real, "target", "999.99")  # the object that was recorded
-    p = propose(ledger, "plan-1", journal=journal, clock=clock, quotes=QUOTES)
+    p = propose(ledger, "plan-1", journal=journal, clock=clock, quotes=QUOTES,
+        events=events_clear())
     same_as_reference(p, reference)
 
 
 def test_a_real_plan_still_sizes_and_approves(ledger, journal):
-    p = propose(ledger, "plan-1", journal=journal, clock=clock, quotes=QUOTES)
+    p = propose(ledger, "plan-1", journal=journal, clock=clock, quotes=QUOTES,
+        events=events_clear())
     assert p.ok and p.order["qty"] == 8
-    out = approve(p, ledger, journal=journal, ask=lambda _: "yes", clock=clock, quotes=QUOTES)
+    out = approve(p, ledger, journal=journal, ask=lambda _: "yes", clock=clock, quotes=QUOTES,
+        events=events_clear())
     assert out.status == "approved_not_sent"
 
 
@@ -174,5 +184,6 @@ def test_trader_plan_id_naming_the_forgery_gets_no_order(real, ledger, journal):
     forged = real.model_copy(update={**FORGED, "plan_id": "plan-forged"})
     packet = packet_with([real, forged], fake=False)
     assert "plan-forged" in {p.plan_id for p in packet.exit_plans}
-    p = propose(ledger, "plan-forged", journal=journal, clock=clock, quotes=QUOTES)
+    p = propose(ledger, "plan-forged", journal=journal, clock=clock, quotes=QUOTES,
+        events=events_clear())
     assert p.ok is False and p.stage == "plan"

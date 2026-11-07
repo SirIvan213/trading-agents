@@ -1,13 +1,14 @@
 {
  "name": "red-flag",
  "symbol": "VNTR",
- "description": "The clean-buy chart shifted to about 92 (trend up, pullback holding VWAP, close near the 92.77 session high), with a five-minute gap in the bars (10:05-10:09 ET) where trading was halted. News: a volatility halt headline (red flag 'halt') and third-quarter earnings scheduled for 1:00 p.m. ET today, inside the trade window (flat by 15:55). Q3 is not yet reported: the latest 10-Q and company facts are for the quarter ended 2026-06-30.",
+ "description": "The clean-buy chart shifted to about 92 (trend up, pullback holding VWAP, close near the 92.77 session high), with a five-minute gap in the bars (10:05-10:09 ET) where trading was halted. News: a volatility halt headline (red flag 'halt') and third-quarter earnings scheduled for 1:00 p.m. ET today, inside the trade window (flat by 15:55). Q3 is not yet reported: the latest 10-Q and company facts are for the quarter ended 2026-06-30. The FMP earnings calendar lists VNTR's Q3 report today (no report time, confirmed); the last 8-K item 2.02 (Q2 results) is from 2026-07-23.",
  "files": {
   "bars": "bars.json",
   "snapshot": "snapshot.json",
   "news": "news.json",
   "submissions": "submissions.json",
-  "companyfacts": "companyfacts.json"
+  "companyfacts": "companyfacts.json",
+  "earnings_calendar": "earnings_calendar.json"
  },
  "expected": {
   "action": "PASS",

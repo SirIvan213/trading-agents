@@ -35,6 +35,7 @@ from agents.orchestrator import AGENTS, load_checked_limits, run_analysts
 from agents.schemas import DebateRecord, DecisionPacket
 from agents.trader import TraderRun, forced_pass, run_trader
 from journal.log import Journal
+from pipeline.events import events_from
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
 from pipeline.order_flow import (
@@ -156,14 +157,16 @@ def run_decision(
 
     plan_id: str = decision.plan_id  # the ONLY value that crosses to the order path
     quotes = quotes_from(data)  # live quote, read again in the approval re-check (#68)
-    result.proposal = propose(ledger, plan_id, journal=journal, clock=clock, quotes=quotes)
+    events = events_from(data)  # earnings and halt gate, read again at the re-check (#112)
+    result.proposal = propose(ledger, plan_id, journal=journal, clock=clock, quotes=quotes,
+                              events=events)
     budget["age_at_proposal_s"] = _elapsed_s(
         started, datetime.fromisoformat(result.proposal.checked_at))
     if ask is None:
         return result
     t0 = time.monotonic()
     result.outcome = approve(result.proposal, ledger, journal=journal, ask=ask, clock=clock,
-                             quotes=quotes)
+                             quotes=quotes, events=events)
     timings["approval"] = int((time.monotonic() - t0) * 1000)
     budget["plan_age_at_approval_s"] = result.outcome.plan_age_s
     return result
