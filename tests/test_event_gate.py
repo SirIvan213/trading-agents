@@ -78,7 +78,7 @@ def test_clear_needs_fmp_proof_sec_coverage_and_no_halt_and_passes_check_order()
 
 
 def test_constants_are_the_documented_ones():
-    assert (COVERAGE_DAYS, ESTIMATE_TRADING_DAYS, CALENDAR_HORIZON_DAYS) == (100, 3, 14)
+    assert (COVERAGE_DAYS, ESTIMATE_TRADING_DAYS, CALENDAR_HORIZON_DAYS) == (100, 3, 7)
     assert MAX_CALENDAR_AGE == timedelta(hours=20)
 
 
@@ -368,9 +368,13 @@ def test_a_halt_headline_from_yesterday_is_not_a_halt_today():
     assert_clear(*run(news=news_ok([item])))
 
 
-def test_halt_headline_about_another_symbol_is_ignored():
+def test_blocked_an_item_in_this_symbols_fetch_that_does_not_list_it_is_unknown():
+    """#112 re-review: the news fetch is for TSLA alone, so an item listing only AAPL is a
+    symbol-form mismatch we cannot read, not proof of "no halt"."""
     item = news_item("AAPL", "Trading halted in AAPL pending news", NOW - timedelta(hours=1))
-    assert_clear(*run(news=news_ok([item])))
+    gate, v = run(news=news_ok([item]))
+    assert gate["status"] == "UNKNOWN" and v["verdict"] == "BLOCK"
+    assert "1 news item(s) unreadable: cannot rule out a halt today" in gate["reason"]
 
 
 def test_a_look_alike_word_is_not_a_halt():

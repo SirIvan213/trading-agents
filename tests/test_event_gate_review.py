@@ -80,6 +80,27 @@ def test_blocked_rows_that_stop_before_the_needed_day_are_unknown():
     assert "rows stop at 2026-11-10, before 2026-11-12" in gate["reason"]
 
 
+def test_blocked_rows_that_start_after_today_are_unknown():
+    """A reply cut at its start (newest-first truncation, a later range served) could have
+    dropped today's row for the symbol."""
+    rows = [*background_rows(TODAY + timedelta(days=2), END),
+            fmp_row("TSLA", TODAY.isoformat(), "amc")]  # today's TSLA row, dropped below
+    rows = [r for r in rows if r["date"] != TODAY.isoformat()]
+    gate = gate_for("TSLA", NOW, calendar=calendar_ok(NOW, rows, background=False))
+    assert gate["status"] == "UNKNOWN"
+    assert "rows start at 2026-11-11, after today 2026-11-09" in gate["reason"]
+
+
+@pytest.mark.parametrize("tickers", [None, "GOOG", 5, {"a": 1}, [None, 5, {}, "", "  "]],
+                         ids=["none", "string", "int", "dict", "junk-list"])
+def test_a_malformed_tickers_list_never_raises_or_clears_a_listed_event(tickers):
+    subs = submissions_202(NOW, 30, symbol="GOOG")
+    subs["tickers"] = tickers
+    cal = calendar_ok(NOW, [fmp_row("GOOG", TODAY.isoformat(), "amc")])
+    gate = gate_for("GOOG", NOW, calendar=cal, filings={"ok": True, "submissions": subs})
+    assert gate["status"] == "EVENT"
+
+
 def test_rows_reaching_the_needed_day_prove_clear():
     rows = background_rows(TODAY, date(2026, 11, 12))
     assert gate_for("TSLA", NOW, calendar=calendar_ok(NOW, rows, background=False))[
@@ -126,10 +147,24 @@ def test_blocked_pause_and_suspension_wording_is_a_halt(headline):
     assert h["status"] == "EVENT", headline
 
 
-def test_a_halt_for_another_symbol_is_not_this_ones():
-    h = halt_status("TSLA", NOW, news_ok([news_item("RIVN", "Trading halted in RIVN",
-                                                    NOW - timedelta(hours=1))]))
-    assert h["status"] == "CLEAR"
+@pytest.mark.parametrize("symbols", [[], [None], ["RIVN"], ["TSLAX"]],
+                         ids=["empty", "none", "other", "other-spelling"])
+def test_blocked_an_item_that_does_not_list_this_symbol_is_unknown(symbols):
+    item = news_item("TSLA", "Trading halted", NOW - timedelta(hours=1))
+    item["symbols"] = symbols
+    assert halt_status("TSLA", NOW, news_ok([item]))["status"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("listed", ["BRKB", "BRK B", "brk-b", "BRK/B"])
+def test_blocked_a_halt_listed_under_another_spelling_of_the_symbol_is_found(listed):
+    item = news_item("BRK.B", "Trading halted in Berkshire B", NOW - timedelta(hours=1))
+    item["symbols"] = [listed]
+    assert halt_status("BRK.B", NOW, news_ok([item]))["status"] == "EVENT"
+
+
+def test_production_pause_is_not_a_trading_halt():
+    item = news_item("TSLA", "Tesla paused Cybertruck production", NOW - timedelta(hours=1))
+    assert halt_status("TSLA", NOW, news_ok([item]))["status"] == "CLEAR"
 
 
 # ============================ S2: item 2.02 today, whatever its time ============================
@@ -230,6 +265,17 @@ def test_blocked_a_clear_gate_carrying_an_event_finding():
                                     "reason": "trading halt today"}]}
     v = check_order(order(), LIMITS, DayState(), NOW, forged)
     assert v["verdict"] == "BLOCK"
+    assert "event gate result is inconsistent (CLEAR with open findings)" in v["reasons"]
+
+
+@pytest.mark.parametrize("change", [
+    {"findings": None}, {"earnings": {"status": "UNKNOWN"}}, {"halt": None}],
+    ids=["no-findings", "earnings-unknown", "no-halt-part"])
+def test_blocked_a_clear_gate_with_missing_or_open_parts(change):
+    gate = {**clear_gate("TSLA", NOW), **change}
+    if change == {"findings": None}:
+        gate.pop("findings")
+    v = check_order(order(), LIMITS, DayState(), NOW, gate)
     assert "event gate result is inconsistent (CLEAR with open findings)" in v["reasons"]
 
 

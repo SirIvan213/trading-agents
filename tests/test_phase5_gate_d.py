@@ -751,7 +751,7 @@ def test_clean_buy_with_the_same_fakes_gets_a_sized_ticket_and_a_clear_gate(monk
     assert p.ok, p.reason
     assert p.gate["status"] == "CLEAR" and p.verdict == {"verdict": "PASS", "reasons": []}
     assert p.order["symbol"] == "BRKO" and p.order["qty"] == SHARES["clean-buy"]
-    assert ("Event gate: CLEAR (no earnings through 2026-11-17 (FMP); "
+    assert ("Event gate: CLEAR (no earnings through 2026-11-10 (FMP); "
             "last 8-K item 2.02 filed 2026-10-29") in result.ticket
     assert result.outcome.status == APPROVED and len(asked) == 1
     (entry,) = raw_lines(journal)

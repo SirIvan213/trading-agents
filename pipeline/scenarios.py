@@ -118,12 +118,15 @@ class ScenarioData:
         return self._facts if symbol.upper() == self.symbol else None
 
     def earnings_calendar(self, start: date, end: date) -> dict:
-        """The saved FMP reply, as LiveData returns it: fetched at 08:30 ET on the scenario day.
-        The fixture reply covers [scenario day, scenario day + 14 days]."""
+        """The saved FMP reply, as LiveData returns it: fetched at 08:30 ET on the scenario day,
+        holding the fixture rows dated inside [start, end] (as FMP would)."""
         day = self.as_of().date()
         fetched = datetime.combine(day, CALENDAR_FETCH_TIME, tzinfo=NY)
-        return {"fetched_at": fetched.isoformat(), "from": start.isoformat(),
-                "to": end.isoformat(), "reply": self._calendar}
+        # Like FMP, only rows inside the requested range (the fixture may hold more)
+        lo, hi = start.isoformat(), end.isoformat()
+        rows = [r for r in self._calendar
+                if isinstance(r, dict) and lo <= str(r.get("date", "")) <= hi]
+        return {"fetched_at": fetched.isoformat(), "from": lo, "to": hi, "reply": rows}
 
     def as_of(self) -> datetime:
         """One minute after the last fixture bar, in New York time."""

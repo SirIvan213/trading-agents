@@ -49,7 +49,8 @@ CLEAR, EVENT, UNKNOWN = "CLEAR", "EVENT", "UNKNOWN"
 COVERAGE_DAYS = 100           # an item 2.02 in this many days proves quarterly reporting
 ESTIMATE_TRADING_DAYS = 3     # an estimated date this close blocks
 MAX_CALENDAR_AGE = timedelta(hours=20)  # fetched once per day, before the open
-CALENDAR_HORIZON_DAYS = 14    # callers fetch [today, today + 14 days]
+CALENDAR_HORIZON_DAYS = 7     # callers fetch [today, today + 7 days]: covers the 3rd
+                              # trading day after a long weekend, stays far under FMP's row cap
 FUTURE_SKEW = timedelta(minutes=5)
 NEWS_LOOKBACK_HOURS = 24
 
@@ -66,16 +67,28 @@ def _aware(dt: object) -> bool:
 
 def _trading_days_after(day: date, n: int) -> date:
     """The n-th trading day after `day` (NYSE calendar; weekdays where it has no coverage)."""
-    d, found = day, 0
+    d, found, guessed = day, 0, False
     while found < n:
         d += timedelta(days=1)
         try:
             open_ = session_hours(d) is not None
         except CalendarError:
-            open_ = d.weekday() < 5
+            open_, guessed = d.weekday() < 5, True
         if open_:
             found += 1
+    if guessed:
+        # A weekday the calendar does not cover may be a holiday (e.g. Jan 1): one more
+        # weekday of slack keeps the horizon from coming out short (the unsafe direction).
+        d += timedelta(days=1)
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
     return d
+
+
+def _compact(text: object) -> str:
+    """A ticker with every separator removed ("BRK.B", "BRK B", "BRKB" -> "BRKB"): used where
+    matching more items only ever over-blocks (the halt scan)."""
+    return "".join(ch for ch in norm_ticker(text) if ch.isalnum())
 
 
 def norm_ticker(text: object) -> str:
@@ -145,10 +158,15 @@ def _fmp_findings(symbol: str, now: datetime, window_end: datetime, calendar: ob
     # shorter range served) has no rows near its end. A whole-market calendar always lists
     # someone reporting on or after the last day we rely on (#112 review).
     try:
-        latest = max(date.fromisoformat(str(r.get("date"))) for r in rows
-                     if isinstance(r, dict))
+        dates = [date.fromisoformat(str(r.get("date"))) for r in rows if isinstance(r, dict)]
+        earliest, latest = min(dates), max(dates)
     except ValueError:
         return unknown("earnings calendar has no dated rows")
+    if earliest > today:
+        # a reply cut at its START (newest-first truncation, a later range served) could drop
+        # today's row; a whole-market calendar lists someone reporting on a trading day
+        return unknown(f"earnings calendar rows start at {earliest}, after today {today}: "
+                       "the reply may be cut short")
     if latest < need_to:
         return unknown(f"earnings calendar rows stop at {latest}, before {need_to}: "
                        "the reply may be cut short")
@@ -295,9 +313,10 @@ def halt_status(symbol: str, now: datetime, news: object) -> dict:
     earliest copy, so a halt that also ran yesterday would hide today's): an item for this
     symbol flagged "halt" (halt, paused, LULD, trading suspended ...) dated today in New York
     is EVENT. A failed or malformed fetch, or ANY item that cannot be read (not an object, no
-    symbols list, no headline, no valid time), is UNKNOWN: the fetch was for this symbol, so an
-    unreadable item might be today's halt. Clean news with no halt today is CLEAR."""
-    sym = norm_ticker(symbol)
+    symbols list, a symbols list without this symbol in any spelling, no headline, no valid
+    time), is UNKNOWN: the fetch was for this symbol, so such an item might be today's halt.
+    Clean news with no halt today is CLEAR."""
+    sym = _compact(symbol)
     if not sym or not _aware(now):
         return {"status": UNKNOWN, "findings": [_finding(
             "halt", "gate", UNKNOWN, "event gate called without a symbol or now")]}
@@ -315,7 +334,10 @@ def halt_status(symbol: str, now: datetime, news: object) -> dict:
         if not isinstance(item, dict) or not isinstance(item.get("symbols"), list):
             unreadable += 1
             continue
-        if sym not in {norm_ticker(x) for x in item["symbols"]}:
+        if sym not in {_compact(x) for x in item["symbols"]}:
+            # The fetch was for this one symbol: an item that does not list it (empty list,
+            # another spelling) is a mismatch we cannot read, not proof of "no halt".
+            unreadable += 1
             continue
         headline, when = item.get("headline"), _parse_time(item.get("created_at"))
         if not isinstance(headline, str) or not headline.strip() or when is None:

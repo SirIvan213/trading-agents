@@ -8,7 +8,7 @@ UNKNOWN instead of anything raising or reading as empty:
   data.submissions(symbol)                                                    (SEC coverage)
   data.news([symbol], start, end)                                             (halts, signal)
 
-`FmpCalendarCache` fetches the FMP calendar once per New York day for [today, today + 14
+`FmpCalendarCache` fetches the FMP calendar once per New York day for [today, today + 7
 days] and keeps it on disk (journal/cache/, git-ignored). A failed fetch is not cached, so the
 next proposal tries again (no latching for the day).
 """
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -80,7 +81,7 @@ class FmpCalendarCache:
         if parse_fmp_calendar(reply, now, start, end).get("ok") is True:
             try:
                 self.cache_dir.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_name(path.name + ".tmp")
+                tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
                 tmp.write_text(json.dumps(record), encoding="utf-8")
                 os.replace(tmp, path)  # atomic: a reader never sees half a file
             except OSError:

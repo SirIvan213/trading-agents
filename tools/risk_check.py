@@ -70,10 +70,13 @@ def _gate_problem(gate: object, symbol: str, limits: Limits, now: datetime) -> s
         return "event gate result is stale"
     if status != "CLEAR":
         return f"event gate {status}: {gate.get('reason') or 'no reason given'}"
-    findings = gate.get("findings", [])
-    if not isinstance(findings, list) or any(
-            not isinstance(f, dict) or f.get("status") != "CLEAR" for f in findings):
-        # defence in depth: a CLEAR that still carries EVENT / UNKNOWN findings is not clear
+    findings = gate.get("findings")
+    parts = (gate.get("earnings"), gate.get("halt"))
+    if (not isinstance(findings, list)
+            or any(not isinstance(f, dict) or f.get("status") != "CLEAR" for f in findings)
+            or any(not isinstance(p, dict) or p.get("status") != "CLEAR" for p in parts)):
+        # defence in depth: a CLEAR must carry its findings list (empty) and CLEAR earnings
+        # and halt parts; anything else is not clear
         return "event gate result is inconsistent (CLEAR with open findings)"
     return None
 
