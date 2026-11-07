@@ -520,7 +520,7 @@ def test_config_accepts_whole_numbers(good):
     assert limits_from_dict(d).max_or_missing_minutes == int(good)
 
 
-def test_gappy_opening_fixture_refuses_orb_but_allows_level_through_plan_exit():
+def test_gappy_opening_fixture_refuses_orb_and_or_levels_but_allows_vwap_level():
     now = at(2026, 11, 3, 10, 30)
     gappy = session("2026-11-03", now, drop=("14:35", "14:36", "14:37", "14:38"))
     assert gappy.summary["opening_range"]["missing_minutes"] == 4
@@ -529,8 +529,16 @@ def test_gappy_opening_fixture_refuses_orb_but_allows_level_through_plan_exit():
     assert err is False
     assert res["ok"] is False and "missing 4 minutes of bars (max 3)" in res["reason"]
     assert gappy.exit_plans == []
-    lvl, _ = level_plan(gappy)
-    assert lvl["ok"] is True, lvl
+    # code review: a level plan on or_low / or_high must not bypass the gap gate
+    for name in ("or_low", "or_high"):
+        lvl, err = gappy.execute("plan_exit", {
+            "setup": "level", "entry": entry, "level": gappy.summary["price_levels"][name]})
+        assert err is False
+        assert lvl["ok"] is False and "missing 4 minutes of bars (max 3)" in lvl["reason"], lvl
+    assert gappy.exit_plans == []
+    vwap, _ = gappy.execute("plan_exit", {
+        "setup": "level", "entry": entry, "level": gappy.summary["price_levels"]["vwap"]})
+    assert "opening range is missing" not in vwap.get("reason", "")
 
 
 def test_three_missing_fixture_passes_the_gap_gate():
@@ -538,4 +546,30 @@ def test_three_missing_fixture_passes_the_gap_gate():
     assert s.summary["opening_range"]["missing_minutes"] == 3
     entry = s.summary["price_levels"]["last_close"]
     res, _ = s.execute("plan_exit", {"setup": "orb", "entry": entry})
-    assert "opening range is missing" not in res.get("reason", "")
+    assert res["ok"] is True, res
+    lvl, _ = level_plan(s)  # or_low level from a 3-missing range is allowed too
+    assert lvl["ok"] is True, lvl
+
+
+# ============================ code-review additions (#12) ============================
+
+NOW_UTC = datetime(2026, 11, 3, 14, 40, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("t, expected", [
+    ("2026-11-03T14:39:59.876543219Z", None),     # Alpaca nanoseconds, 0.12 s old
+    ("2026-11-03T14:38:00Z", None),                 # exactly 120 s: fresh
+    ("2026-11-03T14:37:59.500000000Z", "stale trade (121s old, max 120s)"),  # 120.5 s: stale
+], ids=["nanoseconds", "120s", "120.5s"])
+def test_staleness_parses_nanoseconds_and_compares_exactly(t, expected):
+    from tools.scan import _staleness
+    assert _staleness("trade", t, NOW_UTC, 120) == expected
+
+
+def test_weekend_bars_are_dropped_even_in_an_uncovered_year():
+    from tools.bars import Bar, regular_session
+    sat = datetime(2028, 3, 4, 10, 0, tzinfo=NY)  # a Saturday, year not in the calendar
+    mon = datetime(2028, 3, 6, 10, 0, tzinfo=NY)
+    bars = [Bar(ts=t, open=D("1"), high=D("1"), low=D("1"), close=D("1"), volume=1)
+            for t in (sat, mon)]
+    assert [b.ts for b in regular_session(bars)] == [mon]

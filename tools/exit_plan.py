@@ -22,6 +22,21 @@ def _refuse(reason: str) -> dict:
     return {"ok": False, "reason": reason}
 
 
+def opening_range_gap_error(opening_range: object, limits: Limits) -> str | None:
+    """Why an opening range is too gappy to plan from (issue #14), or None.
+
+    Its "missing_minutes" must be a non-negative int no greater than
+    limits.max_or_missing_minutes. Used by exit_plan's orb setup and by plan_exit for a level
+    setup whose stop structure is or_low or or_high, so the gate cannot be bypassed."""
+    missing = opening_range.get("missing_minutes") if isinstance(opening_range, dict) else None
+    if isinstance(missing, bool) or not isinstance(missing, int) or missing < 0:
+        return "opening range has no valid missing_minutes count"
+    if missing > limits.max_or_missing_minutes:
+        return (f"opening range is missing {missing} minutes of bars "
+                f"(max {limits.max_or_missing_minutes})")
+    return None
+
+
 def _dec(value: object, name: str) -> tuple[Decimal | None, str | None]:
     """Convert to a finite Decimal, or return (None, refusal reason naming `name`)."""
     if isinstance(value, bool):
@@ -79,14 +94,9 @@ def exit_plan(
         structure, err = _dec(opening_range["low"], "opening_range low")
         if err:
             return _refuse(err)
-        missing = opening_range.get("missing_minutes")
-        if isinstance(missing, bool) or not isinstance(missing, int) or missing < 0:
-            return _refuse("opening range has no valid missing_minutes count")
-        if missing > limits.max_or_missing_minutes:
-            return _refuse(
-                f"opening range is missing {missing} minutes of bars "
-                f"(max {limits.max_or_missing_minutes})"
-            )
+        gap = opening_range_gap_error(opening_range, limits)
+        if gap:
+            return _refuse(gap)
     else:
         if level is None:
             return _refuse("level setup needs a level")

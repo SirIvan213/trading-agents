@@ -5,12 +5,13 @@ network code is `fetch_snapshots`, which accepts an injectable opener.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass, fields
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -254,9 +255,9 @@ def _staleness(kind: str, t: object, now: datetime, max_age_s: int) -> str | Non
     dt = _ts(t)
     if dt is None:
         return f"stale {kind} (missing or invalid timestamp)"
-    age = int((now - dt).total_seconds())
-    if age > max_age_s:
-        return f"stale {kind} ({age}s old, max {max_age_s}s)"
+    age = now - dt
+    if age > timedelta(seconds=max_age_s):  # exact: 120.5 s is stale
+        return f"stale {kind} ({math.ceil(age.total_seconds())}s old, max {max_age_s}s)"
     return None
 
 

@@ -18,7 +18,7 @@ from pipeline.ledger import PlanLedger
 from pipeline.market import NY, ny_today, run_scan
 from tools.bars import parse_bars, regular_session, summarize
 from tools.config import REWARD_MULTIPLES, Limits
-from tools.exit_plan import exit_plan
+from tools.exit_plan import exit_plan, opening_range_gap_error
 from tools.plan_labels import plan_labels
 from tools.scan import ScanCriteria, validate_symbols
 
@@ -320,6 +320,13 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
         if structure_level is None:
             return _err(f"level must be one of get_bars price_levels: {names}")
         level = Decimal(levels[structure_level])
+        or_prices = {Decimal(levels[n]) for n in ("or_low", "or_high") if n in levels}
+        if level in or_prices:
+            # #14: an opening-range price from a gappy range is refused, as the orb setup is.
+            # Matched by price, not name: or_low often equals session_low.
+            gap = opening_range_gap_error(s.summary.get("opening_range"), s.limits)
+            if gap:
+                return {"ok": False, "reason": gap}, False
 
         def run(multiple: Decimal | None) -> dict:
             return exit_plan(

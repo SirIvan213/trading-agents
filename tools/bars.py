@@ -107,7 +107,9 @@ def parse_bars(raw: dict) -> list[Bar]:
 def _session_close(day: date) -> time | None:
     """The NYSE close for `day` (13:00 on an early close), None for a holiday or weekend.
     A year the calendar does not cover uses the standard 16:00 close here: this only shapes
-    data; risk_check BLOCKs every order on an uncovered date."""
+    data; risk_check BLOCKs every order on an uncovered date. Weekends never have a session."""
+    if day.weekday() >= 5:
+        return None
     try:
         hours = session_hours(day)
     except CalendarError:

@@ -106,7 +106,8 @@ def day_times(day: date, limits: Limits) -> tuple[time, time, time]:
         # is already before the early flat-by (e.g. entry_end 10:30, flat_by 15:55): keep it.
         early_end = end
     else:
-        # No room to keep the gap: the window shrinks to entry_start (fails safe).
+        # No room to keep the gap: the window shrinks to entry_start (fails safe; risk_check's
+        # inclusive bounds still allow an entry at exactly entry_start).
         early_end = start
     return start, early_end, early_flat
 
