@@ -54,6 +54,15 @@ def _ts(value: object) -> datetime | None:
 
 
 def slippage_from_quote(entry: Decimal, quote: object, limits: Limits, now: datetime) -> dict:
+    """See _slippage_from_quote. Never raises: arithmetic on absurd quote values (e.g. a
+    1e26 spread) is a refusal, so the order path fails closed."""
+    try:
+        return _slippage_from_quote(entry, quote, limits, now)
+    except ArithmeticError:
+        return {"ok": False, "reason": "live quote values are out of range"}
+
+
+def _slippage_from_quote(entry: Decimal, quote: object, limits: Limits, now: datetime) -> dict:
     """Return {"ok": True, "allowance", "bid", "ask", "spread", "quote_t", "age_s"} (prices as
     strings) or {"ok": False, "reason"}.
 

@@ -943,9 +943,11 @@ def test_build_order_passes_size_position_exactly_plan_and_limits(monkeypatch):
 
     def strict(*args, **kwargs):
         seen.append((args, kwargs))
-        # exactly (Plan, Limits) plus the tool-computed slippage allowance (#68), nothing else
-        if set(kwargs) != {"slippage"} or len(args) != 2 or not isinstance(args[0], Plan) \
-                or not isinstance(args[1], Limits) or not isinstance(kwargs["slippage"], D):
+        # exactly (Plan, Limits) plus the tool-computed slippage allowance (#68) for QUOTE,
+        # nothing else
+        if (set(kwargs) != {"slippage"} or len(args) != 2 or not isinstance(args[0], Plan)
+                or not isinstance(args[1], Limits) or not isinstance(kwargs["slippage"], D)
+                or kwargs["slippage"] != SLIPPAGE):
             raise AssertionError(f"size_position got extra input: {args!r} {kwargs!r}")
         assert tuple(dataclasses.asdict(args[0])) == ("symbol", "entry", "stop", "target")
         return real(*args, **kwargs)
@@ -1241,6 +1243,14 @@ def test_decide_passes_only_plan_id_to_propose_and_approve():
     assert _names_in(ap) <= {"approve", "result", "proposal", "ledger", "journal", "ask", "clock",
                              "quotes"}
 
+    # quotes is assigned exactly once, as quotes_from(data): live market data, nothing else
+    q_assigns = [n for n in ast.walk(ast.parse(src))
+                 if isinstance(n, ast.Assign) and "quotes" in _names_in(n.targets[0])]
+    assert len(q_assigns) == 1
+    q_value = q_assigns[0].value
+    assert isinstance(q_value, ast.Call) and getattr(q_value.func, "id", None) == "quotes_from"
+    assert [getattr(a, "id", None) for a in q_value.args] == ["data"] and not q_value.keywords
+
     # plan_id is assigned exactly once, from the decision's plan_id and nothing else
     assigns = [n for n in ast.walk(ast.parse(src))
                if isinstance(n, ast.AnnAssign | ast.Assign)
@@ -1274,7 +1284,7 @@ def test_decide_scanner_would_catch_a_leaked_argument():
 # Modules that feed plans, sizing, the risk gate or DayState never reference model output.
 @pytest.mark.parametrize("rel", [
     "pipeline/orders.py", "tools/size.py", "tools/risk_check.py", "pipeline/ledger.py",
-    "journal/log.py", "pipeline/order_flow.py",
+    "journal/log.py", "pipeline/order_flow.py", "tools/slippage.py", "tools/exit_plan.py",
 ])
 def test_money_feeding_modules_reference_no_model_output_types(rel):
     src = (ROOT / rel).read_text(encoding="utf-8")

@@ -7,7 +7,7 @@ smaller-than-one-share order.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from tools.config import Limits
 
@@ -69,7 +69,8 @@ def size_position(plan: Plan, limits: Limits, slippage: Decimal = Decimal("0")) 
             "risk_per_share": str(risk_per_share),
         }
 
-    max_loss = (worst_risk * shares).quantize(Decimal("0.01"))
+    # a worst case rounds up, never down (exact today: whole-cent prices and allowances)
+    max_loss = (worst_risk * shares).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
     return {
         "ok": True,
         "shares": shares,

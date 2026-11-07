@@ -960,3 +960,48 @@ def test_valid_boundary_values_pass_validation():
     validate_limits(replace(LIMITS, slippage_pct=D("99.99")))
     validate_limits(replace(LIMITS, max_order_quote_age_s=1))
     assert math.isfinite(float(LIMITS.slippage_pct))
+
+
+# ============================ code-review additions ============================
+
+def test_absurd_quote_is_a_refusal_not_an_exception():
+    """A 1e26 spread overflows the cent quantize: refused, never raised (fail closed)."""
+    q = {"ap": 1e26, "bp": 1, "t": T0.isoformat()}
+    res = slippage_from_quote(D("100.00"), q, LIMITS, T0)
+    assert res == {"ok": False, "reason": "live quote values are out of range"}
+
+
+def test_absurd_quote_through_propose_and_approve_never_raises(tmp_path):
+    journal = Journal(tmp_path / "j.jsonl")
+    bad = lambda sym: {"ap": 1e26, "bp": 1, "t": T0.isoformat()}  # noqa: E731
+    p = propose(sealed_ledger(), "plan-1", journal=journal, clock=lambda: T0, quotes=bad)
+    assert p.ok is False and p.stage == "size" and "out of range" in p.reason
+    good = propose(sealed_ledger(), "plan-1", journal=journal, clock=lambda: T0,
+                   quotes=quotes_at(T0))
+    assert good.ok, good.reason
+    led = sealed_ledger()
+    good = propose(led, "plan-1", journal=journal, clock=lambda: T0, quotes=quotes_at(T0))
+    out = approve(good, led, journal=journal, ask=lambda _: "yes", clock=lambda: T0,
+                  quotes=bad)
+    assert out.status == "refused_after_approval" and "out of range" in out.reason
+    assert APPROVED not in [e["status"] for e in journal.entries()]
+
+
+def test_risk_check_huge_entry_blocks_instead_of_raising():
+    """minimum_allowance on an absurd entry overflows: BLOCK, not an exception."""
+    order = {"symbol": "TSLA", "side": "buy", "qty": 1, "type": "market",
+             "order_class": "bracket", "entry": "1e30", "stop_loss": "1",
+             "take_profit": "2e30", "slippage": "0.01"}
+    res = check_order(order, LIMITS, DayState(), MON_1015)
+    assert res["verdict"] == "BLOCK" and "order arithmetic failed" in res["reasons"]
+
+
+@pytest.mark.parametrize("t", [
+    "2026-10-19T14:15:29.123456789Z",       # Alpaca's nanosecond form, 0.9 s old
+    "2026-10-19T14:15:29.999999999+00:00",
+])
+def test_alpaca_nanosecond_quote_timestamps_parse(t):
+    now = datetime(2026, 10, 19, 14, 15, 30, tzinfo=UTC)
+    res = slippage_from_quote(D("364.18"), {"ap": 364.18, "bp": 364.16, "t": t}, LIMITS, now)
+    assert res["ok"] is True, res
+    assert res["ask"] == "364.18" and res["bid"] == "364.16"  # whole cents, two decimals

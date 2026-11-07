@@ -226,8 +226,8 @@ def _atr_context(result: dict, levels: dict[str, str], atr_5m: Decimal | None) -
       risk_atr_5m                   risk_per_share / atr_5m
       entry_vs_vwap_atr_5m          (entry - vwap) / atr_5m
       session_high_vs_entry_atr_5m  (session_high - entry) / atr_5m
-    The 1-minute ATR is too small for this: a normal stop reads as 6+ ATR. It still sets
-    the stop buffer and limits.min_risk_atr_multiple inside exit_plan, unchanged.
+    The 1-minute ATR is too small for this: a normal stop reads as 6+ ATR. It still sets the
+    stop buffer; limits.min_risk_atr_multiple applies to the larger of the two ATRs (#115).
     atr_5m may be provisional early in the session (summary atr_5m_provisional, issue #117).
     Each field is None when atr_5m is missing or zero, or the level it needs is missing.
     Rounding down can understate a ratio by at most 0.01 ATR."""

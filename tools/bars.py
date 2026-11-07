@@ -247,12 +247,15 @@ PROVISIONAL_MIN_BARS = 3
 def atr_5m_seeded(
     bars: list[Bar], n: int = 14, min_bars: int = PROVISIONAL_MIN_BARS
 ) -> tuple[Decimal | None, bool]:
-    """(5-minute ATR, provisional) for plan CONTEXT and labels only (issue #117).
+    """(5-minute ATR, provisional) for plan context, labels and the minimum stop distance
+    (issues #117, #115).
 
     With n or more finished 5-minute bars this is atr_5m (Wilder), provisional False. With
     min_bars to n-1 it is the simple mean of their true ranges (first bar TR = high-low),
     provisional True. Fewer than min_bars: (None, False). Opening bars are usually wide, so a
-    provisional value tends to overstate the ATR. Never used for the stop buffer or a limit.
+    provisional value tends to overstate the ATR, which makes the #115 minimum stop distance
+    (min_risk_atr_multiple x the larger of the 1- and 5-minute ATR) stricter, never looser.
+    Never used for the stop buffer, which stays on the 1-minute ATR.
     """
     if min_bars < 1 or min_bars > n:
         raise ValueError("min_bars must be between 1 and n")
@@ -292,8 +295,8 @@ def summarize(bars: list[Bar], or_minutes: int = 15, atr_n: int = 14) -> dict:
         "session_low": str(min(b.low for b in bars)),
         "volume": sum(b.volume for b in bars),
         "vwap": None if v is None else str(v),
-        "atr": None if a is None else str(a),  # 1-minute ATR (stop buffer, risk limits)
-        # 5-minute ATR (context and plan labels only); provisional before n 5-minute bars
+        "atr": None if a is None else str(a),  # 1-minute ATR (stop buffer, minimum stop)
+        # 5-minute ATR (context, labels and the #115 minimum stop); provisional before n bars
         "atr_5m": None if a5 is None else str(a5),
         "atr_5m_provisional": provisional,
         "opening_range": opening_range(bars, or_minutes),

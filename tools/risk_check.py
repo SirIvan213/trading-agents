@@ -149,11 +149,10 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
     except (TypeError, ValueError, ArithmeticError):
         reasons.append("order needs a finite, non-negative slippage allowance")
         return {"verdict": "BLOCK", "reasons": reasons}
-    floor = minimum_allowance(entry, limits)
-    if slippage < floor:
-        reasons.append(f"slippage allowance {slippage} below minimum {floor}")
-
     try:
+        floor = minimum_allowance(entry, limits)
+        if slippage < floor:
+            reasons.append(f"slippage allowance {slippage} below minimum {floor}")
         _numeric_rules(entry, stop, target, qty, limits, state, reasons, slippage)
     except ArithmeticError:
         reasons.append("order arithmetic failed")
