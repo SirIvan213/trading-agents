@@ -8,7 +8,8 @@
   "news": "../../alpaca_news_tsla.json",
   "submissions": "../../sec_submissions_tsla.json",
   "companyfacts": "../../sec_companyfacts_tsla.json",
-  "earnings_calendar": "../../fmp_earnings_calendar_tsla.json"
+  "earnings_calendar": "../../fmp_earnings_calendar_tsla.json",
+  "halts": "../../nasdaq_halts_tsla.xml"
  },
  "expected": {
   "action": null,
