@@ -1,0 +1,17 @@
+{
+ "name": "tsla",
+ "symbol": "TSLA",
+ "description": "The original TSLA fixtures (gap-up morning with positive news). Baseline scenario with no expected decision.",
+ "files": {
+  "bars": "../../alpaca_bars_tsla.json",
+  "snapshot": "../../alpaca_snapshot_tsla.json",
+  "news": "../../alpaca_news_tsla.json",
+  "submissions": "../../sec_submissions_tsla.json",
+  "companyfacts": "../../sec_companyfacts_tsla.json"
+ },
+ "expected": {
+  "action": null,
+  "fatal_bear": null,
+  "why": "Baseline: no expected outcome."
+ }
+}

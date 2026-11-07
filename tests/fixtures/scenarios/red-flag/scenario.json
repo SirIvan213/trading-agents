@@ -1,0 +1,17 @@
+{
+ "name": "red-flag",
+ "symbol": "VNTR",
+ "description": "The clean-buy chart shifted to about 92 (a breakout through or_high 92.16), with a five-minute gap in the bars (10:05-10:09 ET) where trading was halted. News: a volatility halt headline (red flag 'halt') and third-quarter earnings scheduled for 1:00 p.m. ET today, inside the trade window (flat by 15:55). Q3 is not yet reported: the latest 10-Q and company facts are for the quarter ended 2026-06-30.",
+ "files": {
+  "bars": "bars.json",
+  "snapshot": "snapshot.json",
+  "news": "news.json",
+  "submissions": "submissions.json",
+  "companyfacts": "companyfacts.json"
+ },
+ "expected": {
+  "action": "PASS",
+  "fatal_bear": true,
+  "why": "A trading halt today and an earnings release inside the trade; ideally the Bear marks it fatal."
+ }
+}

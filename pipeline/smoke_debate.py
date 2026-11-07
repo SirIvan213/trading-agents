@@ -1,15 +1,16 @@
-"""Smoke run: the three analysts, the Bull/Bear debate and the Trader, once, on saved TSLA
-fixture data, against the REAL Claude API. For a BUY it prints the order ticket, sized from
-the plan ledger at the fixture's clock; there is NO approval step and nothing is journaled
-or sent.
+"""Smoke run: the three analysts, the Bull/Bear debate and the Trader, once, on a saved
+scenario, against the REAL Claude API. For a BUY it prints the order ticket, sized from the
+plan ledger at the fixture's clock; there is NO approval step and nothing is journaled or sent.
+At the end it prints the scenario's expected decision next to the actual one.
 
-Not part of the test suite (it lives outside tests/ and is never imported by it). It makes
-real, billed Claude API calls; it makes NO Alpaca or SEC calls. Every input is a fixture in
-tests/fixtures/ (synthetic data in the real API shapes, for a run "as of" 2026-11-03 11:00 ET):
+Not part of the test suite (it lives outside tests/). It makes real, billed Claude API calls;
+it makes NO Alpaca or SEC calls. Every input is a fixture (synthetic data in the real API
+shapes, for a run "as of" 2026-11-03 11:00 ET). --scenario NAME picks one of
+tests/fixtures/scenarios/<NAME>/scenario.json (see pipeline/scenarios.py):
 
-    alpaca_bars_tsla.json, alpaca_snapshot_tsla.json   bars and snapshot (technical)
-    alpaca_news_tsla.json, sec_submissions_tsla.json   headlines and 8-K filings (sentiment)
-    sec_companyfacts_tsla.json                         XBRL quarterly facts (fundamentals)
+    tsla       the original TSLA fixtures; baseline, no expected decision (default)
+    clean-buy  BRKO: orderly push off VWAP, tight stop, room for 2R, positive news -> BUY
+    red-flag   VNTR: similar chart, a trading halt and earnings inside the trade -> PASS
 
 Nothing is sent unless --billed is given (CLAUDE.md rule 6); without it the script prints
 what it would run and exits 3. Every retried attempt's rejection reason is printed under its
@@ -35,6 +36,8 @@ nothing was sent.
 Usage:
     python -m pipeline.smoke_debate                          # dry plan only, nothing sent
     python -m pipeline.smoke_debate --billed
+    python -m pipeline.smoke_debate --billed --scenario clean-buy
+    python -m pipeline.smoke_debate --billed --scenario red-flag
     python -m pipeline.smoke_debate --billed --model claude-sonnet-5-5
     python -m pipeline.smoke_debate --billed --effort medium --no-fallbacks
 """
@@ -42,12 +45,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 import tempfile
 import time
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,17 +62,11 @@ from agents.trader import TraderRun, run_trader
 from journal.log import Journal
 from pipeline.ledger import PlanLedger
 from pipeline.order_flow import Proposal, propose, render_ticket
+from pipeline.scenarios import DEFAULT as DEFAULT_SCENARIO
+from pipeline.scenarios import ScenarioData, compare, load_scenario, scenario_names
 from pipeline.smoke_common import ROOT, add_safety_flags, key_hint, load_env, refuse_unbilled
-from pipeline.smoke_technical import (
-    FIXTURES,
-    SYMBOL,
-    FixtureMarketData,
-    token_totals,
-)
+from pipeline.smoke_technical import token_totals
 
-NEWS_FIXTURE = FIXTURES / "alpaca_news_tsla.json"
-SUBMISSIONS_FIXTURE = FIXTURES / "sec_submissions_tsla.json"
-COMPANYFACTS_FIXTURE = FIXTURES / "sec_companyfacts_tsla.json"
 DEBATERS = ("bull", "bear")
 TRADER = "trader"
 # Forced-PASS codes that mean the Trader itself failed (a fatal Bear or no plans is a
@@ -80,25 +75,11 @@ TRADER_FAILURES = frozenset({"invalid_output", "api_error", "exception", "config
                              "cancelled", "debate_mismatch"})
 
 
-class FixtureData(FixtureMarketData):
-    """Market, news and filings data for TSLA from saved fixtures. Makes no network calls."""
+class FixtureData(ScenarioData):
+    """The TSLA scenario's data (kept for callers of the pre-scenario API)."""
 
     def __init__(self) -> None:
-        super().__init__()
-        self._news = json.loads(NEWS_FIXTURE.read_text(encoding="utf-8"))
-        self._subs = json.loads(SUBMISSIONS_FIXTURE.read_text(encoding="utf-8"))
-        self._facts = json.loads(COMPANYFACTS_FIXTURE.read_text(encoding="utf-8"))
-
-    def news(self, symbols: list[str], start: datetime, end: datetime) -> dict:
-        wanted = {s.upper() for s in symbols}
-        items = [n for n in self._news["news"] if wanted & {s.upper() for s in n["symbols"]}]
-        return {"news": items, "next_page_token": None}
-
-    def submissions(self, symbol: str) -> dict | None:
-        return self._subs if symbol.upper() == SYMBOL else None
-
-    def company_facts(self, symbol: str) -> dict | None:
-        return self._facts if symbol.upper() == SYMBOL else None
+        super().__init__(load_scenario(DEFAULT_SCENARIO))
 
 
 def _configs(model: str | None, effort: str | None, fallbacks: bool) -> dict[str, AgentConfig]:
@@ -261,9 +242,12 @@ def print_trader(trader: TraderRun, proposal: Proposal | None) -> None:
 
 def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run the three analysts and the Bull/Bear debate once on saved TSLA "
-                    "fixtures against the real Claude API (billed; no Alpaca or SEC calls)."
+        description="Run the analysts, the Bull/Bear debate and the Trader once on a saved "
+                    "scenario against the real Claude API (billed; no Alpaca or SEC calls)."
     )
+    parser.add_argument("--scenario", default=DEFAULT_SCENARIO, choices=scenario_names(),
+                        help="saved scenario under tests/fixtures/scenarios "
+                             f"(default {DEFAULT_SCENARIO})")
     parser.add_argument("--model", default=None,
                         help="Claude model ID for all six agents (default: each agent's "
                              "configured model, normally claude-sonnet-5-5)")
@@ -279,6 +263,7 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         if err is not None:
             return err
     try:
+        scenario = load_scenario(args.scenario)
         configs = _configs(args.model, args.effort, not args.no_fallbacks)
         rounds = resolve_rounds(None)
     except ValueError as exc:
@@ -286,7 +271,9 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         return 2
     if client is None and not args.billed:
         return refuse_unbilled("Analysts + debate + trader smoke run", [
-            f"symbol {SYMBOL} on saved fixtures (no Alpaca or SEC calls)",
+            f"scenario {scenario.name}: symbol {scenario.symbol} on saved fixtures "
+            "(no Alpaca or SEC calls)",
+            f"expected: {scenario.expected.action or 'none (baseline)'}",
             *(f"{a:<12} model {c.model}  effort {c.effort}  "
               f"fallbacks {'on' if c.fallbacks else 'off'}" for a, c in configs.items()),
             f"debate rounds {rounds}",
@@ -303,14 +290,15 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
             print(f"error: {exc} ({key_hint(args)})", file=sys.stderr)
             return 2
 
-    data = FixtureData()
+    data = ScenarioData(scenario)
+    symbol = scenario.symbol
     now = data.as_of()
-    ledger = PlanLedger(SYMBOL)
+    ledger = PlanLedger(symbol)
     stage_s: dict[str, float] = {}
     t0 = time.monotonic()
     try:
         packet = asyncio.run(run_analysts(
-            SYMBOL, now, data=data, clients=client,
+            symbol, now, data=data, clients=client,
             configs={a: configs[a] for a in AGENTS}, ledger=ledger,
         ))
     except ValueError as exc:  # e.g. "limits config is invalid", before any analyst starts
@@ -343,6 +331,11 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     print_trader(trader, proposal)
     print_latency(stage_s, load_checked_limits().max_plan_age_s)
     print_money_debug(rejections)
+    print(f"\n-- Expected vs actual ({scenario.name}) --")
+    verdict = compare(scenario.expected, trader.decision.action, debate.fatal)[0]
+    if trader.forced_pass in TRADER_FAILURES or not packet.all_ok or not debate.all_ok:
+        verdict += "  (run failed: the decision is a fail-closed default, not a judgment)"
+    print(verdict)
 
     calls = [c for r in packet.runs.values() for c in r.calls]
     calls += [c for t in debate.turns for c in t.run.calls]

@@ -8,6 +8,7 @@ Rules:
 - Reference a trade plan only by its `plan_id` (set `plan_id` to the plan you are challenging, or the empty string "" for none; never null).
 - You may repeat a number only if it appears in the packet: a plan record's exact `entry`, `stop`, `target`, `risk_per_share` or `reward_to_risk`; a figure copied character for character from an analyst report's `evidence` (e.g. "2.54%", "1.64", "3,225,000,000 shares"); or an analyst report's `confidence` exactly as written in the packet (e.g. "0.6"). NEVER state any other price, size, stop, target, share count, quantity or dollar amount, and never round, reformat or derive one.
 - Position size is not yours to discuss: sizing is fixed by deterministic code. Never argue for a larger, smaller, full, half or reduced position, and never suggest a share count or dollar amount to trade.
+- A plan's `reward_to_risk` is the target multiple the Technical analyst chose from a fixed menu; it is not evidence of edge.
 - No arithmetic about money. Do not compute ratios or levels.
 - Set `fatal` to true ONLY when a single objection alone should stop the trade, for example: an analyst red flag such as bankruptcy, delisting, halt or restatement; no valid plan in `exit_plans`; a failed technical analysis (technical report neutral with zero confidence). Otherwise false.
 

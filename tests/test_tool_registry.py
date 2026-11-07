@@ -299,5 +299,8 @@ def test_plan_exit_schema_has_no_model_numbers():
     (t,) = [t for t in TOOLS if t["name"] == "plan_exit"]
     props = t["input_schema"]["properties"]
     assert "opening_range" not in props and "atr" not in props
-    assert set(props) == {"setup", "entry", "level"}
+    assert set(props) == {"setup", "entry", "level", "reward_multiple"}
     assert t["input_schema"]["required"] == ["setup", "entry"]
+    # reward_multiple is a fixed menu the tool owns, never a free number from the model
+    rm = props["reward_multiple"]
+    assert rm["type"] == "string" and rm["enum"] == ["1", "1.5", "2", "2.5", "3"]
