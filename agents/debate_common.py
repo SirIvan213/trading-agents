@@ -2,16 +2,49 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from decimal import Decimal
 
 from pydantic import BaseModel, Field, field_validator
 
-from agents.money_guard import allowed_values, money_violations, quoted_values
+from agents.money_guard import (
+    ViolationDetail,
+    allowed_values,
+    money_violations,
+    quoted_values,
+    violation_details,
+)
 from agents.schemas import BearCase, BullCase, DecisionPacket
 
 # Stored reason prefix for a money-guard rejection (the count follows); smoke_debate counts on it.
 MONEY_REASON = "money value(s) not in the decision packet"
+
+# Console-only debug hook for the smoke script (issue: money-check retries on every turn).
+# When set, the validator calls it with (side, [(field, ViolationDetail), ...]) for each
+# rejected attempt. It is never set in production code, and nothing it receives is stored
+# in a record, a retry reason or the model hint.
+MoneyDebugListener = Callable[[str, list[tuple[str, ViolationDetail]]], None]
+_money_debug: ContextVar[MoneyDebugListener | None] = ContextVar("money_debug", default=None)
+
+
+@contextmanager
+def money_debug(listener: MoneyDebugListener) -> Iterator[None]:
+    """Within the block, report each money-check rejection to `listener` (console only)."""
+    token = _money_debug.set(listener)
+    try:
+        yield
+    finally:
+        _money_debug.reset(token)
+
+
+def _labelled_texts(case: BullCase | BearCase) -> list[tuple[str, str]]:
+    if isinstance(case, BullCase):
+        return [("argument", case.argument),
+                *((f"key_points[{i}]", t) for i, t in enumerate(case.key_points))]
+    return [(f"objections[{i}]", t) for i, t in enumerate(case.objections)]
+
 
 _PLAN_ID_DOC = (
     "the plan_id from packet.exit_plans this case is about; empty string means no plan"
@@ -77,9 +110,7 @@ def build_payload(
 
 def case_texts(case: BullCase | BearCase) -> list[str]:
     """Every free-text field of a case (argument, key_points, objections)."""
-    if isinstance(case, BullCase):
-        return [case.argument, *case.key_points]
-    return list(case.objections)
+    return [text for _, text in _labelled_texts(case)]
 
 
 def make_validator(
@@ -107,6 +138,16 @@ def make_validator(
         for text in case_texts(value):
             bad.extend(money_violations(text, allowed, quoted))
         if bad:
+            listener = _money_debug.get()
+            if listener is not None:
+                side = "bull" if case_type is BullCase else "bear"
+                try:
+                    listener(side, [
+                        (label, d) for label, text in _labelled_texts(value)
+                        for d in violation_details(text, allowed, quoted)
+                    ])
+                except Exception:  # noqa: BLE001, S110 - debug output must never change a run
+                    pass
             return (
                 f"case states {len(bad)} {MONEY_REASON}",
                 "case states money values that are neither a plan record value nor quoted "

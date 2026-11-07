@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Collection
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from agents.schemas import DecisionPacket
@@ -126,7 +127,13 @@ def _c_hits(text: str) -> list[tuple[str, str, str, int]]:
 
 
 def _scan(text: str) -> list[tuple[str, str, str]]:
-    """Return (kind, mention, number) per distinct number position; (b) wins over the rest.
+    """Return (kind, mention, number) per distinct number position; (b) wins over the rest."""
+    found = _scan_at(text)
+    return [found[k] for k in sorted(found)]
+
+
+def _scan_at(text: str) -> dict[int, tuple[str, str, str]]:
+    """(kind, mention, number) keyed by the number's start offset; (b) wins over the rest.
 
     Weak hits (bare 2-decimal numbers, weak-keyword hits) are subject to the item/clock
     exemptions; keyword, `$`, currency-word, (e) and per-share hits are not.
@@ -150,7 +157,7 @@ def _scan(text: str) -> list[tuple[str, str, str]]:
     for pattern in (_B, _B_REV):
         for m in pattern.finditer(text):
             found[m.start(1)] = ("b", m.group(0).strip(), m.group(1))
-    return [found[k] for k in sorted(found)]
+    return found
 
 
 def _to_decimal(raw: str) -> Decimal | None:
@@ -234,3 +241,55 @@ def money_violations(
         if kind == "b" or value is None or value not in allowed:
             bad.append(mention)
     return bad
+
+
+# --------------------------------------------------------------------------
+# Debug detail (smoke script only; never stored, never sent to the Trader)
+# --------------------------------------------------------------------------
+
+PATTERN_NAMES = {
+    "a": "(a) $ amount or currency word",
+    "b": "(b) size / share count (never allowed by a plan value)",
+    "c": "(c) strong keyword (entry/stop/target/price/limit) or $ near a number",
+    "w": "(c) weak keyword (risk/size/buy/sell/at) with decimals",
+    "d": "(d) bare 2-decimal number",
+    "e": "(e) trade word (buy/sell/long/short/size/position/qty/trade) + number",
+    "p": "per-share price",
+}
+
+
+@dataclass(frozen=True)
+class ViolationDetail:
+    """One rejected mention, for console debugging only."""
+
+    pattern: str        # human-readable pattern name (PATTERN_NAMES)
+    mention: str        # the matched substring
+    number: str         # the number token in it
+    excerpt: str        # text around the number, newlines collapsed
+    plan_value: bool    # Decimal-equal to a plan value (rejected only because it is a size)
+
+
+def violation_details(
+    text: str, allowed: set[Decimal], quoted: Collection[str] = frozenset(),
+    *, context: int = 40,
+) -> list[ViolationDetail]:
+    """The same violations as money_violations(text, allowed, quoted), with the pattern that
+    matched and an excerpt. Read-only: it does not change what the guard accepts."""
+    out: list[ViolationDetail] = []
+    found = _scan_at(text)
+    for start in sorted(found):
+        kind, mention, number = found[start]
+        if _verbatim(number) in quoted:
+            continue
+        value = _to_decimal(number)
+        if kind == "b" or value is None or value not in allowed:
+            lo, hi = max(0, start - context), min(len(text), start + len(number) + context)
+            # printable only, whitespace collapsed: odd model output cannot garble the terminal
+            raw = "".join(ch if ch.isprintable() else " " for ch in text[lo:hi])
+            excerpt = " ".join(raw.split())
+            excerpt = ("..." if lo > 0 else "") + excerpt + ("..." if hi < len(text) else "")
+            out.append(ViolationDetail(
+                pattern=PATTERN_NAMES.get(kind, kind), mention=mention, number=number,
+                excerpt=excerpt, plan_value=value is not None and value in allowed,
+            ))
+    return out
