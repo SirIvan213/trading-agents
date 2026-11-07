@@ -49,6 +49,7 @@ import sys
 import tempfile
 import time
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,7 @@ from pipeline.scenarios import DEFAULT as DEFAULT_SCENARIO
 from pipeline.scenarios import ScenarioData, compare, load_scenario, scenario_names
 from pipeline.smoke_common import ROOT, add_safety_flags, key_hint, load_env, refuse_unbilled
 from pipeline.smoke_technical import token_totals
+from tools.market_calendar import coverage_warning
 
 DEBATERS = ("bull", "bear")
 TRADER = "trader"
@@ -144,6 +146,9 @@ def print_money_debug(rejections: list[Rejection]) -> None:
 def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, AgentConfig]) -> None:
     """Print the analysts, the debate, every call's serving model and the token totals."""
     print(f"== Analysts + debate smoke run: {packet.symbol} as of {packet.as_of} ==")
+    warning = coverage_warning(datetime.fromisoformat(packet.as_of).date())
+    if warning:
+        print(f"WARNING: {warning}")
     for agent, cfg in configs.items():
         print(f"{agent:<12} requested {cfg.model}  effort {cfg.effort}  "
               f"fallbacks {'on' if cfg.fallbacks else 'off'}")

@@ -211,6 +211,9 @@ def test_plan_exit_noise_stop_pair_is_refused_without_a_record():
 
 def test_plan_exit_second_noise_pair_below_atr_is_refused():
     s = loaded()
+    # the fixture's provisional 5-minute ATR (1.2000) would bind here (see the sibling test
+    # below); drop it so this test isolates the 1-minute rule
+    s.summary = {**s.summary, "atr_5m": None, "atr_5m_provisional": False}
     # entry last_close 103.10, level 101.60 (vwap) -> stop 101.51, risk 1.59 > ATR: accepted
     res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "101.60"})
     assert res["ok"] is True and res["plan_id"] == "plan-1"
@@ -222,6 +225,23 @@ def test_plan_exit_second_noise_pair_below_atr_is_refused():
     res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "102.50"})
     assert res == {"ok": False, "reason": "risk per share 0.69 is below 1.0 x ATR 0.8151"}
     assert [p.plan_id for p in s.exit_plans] == ["plan-1", "plan-2"]
+
+
+def test_plan_exit_provisional_5_minute_atr_binds_where_the_1_minute_atr_does_not():
+    s = loaded()
+    assert s.summary["atr_5m"] == "1.2000" and s.summary["atr_5m_provisional"] is True
+    # risk 1.59 >= 1.2: accepted
+    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "101.60"})
+    assert res["ok"] is True and res["plan_id"] == "plan-1"
+    # risk 1.19 passes the 1-minute ATR 0.8151 but is below the provisional 5-minute 1.2000
+    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "102.00"})
+    assert res == {"ok": False,
+                   "reason": "risk per share 1.19 is below 1.0 x provisional 5-minute ATR 1.2000"}
+    # risk 0.69 fails the 1-minute rule first, with the unchanged message
+    put_vwap(s, "102.50")
+    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "102.50"})
+    assert res == {"ok": False, "reason": "risk per share 0.69 is below 1.0 x ATR 0.8151"}
+    assert [p.plan_id for p in s.exit_plans] == ["plan-1"]
 
 
 def test_plan_exit_with_atr_rule_off_accepts_the_same_pair():

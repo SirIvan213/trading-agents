@@ -297,6 +297,10 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     entry_level = "last_close"
     entry = Decimal(last_close)
     atr = _summary_atr(s.summary)
+    # #115: the minimum stop distance also uses the 5-minute ATR (provisional or not); the
+    # stop buffer stays on the 1-minute `atr`.
+    atr_5m_kw = {"atr_5m": _summary_atr_5m(s.summary),
+                 "atr_5m_provisional": s.summary.get("atr_5m_provisional") is True}
     requested: Decimal | None = None
     if inp.get("reward_multiple") is not None:
         if inp["reward_multiple"] not in REWARD_MULTIPLES:
@@ -310,7 +314,7 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
         def run(multiple: Decimal | None) -> dict:
             return exit_plan(
                 "orb", entry, s.limits, opening_range=s.summary.get("opening_range"),
-                atr=atr, reward_multiple=multiple, session_day=day,
+                atr=atr, reward_multiple=multiple, session_day=day, **atr_5m_kw,
             )
     else:
         if inp.get("level") is None:
@@ -331,7 +335,7 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
         def run(multiple: Decimal | None) -> dict:
             return exit_plan(
                 "level", entry, s.limits, level=level, atr=atr, reward_multiple=multiple,
-                session_day=day,
+                session_day=day, **atr_5m_kw,
             )
     # The stop (and so the labels) does not depend on the multiple: plan once at the
     # minimum to label it, then at the chosen multiple, which may not exceed the suggestion.
