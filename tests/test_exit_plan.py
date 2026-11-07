@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from tests.order_helpers import gate_for_order
 from tools import bars as B
 from tools.config import CONFIG_DIR, limits_from_dict, load_limits
 from tools.exit_plan import exit_plan, to_plan
@@ -229,7 +230,8 @@ def chain(now):
     plan = to_plan(r, "AAPL")
     sized = size_position(plan, LIMITS, slippage=minimum_allowance(plan.entry, LIMITS))
     assert sized["ok"], sized
-    return summary, r, sized, check_order(sized["order"], LIMITS, DayState(), now)
+    return summary, r, sized, check_order(sized["order"], LIMITS, DayState(), now,
+        gate=gate_for_order(sized["order"], now))
 
 
 def test_chain_passes_in_entry_window():

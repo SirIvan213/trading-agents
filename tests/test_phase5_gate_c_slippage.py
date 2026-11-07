@@ -32,7 +32,9 @@ from tests.order_helpers import (
     QuoteSource,
     QuotingData,
     StepClock,
+    events_clear,
     fresh_quote,
+    gate_for_order,
     plan,
     quotes_at,
     raw_lines,
@@ -288,7 +290,8 @@ def test_tsla_spread_5c_gives_allowance_37c_8_shares_max_loss_49_84():
     assert out["order"]["slippage"] == "0.37" and out["risk_per_share"] == "5.86"
     assert out["quote"] == {"bid": "364.13", "ask": "364.18", "spread": "0.05",
                             "quote_t": (NOW - timedelta(seconds=1)).isoformat(), "age_s": 1}
-    assert check_order(out["order"], LIMITS, DayState(), NOW) == {"verdict": "PASS", "reasons": []}
+    assert check_order(out["order"], LIMITS, DayState(), NOW,
+        gate=gate_for_order(out["order"], NOW)) == {"verdict": "PASS", "reasons": []}
 
 
 def test_position_cap_uses_entry_plus_slippage():
@@ -394,7 +397,8 @@ def test_every_accepted_quote_keeps_every_fill_within_every_limit():
         assert D(out["max_loss"]) == ((e - stop + allowance) * shares).quantize(D("0.01"))
         assert D(out["max_loss"]) <= limits.max_loss_per_trade
         # and risk_check, which recomputes it, agrees (1.00R plans pass the reward:risk rule)
-        verdict = check_order(out["order"], limits, DayState(), NOW)
+        verdict = check_order(out["order"], limits, DayState(), NOW,
+            gate=gate_for_order(out["order"], NOW))
         assert verdict["verdict"] == "PASS", (entry, risk, spread, verdict)
     assert accepted > 500 and refused_price > 200 and unsizable >= 0  # both paths ran
 
@@ -407,7 +411,8 @@ MON_1015 = AS_OF
 
 
 def check(order=ORDER, limits=LIMITS, state=None):
-    return check_order(order, limits, state or DayState(), MON_1015)
+    return check_order(order, limits, state or DayState(), MON_1015,
+        gate=gate_for_order(order, MON_1015))
 
 
 def reasons(order=ORDER, limits=LIMITS, state=None):
@@ -581,11 +586,12 @@ def at(t: datetime):
 
 
 def run(ledger, journal, quotes, t: datetime = NOW):
-    return propose(ledger, "plan-1", journal=journal, clock=at(t), quotes=quotes)
+    return propose(ledger, "plan-1", journal=journal, clock=at(t), quotes=quotes,
+        events=events_clear())
 
 
 def test_propose_without_a_quote_source_is_refused_at_quote(ledger, journal):
-    p = propose(ledger, "plan-1", journal=journal, clock=at(NOW))
+    p = propose(ledger, "plan-1", journal=journal, clock=at(NOW), events=events_clear())
     assert (p.ok, p.stage, p.reason) == (False, "quote", "no live quote source")
     assert p.order is None and p.plan is not None
 
@@ -638,10 +644,12 @@ def test_happy_path_sizes_with_the_allowance_and_reads_the_plan_symbol(ledger, j
 
 def test_quote_is_read_after_the_clock_and_plan_refusals_never_read_it(ledger, journal):
     src = quotes_at(NOW)
-    assert propose(ledger, "plan-9", journal=journal, clock=at(NOW), quotes=src).stage == "plan"
+    assert propose(ledger, "plan-9", journal=journal, clock=at(NOW), quotes=src,
+        events=events_clear()).stage == "plan"
     assert src.calls == 0  # an unknown plan never triggers a quote read
     old = NOW + timedelta(seconds=400)
-    p = propose(ledger, "plan-1", journal=journal, clock=at(old), quotes=quotes_at(old))
+    p = propose(ledger, "plan-1", journal=journal, clock=at(old), quotes=quotes_at(old),
+        events=events_clear())
     assert p.stage == "size" and "plan is" in p.reason  # plan age is judged before the quote
 
 
@@ -657,7 +665,8 @@ def test_approve_reads_the_quote_again_after_yes(ledger, journal):
     src = quotes_at(NOW)
     p = run(ledger, journal, src)
     assert src.calls == 1  # propose
-    out = approve(p, ledger, journal=journal, ask=yes, clock=at(NOW), quotes=src)
+    out = approve(p, ledger, journal=journal, ask=yes, clock=at(NOW), quotes=src,
+        events=events_clear())
     assert out.status == APPROVED and src.calls == 2  # exactly one re-read for the re-check
     assert src.symbols == ["TSLA", "TSLA"]
 
@@ -665,13 +674,15 @@ def test_approve_reads_the_quote_again_after_yes(ledger, journal):
 def test_a_decline_does_not_read_the_quote_again(ledger, journal):
     src = quotes_at(NOW)
     p = run(ledger, journal, src)
-    out = approve(p, ledger, journal=journal, ask=lambda _: "no", clock=at(NOW), quotes=src)
+    out = approve(p, ledger, journal=journal, ask=lambda _: "no", clock=at(NOW), quotes=src,
+        events=events_clear())
     assert out.status == "declined" and src.calls == 1
 
 
 def test_approve_without_a_quote_source_refuses_after_approval(ledger, journal):
     p = run(ledger, journal, quotes_at(NOW))
-    out = approve(p, ledger, journal=journal, ask=yes, clock=at(NOW))  # no quotes=
+    out = approve(p, ledger, journal=journal, ask=yes, clock=at(NOW),
+        events=events_clear())  # no quotes=
     assert out.status == "refused_after_approval"
     assert out.recheck.stage == "quote" and "no live quote source" in out.reason
     assert [e["status"] for e in raw_lines(journal)] == ["refused_after_approval"]
@@ -686,7 +697,8 @@ def test_quote_failing_at_the_recheck_refuses_after_approval(ledger, journal):
             raise TimeoutError
         return fresh_quote("364.18", NOW)
     p = run(ledger, journal, flaky)
-    out = approve(p, ledger, journal=journal, ask=yes, clock=at(NOW), quotes=flaky)
+    out = approve(p, ledger, journal=journal, ask=yes, clock=at(NOW), quotes=flaky,
+        events=events_clear())
     assert out.status == "refused_after_approval" and out.recheck.stage == "quote"
     assert "live quote unavailable (TimeoutError)" in out.reason
 
@@ -701,7 +713,8 @@ def test_price_moving_past_the_allowance_between_ticket_and_yes_refuses(ledger, 
         box["q"] = quote("364.55", "364.56")  # one cent past entry + 0.37
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=move_then_yes, clock=at(NOW), quotes=src)
+    out = approve(p, ledger, journal=journal, ask=move_then_yes, clock=at(NOW), quotes=src,
+        events=events_clear())
     assert out.status == "refused_after_approval"
     assert out.recheck.stage == "size"
     assert "price moved: ask 364.56 is above entry 364.18 + slippage allowance 0.37" in out.reason
@@ -718,7 +731,8 @@ def test_quote_going_stale_between_ticket_and_yes_refuses(ledger, journal):
         box["q"] = fresh_quote("364.18", NOW, age_s=16)  # the feed stopped
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=freeze_then_yes, clock=at(NOW), quotes=src)
+    out = approve(p, ledger, journal=journal, ask=freeze_then_yes, clock=at(NOW), quotes=src,
+        events=events_clear())
     assert out.status == "refused_after_approval"
     assert "live quote is 16s old (max 15s)" in out.reason
 
@@ -733,7 +747,8 @@ def test_wider_spread_at_the_recheck_changes_allowance_and_shares(ledger, journa
         box["q"] = fresh_quote("364.18", NOW, spread="0.60")  # allowance 0.60 -> 7 shares
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=widen_then_yes, clock=at(NOW), quotes=src)
+    out = approve(p, ledger, journal=journal, ask=widen_then_yes, clock=at(NOW), quotes=src,
+        events=events_clear())
     assert out.status == "changed_after_approval"
     assert out.recheck.ok and out.recheck.sized["slippage"] == "0.60"
     assert out.recheck.order["qty"] == 7  # 50 / (5.86 + 0.60) = 7.7
@@ -751,7 +766,8 @@ def test_tighter_spread_cannot_lower_the_allowance_below_the_pct_floor(ledger, j
         box["q"] = fresh_quote("364.18", NOW, spread="0.01")
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=tighten_then_yes, clock=at(NOW), quotes=src)
+    out = approve(p, ledger, journal=journal, ask=tighten_then_yes, clock=at(NOW), quotes=src,
+        events=events_clear())
     assert out.status == APPROVED  # allowance is 0.37 either way (0.10% of the entry)
 
 
@@ -759,7 +775,7 @@ def test_time_and_bid_changes_within_the_same_allowance_are_still_approved(ledge
     clock = StepClock(NOW, NOW + timedelta(seconds=12))
     box = {"q": fresh_quote("364.18", NOW)}
     src = QuoteSource(lambda s: box["q"])
-    p = propose(ledger, "plan-1", journal=journal, clock=clock, quotes=src)
+    p = propose(ledger, "plan-1", journal=journal, clock=clock, quotes=src, events=events_clear())
     first = p.sized["quote"]
 
     def move_then_yes(_):
@@ -767,7 +783,8 @@ def test_time_and_bid_changes_within_the_same_allowance_are_still_approved(ledge
         box["q"] = fresh_quote("364.18", NOW + timedelta(seconds=12), spread="0.05", age_s=3)
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=move_then_yes, clock=clock, quotes=src)
+    out = approve(p, ledger, journal=journal, ask=move_then_yes, clock=clock, quotes=src,
+        events=events_clear())
     assert out.status == APPROVED, out.reason
     assert out.recheck.sized["quote"]["bid"] == "364.13" != first["bid"]
     assert out.recheck.sized["quote"]["quote_t"] != first["quote_t"]
@@ -781,8 +798,10 @@ def test_time_and_bid_changes_within_the_same_allowance_are_still_approved(ledge
 def test_journal_entries_carry_the_quote(ledger, journal):
     src = quotes_at(NOW)
     p = run(ledger, journal, src)
-    approve(p, ledger, journal=journal, ask=lambda _: "no", clock=at(NOW), quotes=src)
-    approve(run(ledger, journal, src), ledger, journal=journal, ask=yes, clock=at(NOW), quotes=src)
+    approve(p, ledger, journal=journal, ask=lambda _: "no", clock=at(NOW), quotes=src,
+        events=events_clear())
+    approve(run(ledger, journal, src), ledger, journal=journal, ask=yes, clock=at(NOW), quotes=src,
+        events=events_clear())
     declined, approved = raw_lines(journal)
     assert declined["status"] == "declined" and approved["status"] == APPROVED
     for e in (declined, approved):
@@ -791,7 +810,7 @@ def test_journal_entries_carry_the_quote(ledger, journal):
         assert e["order"]["slippage"] == "0.37"
     # a refused proposal has no order and no quote
     bad = run(ledger, journal, QuoteSource(None))
-    approve(bad, ledger, journal=journal, ask=yes, clock=at(NOW), quotes=src)
+    approve(bad, ledger, journal=journal, ask=yes, clock=at(NOW), quotes=src, events=events_clear())
     last = raw_lines(journal)[-1]
     assert last["status"] == "no_order" and last["quote"] is None and last["order"] is None
 
@@ -799,7 +818,7 @@ def test_journal_entries_carry_the_quote(ledger, journal):
 def test_approved_entry_counts_the_worst_case_loss_toward_the_day(ledger, journal):
     src = quotes_at(NOW, spread="0.05")
     out = approve(run(ledger, journal, src), ledger, journal=journal, ask=yes,
-                  clock=at(NOW), quotes=src)
+                  clock=at(NOW), quotes=src, events=events_clear())
     assert out.status == APPROVED
     assert journal.day_state(NOW).risk_used_today == D("49.84")  # not the planned 46.88
 
@@ -943,7 +962,7 @@ def test_hand_built_limits_with_a_bad_slippage_pct_fail_validation_and_block_eve
     lim = replace(LIMITS, slippage_pct=bad)
     with pytest.raises(ValueError, match="slippage_pct"):
         validate_limits(lim)
-    r = check_order(ORDER, lim, DayState(), MON_1015)
+    r = check_order(ORDER, lim, DayState(), MON_1015, gate=gate_for_order(ORDER, MON_1015))
     assert r["verdict"] == "BLOCK" and r["reasons"][0].startswith("limits invalid:")
 
 
@@ -952,7 +971,8 @@ def test_hand_built_limits_with_a_bad_quote_age_fail_validation_and_block(bad):
     lim = replace(LIMITS, max_order_quote_age_s=bad)
     with pytest.raises(ValueError, match="max_order_quote_age_s"):
         validate_limits(lim)
-    assert check_order(ORDER, lim, DayState(), MON_1015)["verdict"] == "BLOCK"
+    assert check_order(ORDER, lim, DayState(), MON_1015,
+        gate=gate_for_order(ORDER, MON_1015))["verdict"] == "BLOCK"
 
 
 def test_valid_boundary_values_pass_validation():
@@ -974,15 +994,17 @@ def test_absurd_quote_is_a_refusal_not_an_exception():
 def test_absurd_quote_through_propose_and_approve_never_raises(tmp_path):
     journal = Journal(tmp_path / "j.jsonl")
     bad = lambda sym: {"ap": 1e26, "bp": 1, "t": T0.isoformat()}  # noqa: E731
-    p = propose(sealed_ledger(), "plan-1", journal=journal, clock=lambda: T0, quotes=bad)
+    p = propose(sealed_ledger(), "plan-1", journal=journal, clock=lambda: T0, quotes=bad,
+        events=events_clear())
     assert p.ok is False and p.stage == "size" and "out of range" in p.reason
     good = propose(sealed_ledger(), "plan-1", journal=journal, clock=lambda: T0,
-                   quotes=quotes_at(T0))
+                   quotes=quotes_at(T0), events=events_clear())
     assert good.ok, good.reason
     led = sealed_ledger()
-    good = propose(led, "plan-1", journal=journal, clock=lambda: T0, quotes=quotes_at(T0))
+    good = propose(led, "plan-1", journal=journal, clock=lambda: T0, quotes=quotes_at(T0),
+        events=events_clear())
     out = approve(good, led, journal=journal, ask=lambda _: "yes", clock=lambda: T0,
-                  quotes=bad)
+                  quotes=bad, events=events_clear())
     assert out.status == "refused_after_approval" and "out of range" in out.reason
     assert APPROVED not in [e["status"] for e in journal.entries()]
 
@@ -992,7 +1014,7 @@ def test_risk_check_huge_entry_blocks_instead_of_raising():
     order = {"symbol": "TSLA", "side": "buy", "qty": 1, "type": "market",
              "order_class": "bracket", "entry": "1e30", "stop_loss": "1",
              "take_profit": "2e30", "slippage": "0.01"}
-    res = check_order(order, LIMITS, DayState(), MON_1015)
+    res = check_order(order, LIMITS, DayState(), MON_1015, gate=gate_for_order(order, MON_1015))
     assert res["verdict"] == "BLOCK" and "order arithmetic failed" in res["reasons"]
 
 

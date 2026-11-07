@@ -13,7 +13,7 @@ from agents.schemas import ExitPlanRecord
 from agents.tool_registry import ToolSession
 from pipeline.orders import build_order
 from tests.fakes import NOW, FakeMarketData
-from tests.order_helpers import fresh_quote
+from tests.order_helpers import fresh_quote, gate_for_order
 from tools.config import CONFIG_DIR, Limits, limits_from_dict, load_limits, validate_limits
 from tools.exit_plan import exit_plan
 from tools.risk_check import DayState, check_order
@@ -263,7 +263,7 @@ def order(entry="100.00", stop="99.90", target="100.10", qty=1):
 
 
 def check(o, limits=LIMITS):
-    return check_order(o, limits, DayState(), MON_1015)
+    return check_order(o, limits, DayState(), MON_1015, gate=gate_for_order(o, MON_1015))
 
 
 def test_risk_check_risk_exactly_at_the_minimum_passes():

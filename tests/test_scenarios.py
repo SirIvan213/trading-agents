@@ -16,7 +16,7 @@ import pipeline.scenarios as sc
 from agents.tool_registry import ToolSession, price_levels
 from pipeline.orders import build_order
 from pipeline.scenarios import Expected, ScenarioData, compare, load_scenario, scenario_names
-from tests.order_helpers import fresh_quote
+from tests.order_helpers import fresh_quote, gate_for_order
 from tools.bars import parse_bars, regular_session, summarize
 from tools.config import CONFIG_DIR, load_limits
 from tools.earnings import earnings_facts
@@ -126,7 +126,8 @@ def test_clean_buy_order_passes_the_risk_check(clean):
     plan0 = session.exit_plans[0]
     sized = build_order(plan0, LIMITS, clean.now, fresh_quote(plan0.entry, clean.now))
     assert sized["ok"] is True
-    verdict = check_order(sized["order"], LIMITS, DayState(), clean.now)
+    verdict = check_order(sized["order"], LIMITS, DayState(), clean.now,
+        gate=gate_for_order(sized["order"], clean.now))
     assert verdict == {"verdict": "PASS", "reasons": []}
 
 

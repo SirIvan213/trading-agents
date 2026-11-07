@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from tests.order_helpers import gate_for_order
 from tools.config import CONFIG_DIR, limits_from_dict, load_limits
 from tools.exit_plan import exit_plan
 from tools.risk_check import DayState, check_order
@@ -23,7 +24,7 @@ MON_1015 = datetime(2026, 10, 19, 10, 15, tzinfo=NY)
 
 
 def check(order=ORDER, limits=LIMITS, state=None, now=MON_1015):
-    return check_order(order, limits, state or DayState(), now)
+    return check_order(order, limits, state or DayState(), now, gate=gate_for_order(order, now))
 
 
 def test_good_order_passes():

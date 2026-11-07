@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -126,7 +126,11 @@ class FakeFilingsData:
         facts_raises: Exception | None = None,
         no_cik: bool = False,
         facts_fixture: str = "sec_companyfacts_abcd.json",
+        calendar_rows: list | None = None,
+        calendar_raises: Exception | None = None,
     ) -> None:
+        self.calendar_rows = calendar_rows or []
+        self.calendar_raises = calendar_raises
         self.facts_fixture = facts_fixture
         self.calls: list[tuple] = []
         self.news_raises = news_raises
@@ -145,6 +149,16 @@ class FakeFilingsData:
         if self.subs_raises:
             raise self.subs_raises
         return None if self.no_cik else load_fixture("sec_submissions_8k.json")
+
+    def earnings_calendar(self, start: date, end: date) -> dict:
+        """The FMP calendar as LiveData returns it: fetched 08:30 ET on `start`, with only the
+        given rows (default none, so no symbol is on it) (#112)."""
+        self.calls.append(("earnings_calendar", start, end))
+        if self.calendar_raises:
+            raise self.calendar_raises
+        fetched = datetime.combine(start, time(8, 30), tzinfo=NY)
+        return {"fetched_at": fetched.isoformat(), "from": start.isoformat(),
+                "to": end.isoformat(), "reply": list(self.calendar_rows)}
 
     def company_facts(self, symbol: str) -> dict | None:
         self.calls.append(("company_facts", symbol))

@@ -15,6 +15,7 @@ next proposal tries again (no latching for the day).
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -30,11 +31,20 @@ EventSource = Callable[[str, datetime, datetime], dict]
 
 
 def _failure(exc: BaseException) -> str:
-    """A reason safe to journal: our own RuntimeError text (paths only, never keys or URLs
-    with queries), otherwise the exception type name."""
-    if isinstance(exc, RuntimeError):
-        return str(exc)[:200]
-    return type(exc).__name__
+    """A reason safe to journal: our own RuntimeError text (paths only, never URLs with
+    queries), otherwise the exception type name. A server's error text echoed by
+    tools.http ("error payload from <path>: <detail>") is cut to the path, and the FMP key is
+    masked if it appears anywhere, so nothing a server sends back can put a secret in the
+    journal or the ticket (CLAUDE.md rule 4)."""
+    if not isinstance(exc, RuntimeError):
+        return type(exc).__name__
+    text = str(exc)
+    if text.startswith("error payload from "):
+        text = text.split(":", 1)[0]
+    key = os.environ.get("FMP_API_KEY")
+    if key:
+        text = text.replace(key, "***")
+    return text[:200]
 
 
 class FmpCalendarCache:

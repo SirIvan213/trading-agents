@@ -42,7 +42,7 @@ from tests.fakes import (
     tool_use,
 )
 from tests.fakes import NOW as NOW_AAPL
-from tests.order_helpers import fresh_quote
+from tests.order_helpers import fresh_quote, gate_for_order
 from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (autouse fixtures)
 from tools.config import CONFIG_DIR, Limits, load_limits
 from tools.exit_plan import exit_plan as real_exit_plan
@@ -638,8 +638,10 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
     assert o_clean["order"]["entry"] == "364.18" and o_clean["order"]["stop_loss"] == "358.32"
     assert o_clean["order"]["take_profit"] == "370.04"
 
-    v_clean = check_order(o_clean["order"], LIMITS, DayState(), MON_1015)
-    v_dirty = check_order(o_dirty["order"], LIMITS, DayState(), MON_1015)
+    v_clean = check_order(o_clean["order"], LIMITS, DayState(), MON_1015,
+        gate=gate_for_order(o_clean["order"], MON_1015))
+    v_dirty = check_order(o_dirty["order"], LIMITS, DayState(), MON_1015,
+        gate=gate_for_order(o_dirty["order"], MON_1015))
     assert v_clean == v_dirty == {"verdict": "PASS", "reasons": []}
 
 
@@ -793,7 +795,10 @@ def test_plan_fields_pinned():
 
 
 def test_check_order_signature_pinned():
-    assert _params(check_order) == ["order", "limits", "state", "now"]
+    # #112: the only addition is `gate`, the event-gate result (tools.event_gate); it defaults to
+    # None, and a missing gate is a BLOCK (tests/test_event_gate_blocks.py), never a pass
+    assert _params(check_order, defaults_ok={"gate"}) == ["order", "limits", "state", "now", "gate"]
+    assert inspect.signature(check_order).parameters["gate"].default is None
 
 
 def test_build_order_signature_pinned():
@@ -827,7 +832,7 @@ ORDER = size_position(REAL_PLAN, LIMITS, slippage=SLIPPAGE)["order"]
 
 
 def check(order, limits=LIMITS, now=MON_1015):
-    return check_order(order, limits, DayState(), now)
+    return check_order(order, limits, DayState(), now, gate=gate_for_order(order, now))
 
 
 def test_order_fields_equal_size_position_order_keys():
@@ -1234,14 +1239,16 @@ def test_decide_passes_only_plan_id_to_propose_and_approve():
     # propose(ledger, plan_id, journal=..., clock=..., quotes=...): `quotes` is the live market
     # quote source (#68), never anything the model produced
     assert [getattr(a, "id", None) for a in pr.args] == ["ledger", "plan_id"]
-    assert sorted(k.arg for k in pr.keywords) == ["clock", "journal", "quotes"]
-    assert _names_in(pr) <= {"propose", "ledger", "plan_id", "journal", "clock", "quotes"}
+    # `events` is the event-gate source (#112), built from the same data object
+    assert sorted(k.arg for k in pr.keywords) == ["clock", "events", "journal", "quotes"]
+    assert _names_in(pr) <= {"propose", "ledger", "plan_id", "journal", "clock", "quotes",
+                             "events"}
 
     # approve(<the Proposal>, ledger, journal=..., ask=..., clock=...)
     assert len(ap.args) == 2 and getattr(ap.args[1], "id", None) == "ledger"
-    assert sorted(k.arg for k in ap.keywords) == ["ask", "clock", "journal", "quotes"]
+    assert sorted(k.arg for k in ap.keywords) == ["ask", "clock", "events", "journal", "quotes"]
     assert _names_in(ap) <= {"approve", "result", "proposal", "ledger", "journal", "ask", "clock",
-                             "quotes"}
+                             "quotes", "events"}
 
     # quotes is assigned exactly once, as quotes_from(data): live market data, nothing else
     q_assigns = [n for n in ast.walk(ast.parse(src))
@@ -1250,6 +1257,15 @@ def test_decide_passes_only_plan_id_to_propose_and_approve():
     q_value = q_assigns[0].value
     assert isinstance(q_value, ast.Call) and getattr(q_value.func, "id", None) == "quotes_from"
     assert [getattr(a, "id", None) for a in q_value.args] == ["data"] and not q_value.keywords
+
+    # events is assigned exactly once, as events_from(data): earnings, filings and news read from
+    # the data object (#112), nothing a model produced
+    e_assigns = [n for n in ast.walk(ast.parse(src))
+                 if isinstance(n, ast.Assign) and "events" in _names_in(n.targets[0])]
+    assert len(e_assigns) == 1
+    e_value = e_assigns[0].value
+    assert isinstance(e_value, ast.Call) and getattr(e_value.func, "id", None) == "events_from"
+    assert [getattr(a, "id", None) for a in e_value.args] == ["data"] and not e_value.keywords
 
     # plan_id is assigned exactly once, from the decision's plan_id and nothing else
     assigns = [n for n in ast.walk(ast.parse(src))

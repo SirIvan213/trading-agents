@@ -21,8 +21,9 @@ Earnings (`earnings_status`):
   appending (name, fn) where fn(symbol, now, window_end, sources) -> list of EVENT reasons.
 
 Halts (`halt_status`): a headline flagged "halt" dated today is EVENT. A failed or malformed
-news fetch is UNKNOWN ("cannot rule out a halt"), never "no halts". News that loads with no
-halt today is CLEAR.
+news fetch, or a reply with any item the digest cannot read (no valid time or headline), is
+UNKNOWN ("cannot rule out a halt"), never "no halts". News that loads cleanly with no halt
+today is CLEAR.
 
 `event_gate` combines both: EVENT if any EVENT, CLEAR only if both are CLEAR, else UNKNOWN.
 Each finding keeps its own status and source, so EVENT and UNKNOWN reasons stay distinct in
@@ -257,6 +258,12 @@ def halt_status(symbol: str, now: datetime, news: object) -> dict:
             else "malformed news reply"
         return {"status": UNKNOWN, "findings": [_finding(
             "halt", "news", UNKNOWN, f"news unavailable ({why}): cannot rule out a halt today")]}
+    skipped = dg.get("counts", {}).get("malformed_skipped", 0)
+    if skipped:
+        # an item the digest could not read (no time, no headline) might be today's halt
+        return {"status": UNKNOWN, "findings": [_finding(
+            "halt", "news", UNKNOWN,
+            f"{skipped} news item(s) unreadable: cannot rule out a halt today")]}
     today = now.astimezone(NY).date()
     findings = []
     for h in dg["headlines"]:

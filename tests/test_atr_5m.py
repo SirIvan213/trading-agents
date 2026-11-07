@@ -11,7 +11,7 @@ import pytest
 import agents.tool_registry as reg
 from agents.tool_registry import price_levels
 from pipeline.orders import build_order
-from tests.order_helpers import fresh_quote
+from tests.order_helpers import fresh_quote, gate_for_order
 from tests.test_scenario_review import LIMITS, session
 from tests.test_scenarios import Loaded
 from tools import bars as B
@@ -328,7 +328,8 @@ def test_clean_buy_both_plans_valid_and_both_orders_pass(clean):
         quote = fresh_quote(s.exit_plans[-1].entry, s.now)  # live quote (#68), ask at entry
         sized = build_order(s.exit_plans[-1], LIMITS, s.now, quote)
         assert sized["ok"] is True, sized
-        assert check_order(sized["order"], LIMITS, DayState(), s.now) == {
+        assert check_order(sized["order"], LIMITS, DayState(), s.now,
+            gate=gate_for_order(sized["order"], s.now)) == {
             "verdict": "PASS", "reasons": []}
     assert [p.setup for p in s.exit_plans] == ["level", "orb"]
 

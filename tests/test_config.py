@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from tests.order_helpers import gate_for_order
 from tools.config import CONFIG_DIR, limits_from_dict, load_limits
 from tools.risk_check import DayState, check_order
 from tools.size import Plan, size_position
@@ -269,16 +270,18 @@ def order_for(symbol, limits):
 
 def test_padded_lowercase_entry_blocks_gme_but_not_others():
     lim = limits_from_dict(cfg(blocked_symbols=[" gme "]))
-    blocked = check_order(order_for("GME", lim), lim, DayState(), MON_1015)
+    blocked = check_order(order_for("GME", lim), lim, DayState(), MON_1015,
+        gate=gate_for_order(order_for("GME", lim), MON_1015))
     assert blocked == {"verdict": "BLOCK", "reasons": ["GME is on the blocked list"]}
-    other = check_order(order_for("AAPL", lim), lim, DayState(), MON_1015)
+    other = check_order(order_for("AAPL", lim), lim, DayState(), MON_1015,
+        gate=gate_for_order(order_for("AAPL", lim), MON_1015))
     assert other == {"verdict": "PASS", "reasons": []}
 
 
 def test_blocked_symbol_check_ignores_order_symbol_case():
     lim = limits_from_dict(cfg(blocked_symbols=[" gme "]))
     order = {**order_for("GME", lim), "symbol": "gme"}
-    r = check_order(order, lim, DayState(), MON_1015)
+    r = check_order(order, lim, DayState(), MON_1015, gate=gate_for_order(order, MON_1015))
     assert r["verdict"] == "BLOCK" and "GME is on the blocked list" in r["reasons"]
 
 
@@ -307,7 +310,8 @@ def test_paper_missing_key_raises():
 def test_paper_false_end_to_end_blocks_with_live_disabled_reason():
     lim = limits_from_dict(cfg(paper=False))
     assert lim.paper is False
-    r = check_order(order_for("AAPL", lim), lim, DayState(), MON_1015)
+    r = check_order(order_for("AAPL", lim), lim, DayState(), MON_1015,
+        gate=gate_for_order(order_for("AAPL", lim), MON_1015))
     assert r == {
         "verdict": "BLOCK",
         "reasons": ["live trading is disabled in this phase (paper must be true)"],
@@ -316,4 +320,5 @@ def test_paper_false_end_to_end_blocks_with_live_disabled_reason():
 
 def test_paper_true_end_to_end_passes():
     lim = limits_from_dict(cfg(paper=True))
-    assert check_order(order_for("AAPL", lim), lim, DayState(), MON_1015)["verdict"] == "PASS"
+    assert check_order(order_for("AAPL", lim), lim, DayState(), MON_1015,
+        gate=gate_for_order(order_for("AAPL", lim), MON_1015))["verdict"] == "PASS"
