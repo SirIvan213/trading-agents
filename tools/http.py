@@ -42,23 +42,22 @@ def _path(url: str) -> str:
     return urllib.parse.urlsplit(url).path or "/"
 
 
-def get_json(
+def get_bytes(
     url: str,
     headers: dict,
     *,
     opener: Callable | None = None,
     timeout: float = 10,
-    expect_keys: Iterable[str] | None = None,
-) -> dict | list:
-    """GET `url` and return the decoded JSON body (a dict or a list).
+) -> bytes:
+    """GET `url` and return the raw body bytes.
 
     `opener` defaults to an OpenerDirector that refuses redirects, built at call time; it is
     called as opener(request, timeout=timeout) and must return a context manager
     whose value has .read().
 
-    Raises RuntimeError on: HTTP error status, URL/network error or timeout, a
-    body that is not valid JSON, and a JSON error payload, meaning a dict that
-    has "message" or "error" and none of `expect_keys`.
+    Raises RuntimeError on: HTTP error status, a refused redirect, a response from another
+    origin, and a URL/network error or timeout. Messages name the URL path only (never the
+    query string, which may hold a key).
     """
     open_fn = opener or _default_open
     path = _path(url)
@@ -82,6 +81,25 @@ def get_json(
         raise RuntimeError(f"network error for {path}: {type(reason).__name__}") from None
     except OSError as exc:
         raise RuntimeError(f"network error for {path}: {type(exc).__name__}") from None
+    return raw if isinstance(raw, (bytes, bytearray)) else str(raw).encode("utf-8")
+
+
+def get_json(
+    url: str,
+    headers: dict,
+    *,
+    opener: Callable | None = None,
+    timeout: float = 10,
+    expect_keys: Iterable[str] | None = None,
+) -> dict | list:
+    """GET `url` and return the decoded JSON body (a dict or a list).
+
+    Transport as get_bytes. Also raises RuntimeError on a body that is not valid JSON, and a
+    JSON error payload, meaning a dict that has "message" or "error" and none of
+    `expect_keys`.
+    """
+    path = _path(url)
+    raw = get_bytes(url, headers, opener=opener, timeout=timeout)
     try:
         text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
         body = json.loads(text)
