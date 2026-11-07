@@ -1,5 +1,7 @@
-"""Smoke run: the three analysts and then the Bull/Bear debate, once, on saved TSLA fixture
-data, against the REAL Claude API.
+"""Smoke run: the three analysts, the Bull/Bear debate and the Trader, once, on saved TSLA
+fixture data, against the REAL Claude API. For a BUY it prints the order ticket, sized from
+the plan ledger at the fixture's clock; there is NO approval step and nothing is journaled
+or sent.
 
 Not part of the test suite (it lives outside tests/ and is never imported by it). It makes
 real, billed Claude API calls; it makes NO Alpaca or SEC calls. Every input is a fixture in
@@ -19,8 +21,8 @@ is read from ANTHROPIC_API_KEY, loaded from .env in the repo root (or --env-file
 --no-dotenv skips it) if present (a non-empty exported variable wins). The key is never
 printed. Without flags each agent uses its own configured model and effort (config_for:
 TRADING_AGENTS_<AGENT>_MODEL / _EFFORT, then TRADING_AGENTS_MODEL / _EFFORT, then the
-defaults); --model / --effort override all five agents (technical, sentiment, fundamentals,
-bull, bear). Debate rounds come from TRADING_AGENTS_DEBATE_ROUNDS (default 2). Risk limits
+defaults); --model / --effort override all six agents (technical, sentiment, fundamentals,
+bull, bear, trader). Debate rounds come from TRADING_AGENTS_DEBATE_ROUNDS (default 2). Risk limits
 are loaded and validated as in a real run.
 
 Exit codes: 0 = all three analysts and every debate turn produced validated output (a
@@ -42,8 +44,10 @@ import argparse
 import asyncio
 import json
 import sys
+import tempfile
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from agents.debate import resolve_rounds, run_debate
@@ -52,6 +56,10 @@ from agents.llm import EFFORTS, AgentConfig, config_for, make_client
 from agents.money_guard import ViolationDetail
 from agents.orchestrator import AGENTS, run_analysts
 from agents.schemas import CallRecord, DebateRecord, DecisionPacket, RetryRecord
+from agents.trader import TraderRun, run_trader
+from journal.log import Journal
+from pipeline.ledger import PlanLedger
+from pipeline.order_flow import Proposal, propose, render_ticket
 from pipeline.smoke_common import ROOT, add_safety_flags, key_hint, load_env, refuse_unbilled
 from pipeline.smoke_technical import (
     FIXTURES,
@@ -64,6 +72,11 @@ NEWS_FIXTURE = FIXTURES / "alpaca_news_tsla.json"
 SUBMISSIONS_FIXTURE = FIXTURES / "sec_submissions_tsla.json"
 COMPANYFACTS_FIXTURE = FIXTURES / "sec_companyfacts_tsla.json"
 DEBATERS = ("bull", "bear")
+TRADER = "trader"
+# Forced-PASS codes that mean the Trader itself failed (a fatal Bear or no plans is a
+# legitimate PASS, not a failure).
+TRADER_FAILURES = frozenset({"invalid_output", "api_error", "exception", "config_error",
+                             "cancelled"})
 
 
 class FixtureData(FixtureMarketData):
@@ -88,9 +101,9 @@ class FixtureData(FixtureMarketData):
 
 
 def _configs(model: str | None, effort: str | None, fallbacks: bool) -> dict[str, AgentConfig]:
-    """config_for(agent) for all five agents, with any command-line overrides applied."""
+    """config_for(agent) for all six agents, with any command-line overrides applied."""
     out = {}
-    for agent in (*AGENTS, *DEBATERS):
+    for agent in (*AGENTS, *DEBATERS, TRADER):
         cfg = config_for(agent)
         changes: dict[str, Any] = {"fallbacks": fallbacks}
         if model:
@@ -209,16 +222,38 @@ def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, Agen
           f"cache read {t['cache_read_input_tokens']}  total processed {sum(t.values())}")
 
 
+def print_trader(trader: TraderRun, proposal: Proposal | None) -> None:
+    """The Trader's decision, its API calls and the order ticket (no approval step)."""
+    d = trader.decision
+    print("\n-- Trader --")
+    status = "ok" if trader.ok else f"FORCED PASS ({trader.forced_pass})"
+    print(f"[trader] {status}  requested {trader.run.requested_model}  "
+          f"effort {trader.run.effort}")
+    print(d.model_dump_json(indent=2))
+    _print_calls("trader", trader.run.calls)
+    _print_retries("trader", trader.run.retries)
+    t = token_totals(trader.run.calls)
+    print(f"trader tokens: input {t['input_tokens']}  output {t['output_tokens']}  "
+          f"cache write {t['cache_creation_input_tokens']}  "
+          f"cache read {t['cache_read_input_tokens']}")
+    print("\n-- Order ticket (smoke: NO approval step, nothing journaled or sent) --")
+    if proposal is None:
+        print("no ticket: the Trader did not choose BUY")
+        return
+    print("clock: the fixture's as_of (smoke only; a real run uses the wall clock)")
+    print(render_ticket(proposal))
+
+
 def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run the three analysts and the Bull/Bear debate once on saved TSLA "
                     "fixtures against the real Claude API (billed; no Alpaca or SEC calls)."
     )
     parser.add_argument("--model", default=None,
-                        help="Claude model ID for all five agents (default: each agent's "
+                        help="Claude model ID for all six agents (default: each agent's "
                              "configured model, normally claude-sonnet-5-5)")
     parser.add_argument("--effort", default=None, choices=sorted(EFFORTS),
-                        help="effort for all five agents (default: each agent's configured effort)")
+                        help="effort for all six agents (default: each agent's configured effort)")
     parser.add_argument("--no-fallbacks", action="store_true",
                         help="turn off server-side refusal fallback")
     add_safety_flags(parser)
@@ -235,14 +270,16 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if client is None and not args.billed:
-        return refuse_unbilled("Analysts + debate smoke run", [
+        return refuse_unbilled("Analysts + debate + trader smoke run", [
             f"symbol {SYMBOL} on saved fixtures (no Alpaca or SEC calls)",
             *(f"{a:<12} model {c.model}  effort {c.effort}  "
               f"fallbacks {'on' if c.fallbacks else 'off'}" for a, c in configs.items()),
             f"debate rounds {rounds}",
-            f"Claude API calls: typically {7 + 2 * rounds}-{7 + 4 * rounds}, at most "
-            f"{sum(2 * (configs[a].max_tool_rounds + 1) for a in AGENTS) + 4 * rounds} "
-            "(analysts: 2 attempts x tool rounds; debate: 2 attempts per turn)",
+            f"Claude API calls: typically {8 + 2 * rounds}-{9 + 4 * rounds}, at most "
+            f"{sum(2 * (configs[a].max_tool_rounds + 1) for a in AGENTS) + 4 * rounds + 2} "
+            "(analysts: 2 attempts x tool rounds; debate: 2 attempts per turn; "
+            "trader: up to 2)",
+            "then the order ticket for a BUY (no approval step, nothing journaled or sent)",
         ])
     if client is None:
         try:
@@ -253,10 +290,11 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
 
     data = FixtureData()
     now = data.as_of()
+    ledger = PlanLedger(SYMBOL)
     try:
         packet = asyncio.run(run_analysts(
             SYMBOL, now, data=data, clients=client,
-            configs={a: configs[a] for a in AGENTS},
+            configs={a: configs[a] for a in AGENTS}, ledger=ledger,
         ))
     except ValueError as exc:  # e.g. "limits config is invalid", before any analyst starts
         print(f"error: {exc}", file=sys.stderr)
@@ -270,14 +308,26 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         print_money_debug(rejections)  # still show what was collected before the crash
         raise
 
+    trader = run_trader(packet, debate, client=client, config=configs[TRADER])
+    proposal = None
+    if trader.decision.action == "BUY" and trader.decision.plan_id:
+        # The ticket is sized from the ledger at the fixture's clock (fixture plans are dated
+        # 2026-11-03). A throwaway journal: the smoke run never writes the real one.
+        with tempfile.TemporaryDirectory() as tmp:
+            proposal = propose(ledger, trader.decision.plan_id,
+                               journal=Journal(Path(tmp) / "smoke.jsonl"), clock=lambda: now)
+
     report(packet, debate, configs)
+    print_trader(trader, proposal)
     print_money_debug(rejections)
 
     calls = [c for r in packet.runs.values() for c in r.calls]
     calls += [c for t in debate.turns for c in t.run.calls]
-    if not calls or not packet.all_ok or not debate.all_ok:
+    trader_failed = trader.forced_pass in TRADER_FAILURES
+    if not calls or not packet.all_ok or not debate.all_ok or trader_failed:
         failed = [a for a in AGENTS if not packet.runs[a].ok]
         failed += [f"r{t.round} {t.side}" for t in debate.turns if not t.run.ok]
+        failed += [f"trader ({trader.forced_pass})"] if trader_failed else []
         print(f"\nsmoke run FAILED: {', '.join(failed) or 'no API response'}", file=sys.stderr)
         return 1
     return 0
