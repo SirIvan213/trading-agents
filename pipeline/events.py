@@ -119,20 +119,30 @@ def halts_input(data: Any) -> dict:
         return {"ok": False, "reason": _failure(exc)}
 
 
+def gate_inputs(data: Any, symbol: str, now: datetime, *, calendar: dict | None = None,
+                halts: dict | None = None) -> dict:
+    """The four gate inputs for `symbol` at `now`, each {"ok": True, ...} or {"ok": False,
+    "reason"}: calendar (FMP), filings (SEC), news (Alpaca, 24 h) and halts (Nasdaq feed).
+    `calendar` and `halts` may be passed in when shared across symbols (smoke_events)."""
+    today = now.astimezone(NY).date()
+    try:
+        filings: dict = {"ok": True, "submissions": data.submissions(symbol)}
+    except Exception as exc:  # noqa: BLE001
+        filings = {"ok": False, "reason": _failure(exc)}
+    try:
+        start = now - timedelta(hours=NEWS_LOOKBACK_HOURS)
+        news: dict = {"ok": True, "news": data.news([symbol], start, now)}
+    except Exception as exc:  # noqa: BLE001
+        news = {"ok": False, "reason": _failure(exc)}
+    return {
+        "calendar": calendar if calendar is not None else calendar_input(data, today),
+        "filings": filings, "news": news,
+        "halts": halts if halts is not None else halts_input(data),
+    }
+
+
 def events_from(data: Any) -> EventSource:
     """An EventSource reading `data` (LiveData in production, ScenarioData in the smoke run)."""
     def gate(symbol: str, now: datetime, window_end: datetime) -> dict:
-        today = now.astimezone(NY).date()
-        calendar = calendar_input(data, today)
-        try:
-            filings: dict = {"ok": True, "submissions": data.submissions(symbol)}
-        except Exception as exc:  # noqa: BLE001
-            filings = {"ok": False, "reason": _failure(exc)}
-        try:
-            start = now - timedelta(hours=NEWS_LOOKBACK_HOURS)
-            news: dict = {"ok": True, "news": data.news([symbol], start, now)}
-        except Exception as exc:  # noqa: BLE001
-            news = {"ok": False, "reason": _failure(exc)}
-        return event_gate(symbol, now, window_end, calendar=calendar, filings=filings,
-                          news=news, halts=halts_input(data))
+        return event_gate(symbol, now, window_end, **gate_inputs(data, symbol, now))
     return gate

@@ -97,6 +97,11 @@ def _compact(text: object) -> str:
     return "".join(ch for ch in norm_ticker(text) if ch.isalnum())
 
 
+def compact_ticker(text: object) -> str:
+    """Public name for the separator-free ticker form used by the halt checks."""
+    return _compact(text)
+
+
 def norm_ticker(text: object) -> str:
     """Upper case with ".", "-" and "/" share-class separators unified ("BRK-B" == "BRK.B")."""
     if not isinstance(text, str):
