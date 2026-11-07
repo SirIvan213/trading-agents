@@ -170,6 +170,8 @@ def approve(
 ) -> Outcome:
     """Ask a human to approve `p`, re-check it, and journal the result. Never sends an order.
 
+    A proposal that is not ok is journaled as "no_order" (with its stage) and never asked.
+
     Only the exact answer "yes" (surrounding spaces ignored, lower case) approves. After the
     answer the plan is re-sized and re-checked at a new `clock()` reading; if that fails, or
     the re-built order differs in any field from the one shown, there is no order.
@@ -177,6 +179,10 @@ def approve(
     as approved).
     """
     if not p.ok:
+        try:  # audit trail for a refused BUY; a broken journal must not hide the refusal
+            journal.append(_entry(p, "no_order", p.reason, stage=p.stage))
+        except JournalError:
+            pass
         return Outcome("no_order", p.reason, p)
     try:
         answer = ask(render_ticket(p) + "\n" + approval_prompt(p))
