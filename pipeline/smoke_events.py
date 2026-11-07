@@ -11,7 +11,8 @@ requests:
   - Nasdaq Trader trade-halt feed: ONE fetch (free, no key; never more than once a minute);
   - per symbol: SEC EDGAR submissions (SEC_USER_AGENT; the CIK map once) and Alpaca news for
     the last 24 hours (ALPACA_API_KEY / ALPACA_SECRET_KEY).
-No Claude call, no order, no journal write. Only Ivan runs it with --live (CLAUDE.md rule 6).
+No Claude call, no order, no decision-journal write (the FMP calendar cache in journal/cache/
+is the only file written). Only Ivan runs it with --live (CLAUDE.md rule 6).
 
 For #146 it also prints the calendar's row count, its first and last dates and rows per day,
 so the FMP row cap and the "rows from today through the 3rd trading day" rule can be checked
@@ -79,7 +80,7 @@ def plan_lines(symbols: list[str]) -> list[str]:
         f"({len(symbols)})",
         f"Alpaca news: 1 call (or more pages) per symbol for the last 24 hours ({len(symbols)})",
         f"keys: {keys}",
-        "No Claude call, no order, no journal write.",
+        "No Claude call, no order, no decision-journal write (only the FMP cache file).",
     ]
 
 

@@ -1,7 +1,7 @@
 """Event-gate inputs for the order path (issues #13, #112).
 
 `events_from(data)` builds the EventSource that propose() and the approval re-check call:
-(symbol, now, window_end) -> tools.event_gate.event_gate(...) result. It reads three sources
+(symbol, now, window_end) -> tools.event_gate.event_gate(...) result. It reads four sources
 from `data` and turns every failure into a {"ok": False, "reason"} input, so the gate says
 UNKNOWN instead of anything raising or reading as empty:
   data.earnings_calendar(start, end) -> {"fetched_at", "from", "to", "reply"}  (FMP, primary)
@@ -107,14 +107,14 @@ def calendar_input(data: Any, today: date) -> dict:
 def halts_input(data: Any) -> dict:
     """The gate's halt-feed input: {"ok": True, "fetched_at", "feed": parse_halt_feed(...)} or
     {"ok": False, "reason"} (no source, a fetch error, a malformed feed)."""
+    if not callable(getattr(data, "halt_feed", None)):
+        return {"ok": False, "reason": "no halt feed source"}
     try:
         raw = data.halt_feed()
         feed = parse_halt_feed(raw["body"])
         if feed.get("ok") is not True:
             return {"ok": False, "reason": str(feed.get("reason"))}
         return {"ok": True, "fetched_at": str(raw["fetched_at"]), "feed": feed}
-    except AttributeError:
-        return {"ok": False, "reason": "no halt feed source"}
     except Exception as exc:  # noqa: BLE001 - every failure is an UNKNOWN input
         return {"ok": False, "reason": _failure(exc)}
 

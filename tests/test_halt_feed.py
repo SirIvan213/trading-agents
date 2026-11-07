@@ -34,8 +34,10 @@ class Resp:
     def __init__(self, body: bytes, final_url: str | None = None) -> None:
         self._b, self._u = body, final_url
 
-    def read(self) -> bytes:
-        return self._b
+    def read(self, amt: int | None = None) -> bytes:
+        # like http.client.HTTPResponse.read(amt): get_bytes(max_bytes=...) reads amt bytes
+        self.amt = amt
+        return self._b if amt is None else self._b[:amt]
 
     def geturl(self) -> str:
         return self._u or URL
@@ -254,11 +256,13 @@ def test_blocked_not_xml(body):
 
 def test_blocked_wrong_root():
     body = feed([]).replace(b"<rss ", b"<feed ").replace(b"</rss>", b"</feed>")
-    assert parse_halt_feed(body) == {"ok": False, "reason": "halt feed has no rss channel"}
+    assert parse_halt_feed(body) == {
+        "ok": False, "reason": "halt feed must have exactly one rss channel"}
 
 
 def test_blocked_no_channel():
-    assert parse_halt_feed(b"<rss version='2.0'></rss>")["reason"] == "halt feed has no rss channel"
+    assert parse_halt_feed(b"<rss version='2.0'></rss>")["reason"] == (
+        "halt feed must have exactly one rss channel")
 
 
 def _with_pub(pub: str) -> bytes:
@@ -491,3 +495,54 @@ def test_two_live_data_objects_share_the_process_wide_cache(monkeypatch):
     a, b = LiveData(), LiveData()
     assert a.halt_feed()["body"] == b"shared" and b.halt_feed()["body"] == b"shared"
     assert fetch.calls == 1
+
+
+# ============================ code review (#144) ============================
+
+def test_blocked_a_utf16_body_cannot_smuggle_a_doctype_past_the_check():
+    text = ('<?xml version="1.0" encoding="utf-16"?><!DOCTYPE rss [<!ENTITY s "TSLA">]>'
+            + feed([]).decode("utf-8").split("?>", 1)[1])
+    assert parse_halt_feed(text.encode("utf-16"))["ok"] is False
+
+
+def test_blocked_a_bom_or_a_non_utf8_declaration():
+    assert parse_halt_feed(b"\xef\xbb\xbf" + feed([]))["reason"] == (
+        "halt feed has a byte-order mark (UTF-8 required)")
+    latin = feed([]).replace(b'encoding="utf-8"', b'encoding="iso-8859-1"')
+    assert parse_halt_feed(latin)["reason"] == "halt feed declares a non-UTF-8 encoding"
+
+
+def test_blocked_a_doctype_after_the_first_4kb():
+    padded = feed([]).replace(b"<rss ", b"<!-- " + b"x" * 5000 + b" --><!DOCTYPE rss><rss ")
+    assert parse_halt_feed(padded)["reason"] == "halt feed declares a DOCTYPE or entities"
+
+
+def test_blocked_a_second_channel_or_items_outside_the_channel():
+    two = feed([]).replace(b"</channel>", b"</channel><channel></channel>")
+    assert parse_halt_feed(two)["reason"] == "halt feed must have exactly one rss channel"
+    outside = feed([]).replace(
+        b"</channel>", b"<wrap>" + item("TSLA").encode("utf-8") + b"</wrap></channel>")
+    assert parse_halt_feed(outside)["reason"] == "halt feed has items outside its channel"
+
+
+def test_get_bytes_reads_at_most_max_bytes_plus_one():
+    class R:
+        def __init__(self):
+            self.amt = "unset"
+
+        def read(self, amt=None):
+            self.amt = amt
+            return b"x" * 10
+
+        def geturl(self):
+            return URL
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    r = R()
+    get_bytes(URL, {}, opener=lambda req, timeout: r, max_bytes=4)
+    assert r.amt == 5

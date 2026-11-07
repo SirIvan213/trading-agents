@@ -384,7 +384,7 @@ def test_blocked_a_raising_feed_is_unknown_with_the_safe_reason(exc, why):
 
 @pytest.mark.parametrize("body,why", [
     (b"<rss><channel>", "halt feed is not valid XML"),
-    (b"<html/>", "halt feed has no rss channel"),
+    (b"<html/>", "halt feed must have exactly one rss channel"),
     ("text, not bytes", "halt feed body is not bytes"),
     (halt_feed_xml(T0, [hi("TSLA", "T1", halt_date=TODAY)], num_items=9),
      "lists 1 items but numItems is 9"),
@@ -591,3 +591,39 @@ def test_the_nasdaq_halt_is_independent_of_trader_confidence(monkeypatch, tmp_pa
         result, *_ = run_scenario(monkeypatch, sub, "clean-buy", trader_confidence=conf)
         assert result.proposal.ok is False
         assert "Nasdaq trade halt today: T1" in result.proposal.reason
+
+
+# ============================ code review (#144) ============================
+
+def test_blocked_a_pubdate_in_the_future_is_unknown_not_fresh():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    NY = ZoneInfo("America/New_York")
+    from tests.order_helpers import gate_for, halts_ok
+    now = datetime(2026, 11, 3, 11, 0, tzinfo=NY)
+    halts = halts_ok(now, pub_ago_s=-24 * 3600)  # pubDate a day ahead
+    gate = gate_for("TSLA", now, halts=halts)
+    assert gate["status"] == "UNKNOWN"
+    assert "Nasdaq halt feed pubDate" in gate["reason"] and "is in the future" in gate["reason"]
+
+
+def test_a_pubdate_a_few_minutes_ahead_is_within_the_skew():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    NY = ZoneInfo("America/New_York")
+    from tests.order_helpers import gate_for, halts_ok
+    now = datetime(2026, 11, 3, 11, 0, tzinfo=NY)
+    assert gate_for("TSLA", now, halts=halts_ok(now, pub_ago_s=-60))["status"] == "CLEAR"
+
+
+def test_an_attribute_error_inside_the_fetch_is_not_reported_as_no_source():
+    from types import SimpleNamespace
+
+    from pipeline.events import halts_input
+
+    def broken():
+        raise AttributeError("inside the fetch")
+
+    out = halts_input(SimpleNamespace(halt_feed=broken))
+    assert out["ok"] is False and out["reason"] == "AttributeError"
+    assert halts_input(SimpleNamespace())["reason"] == "no halt feed source"

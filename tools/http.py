@@ -48,6 +48,7 @@ def get_bytes(
     *,
     opener: Callable | None = None,
     timeout: float = 10,
+    max_bytes: int | None = None,
 ) -> bytes:
     """GET `url` and return the raw body bytes.
 
@@ -57,7 +58,8 @@ def get_bytes(
 
     Raises RuntimeError on: HTTP error status, a refused redirect, a response from another
     origin, and a URL/network error or timeout. Messages name the URL path only (never the
-    query string, which may hold a key).
+    query string, which may hold a key). With `max_bytes`, at most max_bytes + 1 bytes are
+    read, so a caller can refuse an oversized body without holding all of it in memory.
     """
     open_fn = opener or _default_open
     path = _path(url)
@@ -67,7 +69,7 @@ def get_bytes(
             final = resp.geturl() if hasattr(resp, "geturl") else None
             if isinstance(final, str) and _origin(final) != _origin(url):
                 raise RuntimeError(f"response came from a different origin (requested {path})")
-            raw = resp.read()
+            raw = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             raise RuntimeError(f"redirect refused (HTTP {exc.code}) from {path}") from None

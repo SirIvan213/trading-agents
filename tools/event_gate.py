@@ -381,6 +381,10 @@ def _feed_halt_findings(symbol: str, now: datetime, halts: object) -> list[Findi
         return unknown("Nasdaq halt feed fetch is dated in the future")
     if now_utc - fetched.astimezone(UTC) > MAX_HALT_FEED_AGE:
         return unknown(f"Nasdaq halt feed is stale (fetched {fetched.astimezone(NY):%H:%M:%S} ET)")
+    if pub.astimezone(UTC) > fetched.astimezone(UTC) + FUTURE_SKEW:
+        # a clock off by more than a few minutes would switch the lag check off
+        return unknown(f"Nasdaq halt feed pubDate {pub.astimezone(NY):%Y-%m-%d %H:%M} ET is "
+                       "in the future")
     if fetched.astimezone(UTC) - pub.astimezone(UTC) > MAX_HALT_FEED_LAG:
         return unknown(f"Nasdaq halt feed not updated since {pub.astimezone(NY):%H:%M:%S} ET")
     sym, today = _compact(symbol), now.astimezone(NY).date()

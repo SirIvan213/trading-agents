@@ -68,7 +68,8 @@ HALT_CODES = {
 def fetch_halt_feed(opener: Callable | None = None) -> bytes:
     """GET the halt feed once (no key). Raises RuntimeError on transport errors. Callers go
     through HaltFeedCache, which enforces the once-a-minute polling rule."""
-    return get_bytes(HALT_FEED_URL, {"Accept": "application/rss+xml, text/xml"}, opener=opener)
+    return get_bytes(HALT_FEED_URL, {"Accept": "application/rss+xml, text/xml"}, opener=opener,
+                     max_bytes=MAX_BODY_BYTES)
 
 
 def _text(item: ET.Element, name: str) -> str:
@@ -80,23 +81,36 @@ def parse_halt_feed(body: object) -> dict:
     "halt_date" (ISO), "halt_time", "market", "reason", "resumption_date",
     "resumption_trade_time"}]} or {"ok": False, "reason"}.
 
-    Strict: not XML, a DOCTYPE/ENTITY declaration, no channel, no valid pubDate, a numItems that
-    is missing or does not match the item count (a cut-short feed), or ANY item without a
-    symbol, a MM/DD/YYYY halt date or an HH:MM:SS halt time makes the whole feed not ok."""
+    Strict: not UTF-8 (a BOM, another declared encoding, or bytes that do not decode), a
+    DOCTYPE/ENTITY declaration anywhere, not XML, not exactly one rss channel, items outside
+    that channel, no valid pubDate, a numItems that is missing or does not match the item
+    count (a cut-short feed), or ANY item without a symbol, a MM/DD/YYYY halt date or an
+    HH:MM:SS halt time makes the whole feed not ok."""
     if not isinstance(body, (bytes, bytearray)):
         return {"ok": False, "reason": "halt feed body is not bytes"}
     if len(body) > MAX_BODY_BYTES:
         return {"ok": False, "reason": "halt feed body is too large"}
-    head = bytes(body[:4096]).upper()
-    if b"<!DOCTYPE" in head or b"<!ENTITY" in bytes(body).upper():
+    raw = bytes(body)
+    if raw.startswith((b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")):
+        return {"ok": False, "reason": "halt feed has a byte-order mark (UTF-8 required)"}
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"ok": False, "reason": "halt feed is not UTF-8"}
+    decl = re.match(r"\s*<\?xml[^>]*encoding=[\"']([^\"']+)[\"']", text)
+    if decl and decl.group(1).strip().lower() not in ("utf-8", "utf8"):
+        return {"ok": False, "reason": "halt feed declares a non-UTF-8 encoding"}
+    upper = text.upper()
+    if "<!DOCTYPE" in upper or "<!ENTITY" in upper:
         return {"ok": False, "reason": "halt feed declares a DOCTYPE or entities"}
     try:
-        root = ET.fromstring(bytes(body))
+        root = ET.fromstring(raw)
     except ET.ParseError:
         return {"ok": False, "reason": "halt feed is not valid XML"}
-    channel = root.find("channel") if root.tag == "rss" else None
-    if channel is None:
-        return {"ok": False, "reason": "halt feed has no rss channel"}
+    channels = root.findall("channel") if root.tag == "rss" else []
+    if len(channels) != 1:
+        return {"ok": False, "reason": "halt feed must have exactly one rss channel"}
+    channel = channels[0]
     try:
         pub = parsedate_to_datetime((channel.findtext("pubDate") or "").strip())
         if pub.tzinfo is None or pub.utcoffset() is None:
@@ -104,6 +118,8 @@ def parse_halt_feed(body: object) -> dict:
     except (TypeError, ValueError, IndexError):
         return {"ok": False, "reason": "halt feed has no valid pubDate"}
     raw_items = channel.findall("item")
+    if len(list(root.iter("item"))) != len(raw_items):
+        return {"ok": False, "reason": "halt feed has items outside its channel"}
     num = (channel.findtext("ndaq:numItems", default="", namespaces=NS) or "").strip()
     if not num.isdigit() or int(num) != len(raw_items):
         return {"ok": False, "reason": (

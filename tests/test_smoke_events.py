@@ -46,7 +46,8 @@ def test_dry_run_prints_the_plan_requests_nothing_and_exits_3(monkeypatch, capsy
     assert "== smoke_events: dry plan only, NOTHING was requested ==" in out
     assert "symbols: AAPL, TSLA" in out
     assert HALT_FEED_URL in out and "FMP earnings calendar" in out and "SEC EDGAR" in out
-    assert "Alpaca news" in out and "No Claude call, no order, no journal write." in out
+    assert "Alpaca news" in out
+    assert "No Claude call, no order, no decision-journal write (only the FMP cache file)." in out
     assert "--live" in out
     for k in SENTINELS:
         assert f"{k} set" in out
