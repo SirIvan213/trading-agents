@@ -1,7 +1,7 @@
 # trading-agents
 
 A multi-agent intraday trading research system. Specialist LLM agents analyze a
-stock, argue for and against a trade, and propose BUY, SELL or PASS.
+stock, argue for and against a trade, and propose BUY or PASS (long only).
 Deterministic code then sizes the order, checks it against hard risk limits, and
 asks a human before anything reaches a **paper** trading account.
 
