@@ -88,6 +88,9 @@ def _safe_json(block: dict) -> str:
     return json.dumps(block, indent=1).replace("<", "\\u003c").replace(">", "\\u003e")
 
 
+safe_json = _safe_json  # public name, shared with the Trader payload
+
+
 def build_payload(
     packet: DecisionPacket, opponent: BaseModel | None, round_no: int
 ) -> str:
