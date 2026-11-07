@@ -47,6 +47,8 @@ Allowed values (issue #87):
     is to stop the debaters inventing prices, sizes, stops or targets.
 Any other number in a money pattern is a violation. Share counts NOT in the evidence (e.g. a
 model-invented "CEO sold 50,000 shares") are flagged; the model must rephrase without them.
+Evidence tokens that are labels, not values, are never quoted: 8-K item numbers, clock times,
+parts of a YYYY-MM-DD date and zero-padded identifiers (a CIK).
 Accepted consequence: a small integer in evidence ("2 of 3 analysts") also allows it in a
 money pattern ("buy 2"). Nothing in debate text is ever used to build an order (rule 2).
 
@@ -177,11 +179,24 @@ def _verbatim(raw: str) -> str:
     return raw.rstrip(",")
 
 
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _not_a_value(text: str, start: int, end: int, raw: str, dates: list[range]) -> bool:
+    """True for evidence tokens that are labels, not values: 8-K item numbers and clock
+    times (the same rules the debate side exempts), parts of a YYYY-MM-DD date, and
+    zero-padded identifiers such as a CIK ("0001318605")."""
+    if _exempt(text, start, end) or any(start in r for r in dates):
+        return True
+    return len(raw) > 1 and raw[0] == "0" and raw[1].isdigit()
+
+
 def quoted_values(packet: DecisionPacket) -> frozenset[str]:
     """Every number written in analyst evidence, verbatim, from reports whose run is ok.
 
     A report whose run failed (the neutral fallback) contributes nothing: its single evidence
-    point is runner text, not analysis.
+    point is runner text, not analysis. Item numbers, clock times, dates and zero-padded
+    identifiers are skipped, so "bar at 10:15" never makes "buy 15 shares" quotable.
     """
     out: set[str] = set()
     for agent, report in packet.reports.items():
@@ -189,7 +204,12 @@ def quoted_values(packet: DecisionPacket) -> frozenset[str]:
         if run is None or not run.ok:
             continue
         for ev in report.evidence:
-            out.update(_verbatim(m.group(0)) for m in _TOKEN.finditer(ev.point))
+            point = ev.point
+            dates = [range(m.start(), m.end()) for m in _DATE.finditer(point)]
+            for m in _TOKEN.finditer(point):
+                raw = _verbatim(m.group(0))
+                if not _not_a_value(point, m.start(), m.start() + len(raw), raw, dates):
+                    out.add(raw)
     return frozenset(out)
 
 

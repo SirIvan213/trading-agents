@@ -440,3 +440,20 @@ def test_guard_still_blocks_non_loopback():
             s.connect(("93.184.216.34", 80))
     finally:
         s.close()
+
+
+def test_analyst_retries_reach_the_packet_run_records():
+    """Issue #87: a rejected first attempt is kept on packet.runs[agent].retries."""
+    bad = response([text(report_json(
+        agent="sentiment", symbol="ZZZZ",
+        evidence=[{"point": "x", "source": "get_news"}]))], "end_turn")
+    clients = {
+        "technical": FakeClient(scripted("technical")),
+        "sentiment": FakeClient([first("sentiment"), bad, good("sentiment")]),
+        "fundamentals": FakeClient(scripted("fundamentals")),
+    }
+    packet = run(clients=clients)
+    assert packet.all_ok
+    assert [(r.attempt, r.reason) for r in packet.runs["sentiment"].retries] == [
+        (1, "symbol must be ABCD")]
+    assert packet.runs["technical"].retries == [] and packet.runs["fundamentals"].retries == []

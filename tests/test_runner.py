@@ -328,7 +328,7 @@ def test_red_flags_entry_is_an_allowed_catalyst_name():
 
 
 ITEM_SESSION = ScriptSession({"get_news": (
-    {"headlines": [], "catalysts": ["earnings", "item_9.01"], "red_flags": ["bankruptcy"]},
+    {"headlines": [], "catalysts": ["earnings", "item_5.08"], "red_flags": ["bankruptcy"]},
     False)})
 
 
@@ -337,11 +337,11 @@ ITEM_SESSION = ScriptSession({"get_news": (
     (" earnings ", "earnings"),
     ("EARNINGS", "earnings"),
     ("earnings", "earnings"),
-    ("item 9.01", "item_9.01"),
-    ("Item-9.01", "item_9.01"),
-    ("item__9.01", "item_9.01"),
-    ("ITEM - 9.01", "item_9.01"),
-    ("  item_9.01  ", "item_9.01"),
+    ("item 5.08", "item_5.08"),
+    ("Item-5.08", "item_5.08"),
+    ("item__5.08", "item_5.08"),
+    ("ITEM - 5.08", "item_5.08"),
+    ("  item_5.08  ", "item_5.08"),
     ("Bankruptcy", "bankruptcy"),
 ])
 def test_catalyst_name_variants_validate_and_store_the_tools_spelling(given, stored):
@@ -357,14 +357,14 @@ def test_catalyst_name_variants_validate_and_store_the_tools_spelling(given, sto
 
 def test_stored_spelling_is_the_tools_even_when_the_tool_uses_spaces():
     session = ScriptSession({"get_news": (
-        {"headlines": [], "catalysts": ["Item 9.01"], "red_flags": []}, False)})
-    run, _ = go([call_news(), end(catalysts=[{"name": "item_9.01", "source": "get_news"}])],
+        {"headlines": [], "catalysts": ["Item 5.08"], "red_flags": []}, False)})
+    run, _ = go([call_news(), end(catalysts=[{"name": "item_5.08", "source": "get_news"}])],
                 session=session)
-    assert run.ok is True and run.report.catalysts[0].name == "Item 9.01"
+    assert run.ok is True and run.report.catalysts[0].name == "Item 5.08"
 
 
 @pytest.mark.parametrize("invented", ["earning", "item 9.02", "earnings!", "ear nings",
-                                      "item9.01", "moon landing", "", "   "])
+                                      "item5.08", "moon landing", "", "   "])
 def test_invented_catalyst_names_are_still_rejected(invented):
     bad = end(catalysts=[{"name": invented, "source": "get_news"}])
     run, client = go([call_news(), bad, bad],

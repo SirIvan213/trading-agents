@@ -21,7 +21,7 @@ from agents.schemas import (
     RetryRecord,
 )
 from tests.debate_helpers import AS_OF, bear_json, bull_json, make_plan, reply
-from tests.fakes import FakeClient, load_fixture
+from tests.fakes import FakeClient, load_fixture, response, text, tool_use
 from tests.test_runner import OPUS, SONNET, call_news, end, go, sdk_message
 from tools import news as N
 from tools.news import NY
@@ -82,7 +82,7 @@ def test_quoted_values_never_include_plan_text_or_catalysts():
 @pytest.mark.parametrize("text", [
     "the stop is 2.54% below",            # (c) strong keyword, quoted figure
     "price 1.64 relative volume",          # (c)
-    "risk of a reversal after 7.47% up",   # weak keyword
+    "risk 7.47 on the day",                # weak keyword + decimals
     "EPS of 0.46 is soft",                 # bare 2-decimal (d)
     "3,225,000,000 shares outstanding",    # (b) size, quoted from evidence
     "$0.46 EPS",                           # (a)
@@ -127,6 +127,44 @@ def test_default_quoted_is_empty_and_old_behaviour_unchanged():
     assert money_violations("entry 102.00", ALLOWED) == []
 
 
+@pytest.mark.parametrize("text", ["risk 7.47 on the day", "price 7.47 above the open"])
+def test_evidence_texts_used_above_really_need_the_quoted_values(text):
+    assert money_violations(text, ALLOWED)  # flagged without quoted values ...
+    assert money_violations(text, ALLOWED, QUOTED) == []  # ... allowed with them
+
+
+LABELS = ("breakout at 10:15 on 2026-11-05 after the Item 2.02 8-K, item_9.01 attached; "
+          "CIK 0001318605; filed 2026-11-04T16:30:00-05:00")
+
+
+def labels_packet(point: str = LABELS) -> DecisionPacket:
+    rep = PKT.reports["technical"].model_copy(
+        update={"evidence": [Evidence(point=point, source="get_bars")]})
+    return PKT.model_copy(update={"reports": {"technical": rep}})
+
+
+def test_labels_in_evidence_are_not_quotable_values():
+    q = quoted_values(labels_packet())
+    for label in ("10", "15", "2026", "11", "05", "04", "16", "30", "00", "2.02", "9.01",
+                  "0001318605"):
+        assert label not in q, label
+
+
+@pytest.mark.parametrize("text", [
+    "buy 15 shares", "stop 10", "sell 11 shares", "$2026", "target 2.02", "$0001318605",
+    "size of 30", "price 9.01",
+])
+def test_labels_do_not_unlock_money_mentions(text):
+    q = quoted_values(labels_packet())
+    assert money_violations(text, ALLOWED, q), text
+
+
+def test_plain_values_next_to_labels_are_still_quoted():
+    q = quoted_values(labels_packet("at 10:15 the stock was 2.54% up on 1.64 relative volume"))
+    assert q == {"2.54", "1.64"}
+    assert quoted_values(labels_packet("dividend 0.26 per share")) == {"0.26"}  # 0.x is a value
+
+
 # ---------------- validator and agents ----------------
 
 def test_validator_accepts_evidence_quotes_and_rejects_count_only():
@@ -151,7 +189,7 @@ def test_retry_is_recorded_with_count_only_reason():
 
 
 def test_no_retry_when_first_attempt_passes():
-    c = FakeClient([reply(bull_json(argument="up 7.47% on the day"))])
+    c = FakeClient([reply(bull_json(argument="price 7.47 above the open"))])
     r = run_bull(PKT, client=c, config=AgentConfig())
     assert r.ok and r.retries == [] and len(c.calls) == 1
 
@@ -236,6 +274,18 @@ def test_explicit_iteration_model_is_kept():
     assert [i.model for i in call_record(msg, OPUS).iterations] == ["claude-x", SONNET]
 
 
+def test_plain_call_with_no_model_anywhere_stays_none():
+    msg = sdk_message(usage=usage(it("message"))).model_copy(update={"model": ""})
+    assert [i.model for i in call_record(msg, SONNET).iterations] == [None]
+
+
+def test_fallback_block_without_from_model_leaves_blank():
+    block = {**FB_BLOCK, "from": {"model": ""}}
+    msg = sdk_message(content=[block, {"type": "text", "text": "{}"}],
+                      usage=usage(it("message"), it("fallback_message", SONNET)))
+    assert [i.model for i in call_record(msg, OPUS).iterations] == [None, SONNET]
+
+
 def test_unmatched_hop_count_leaves_blank_rather_than_guess():
     msg = sdk_message(content=[FB_BLOCK, {"type": "text", "text": "{}"}],
                       usage=usage(it("message"), it("message"), it("fallback_message", SONNET)))
@@ -265,3 +315,37 @@ def test_filing_with_only_item_9_01_has_no_catalysts():
 def test_9_01_is_listed_as_a_non_catalyst_item():
     assert "9.01" in N.NON_CATALYST_ITEMS and "9.01" not in N.ITEM_CATALYSTS
 
+
+
+# ---------------- smoke scripts print retries (fake clients, nothing billed) ----------------
+
+def test_smoke_debate_report_prints_each_retry(capsys):
+    from pipeline import smoke_debate as S
+    deb = run_debate(PKT, clients=FakeClient([
+        reply(bull_json(argument="target 110.25")), reply(bull_json()), reply(bear_json())]),
+        configs={"bull": AgentConfig(), "bear": AgentConfig()}, rounds=1)
+    reports = {a: PKT.reports["technical"].model_copy(update={"agent": a})
+               for a in ("technical", "sentiment", "fundamentals")}
+    runs = {a: run_record(a) for a in reports}
+    pkt = PKT.model_copy(update={"reports": reports, "runs": runs, "all_ok": True})
+    cfgs = {a: AgentConfig() for a in (*reports, "bull", "bear")}
+    S.report(pkt, deb, cfgs)
+    out = capsys.readouterr().out
+    assert ("r1 bull RETRY after attempt 1: invalid_output: "
+            "case states 1 money value(s) not in the decision packet") in out
+    assert "retries: 1 (1 from the money check)" in out
+    assert "110.25" not in out.split("-- API calls")[1]
+
+
+def test_smoke_technical_prints_retry(capsys, monkeypatch):
+    from pipeline import smoke_technical as S
+    monkeypatch.setattr(S, "make_client", lambda *a, **k: pytest.fail("make_client called"))
+    rep = {"agent": "technical", "stance": "neutral", "confidence": 0.5, "catalysts": [],
+           "evidence": [{"point": "bars fetched", "source": "get_bars"}]}
+    queue = [
+        response([tool_use("u1", "get_bars", {"symbol": "TSLA"})], "tool_use"),
+        response([text(json.dumps({**rep, "symbol": "ZZZZ"}))], "end_turn"),
+        response([text(json.dumps({**rep, "symbol": "TSLA"}))], "end_turn"),
+    ]
+    assert S.main([], client=FakeClient(queue)) == 0
+    assert "RETRY after attempt 1: invalid_output: symbol must be TSLA" in capsys.readouterr().out

@@ -10,11 +10,12 @@ tests/fixtures/ (synthetic data in the real API shapes, for a run "as of" 2026-1
     sec_companyfacts_tsla.json                         XBRL quarterly facts (fundamentals)
 
 Nothing is sent unless --billed is given (CLAUDE.md rule 6); without it the script prints
-what it would run and exits 3. Every retried attempt's rejection reason (count-only: it never
-quotes a rejected value) is printed under its agent's API calls. The API key is read from
-ANTHROPIC_API_KEY, loaded from .env in the repo root (or --env-file PATH; --no-dotenv skips
-it) if present (a non-empty exported variable wins). The key is never printed. Without flags
-each agent uses its own configured model and effort (config_for:
+what it would run and exits 3. Every retried attempt's rejection reason is printed under its
+agent's API calls (a debate money-check reason is count-only and never quotes the rejected
+value; an analyst reason may name the field or catalyst the model got wrong). The API key
+is read from ANTHROPIC_API_KEY, loaded from .env in the repo root (or --env-file PATH;
+--no-dotenv skips it) if present (a non-empty exported variable wins). The key is never
+printed. Without flags each agent uses its own configured model and effort (config_for:
 TRADING_AGENTS_<AGENT>_MODEL / _EFFORT, then TRADING_AGENTS_MODEL / _EFFORT, then the
 defaults); --model / --effort override all five agents (technical, sentiment, fundamentals,
 bull, bear). Debate rounds come from TRADING_AGENTS_DEBATE_ROUNDS (default 2). Risk limits
@@ -44,6 +45,7 @@ from datetime import datetime
 from typing import Any
 
 from agents.debate import resolve_rounds, run_debate
+from agents.debate_common import MONEY_REASON
 from agents.llm import EFFORTS, AgentConfig, config_for, make_client
 from agents.orchestrator import AGENTS, run_analysts
 from agents.schemas import CallRecord, DebateRecord, DecisionPacket, RetryRecord
@@ -111,7 +113,8 @@ def _print_calls(label: str, calls: list[CallRecord]) -> None:
 
 
 def _print_retries(label: str, retries: list[RetryRecord]) -> None:
-    # The stored reason is count-only (it never quotes a rejected money value), so it is safe.
+    # Money-check reasons are count-only (never the rejected value); analyst reasons may
+    # name a source or catalyst, as the final `reason` already does.
     for r in retries:
         print(f"  {label} RETRY after attempt {r.attempt}: {r.reason_code}: {r.reason}")
 
@@ -170,7 +173,7 @@ def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, Agen
     print(f"serving model(s): {', '.join(served) or 'none (no API response)'}")
     print(f"fallback ran: {'yes' if any(c.fallback_ran for c in all_calls) else 'no'}")
     print(f"retries: {len(all_retries)} "
-          f"({sum('money value' in r.reason for r in all_retries)} from the money check)")
+          f"({sum(MONEY_REASON in r.reason for r in all_retries)} from the money check)")
 
     t = token_totals(all_calls)
     print(f"\n-- Tokens (sum over all {len(all_calls)} API calls) --")

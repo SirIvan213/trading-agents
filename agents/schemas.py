@@ -101,8 +101,9 @@ class CallRecord(BaseModel):
 class RetryRecord(BaseModel):
     """Why one attempt was rejected and retried (issue #87).
 
-    `reason` is the stored, count-only reason: it never quotes a rejected money value (the
-    detailed hint goes only to the model in the retry message).
+    `reason` is the stored reason, the same text a final failure would store. For the debate
+    money check it is count-only and never quotes a rejected value (the detailed hint goes
+    only to the model); an analyst reason may name the source or catalyst it rejected.
     """
 
     attempt: int = Field(description="1-based attempt that failed and was retried")

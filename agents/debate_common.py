@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field, field_validator
 from agents.money_guard import allowed_values, money_violations, quoted_values
 from agents.schemas import BearCase, BullCase, DecisionPacket
 
+# Stored reason prefix for a money-guard rejection (the count follows); smoke_debate counts on it.
+MONEY_REASON = "money value(s) not in the decision packet"
+
 _PLAN_ID_DOC = (
     "the plan_id from packet.exit_plans this case is about; empty string means no plan"
 )
@@ -105,7 +108,7 @@ def make_validator(
             bad.extend(money_violations(text, allowed, quoted))
         if bad:
             return (
-                f"case states {len(bad)} money value(s) not in the decision packet",
+                f"case states {len(bad)} {MONEY_REASON}",
                 "case states money values that are neither a plan record value nor quoted "
                 "verbatim from analyst evidence: " + "; ".join(bad[:5]),
             )
