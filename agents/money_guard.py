@@ -39,8 +39,9 @@ Allowed values (issue #87):
   - Plan values: entry, stop, target, risk_per_share and reward_to_risk of every plan, matched
     Decimal-equal ("101.5" == "101.50"). They never allow a (b) size: "104 shares" is flagged
     even when 104.00 is a plan's target.
-  - Quoted values: each ok analyst report's `confidence` as written in the payload ("0.6"),
-    and any number written in the evidence of an analyst report whose run is ok,
+  - Quoted values: each ok analyst report's `confidence` as written in the payload ("0.6",
+    "1.0", "0.6666666666666666"), and any number written in the evidence of an analyst report
+    whose run is ok,
     matched VERBATIM as a string ("2.54" allows "2.54" but not "2.540" or "2,54"; "50,000"
     allows "50,000" but not "50000"). A quoted value is allowed in every pattern, sizes
     included: "CEO sold 50,000 shares" passes when an analyst's evidence says "50,000".
@@ -214,7 +215,9 @@ def quoted_values(packet: DecisionPacket) -> frozenset[str]:
         if run is None or not run.ok:
             continue
         # The report's confidence as written in the debate payload (JSON, e.g. "0.6"): the
-        # debaters quote it ("capped at 0.6"). Schema-bounded to [0, 1]; never reaches sizing.
+        # debaters quote it ("capped at 0.6"). Schema-bounded to [0, 1]. Like every quoted
+        # value it passes in any pattern, sizes included ("buy 0.6 shares"); debate text never
+        # reaches sizing or orders (CLAUDE.md rule 2, enforced in pipeline/orders.py).
         out.add(json.dumps(report.confidence))
         for ev in report.evidence:
             point = ev.point

@@ -33,10 +33,33 @@ def test_bull_case_with_smoke_text_passes_first_try():
     assert r.ok and len(c.calls) == 1 and r.retries == []
 
 
-def test_confidence_is_quoted_exactly_as_written_in_the_payload():
-    payload = user_json({"messages": [{"content": build_payload(PKT, None, 1)}]})
+@pytest.mark.parametrize("conf", [0.6, 1.0, 0.0, 1, 0, 2 / 3, 0.1 + 0.2, 1e-05])
+def test_confidence_is_quoted_exactly_as_written_in_the_payload(conf):
+    rep = PKT.reports["technical"].model_copy(update={"confidence": conf})
+    rep = type(rep).model_validate(rep.model_dump())  # schema coercion (int 1 -> 1.0)
+    pkt = PKT.model_copy(update={"reports": {**PKT.reports, "technical": rep}})
+    payload = user_json({"messages": [{"content": build_payload(pkt, None, 1)}]})
     written = json.dumps(payload["reports"]["technical"]["confidence"])
-    assert written == "0.6" and written in quoted_values(PKT)
+    assert written in quoted_values(pkt)
+    assert money_violations(f"capped at {written}", allowed_values(pkt), quoted_values(pkt)) == []
+
+
+def test_two_ok_reports_both_quotable_and_ok_zero_confidence_is_quotable():
+    tech = PKT.reports["technical"]
+    sent = tech.model_copy(update={"agent": "sentiment", "confidence": 0.0})
+    pkt = PKT.model_copy(update={
+        "reports": {"technical": tech, "sentiment": sent},
+        "runs": {"technical": run_record("technical"), "sentiment": run_record("sentiment")}})
+    q = quoted_values(pkt)
+    assert {"0.6", "0.0"} <= q  # an OK report's 0.0 is quotable, unlike a failed run's
+
+
+@pytest.mark.parametrize("text", ["buy 0.6 shares", "$0.6"])
+def test_quoted_confidence_shares_the_sizes_included_behaviour(text):
+    # Documented: like every quoted value, confidence passes in any pattern. Debate text never
+    # reaches sizing or orders (rule 2); see follow-up on restricting it to non-size patterns.
+    assert money_violations(text, allowed_values(PKT)) != []
+    assert money_violations(text, allowed_values(PKT), quoted_values(PKT)) == []
 
 
 @pytest.mark.parametrize("text", ["capped at 0.60", "capped at 0.7",
