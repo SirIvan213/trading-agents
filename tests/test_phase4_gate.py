@@ -29,6 +29,7 @@ from agents.schemas import (
     TraderDecision,
 )
 from agents.tool_registry import ToolSession, price_levels
+from pipeline.ledger import LedgerError, PlanLedger
 from pipeline.orders import build_order, select_plan
 from tests.fakes import (
     NOON,
@@ -555,22 +556,37 @@ def packet_with(plans, *, fake: bool, confidence=0.7, stance="bullish") -> Decis
         all_ok=True, exit_plans=plans)
 
 
+def ledger_with(plans, symbol="TSLA", accept=True) -> PlanLedger:
+    """A sealed ledger holding these plans, as the pipeline would record them (#64)."""
+    led = PlanLedger(symbol)
+    for p in plans:
+        led.record(p)
+    led.seal(accept=accept)
+    return led
+
+
 def test_select_plan_returns_record_by_id():
     a, b = plan_record("plan-1"), plan_record("plan-2", entry="365.00")
-    packet = packet_with([a, b], fake=False)
-    assert select_plan(packet, "plan-1") is a
-    assert select_plan(packet, "plan-2") is b
+    led = ledger_with([a, b])
+    assert select_plan(led, "plan-1") == a
+    assert select_plan(led, "plan-2") == b
+    assert select_plan(led, "plan-1") is not a  # a fresh validated copy, never the original
 
 
 @pytest.mark.parametrize("bad", ["plan-3", "", "PLAN-1", "plan-1 ", "999", "0"])
 def test_select_plan_unknown_id_raises_keyerror(bad):
     with pytest.raises(KeyError):
-        select_plan(packet_with([plan_record("plan-1")], fake=False), bad)
+        select_plan(ledger_with([plan_record("plan-1")]), bad)
 
 
-def test_select_plan_on_empty_packet_raises_keyerror():
+def test_select_plan_on_empty_ledger_raises_keyerror():
     with pytest.raises(KeyError):
-        select_plan(packet_with([], fake=False), "plan-1")
+        select_plan(ledger_with([]), "plan-1")
+
+
+def test_select_plan_never_reads_a_packet():
+    with pytest.raises(KeyError):
+        select_plan(packet_with([plan_record("plan-1")], fake=False), "plan-1")  # type: ignore[arg-type]
 
 
 def test_fake_price_text_has_no_effect_on_order_or_verdict():
@@ -588,8 +604,9 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
         symbol="TSLA", action="BUY", confidence=0.99, plan_id=rec.plan_id,
         reasoning="; ".join(FAKE_TEXT))
     assert decision.symbol == dirty.symbol and decision.action == "BUY"
-    o_clean = build_order(select_plan(clean, "plan-1"), LIMITS, FRESH)
-    o_dirty = build_order(select_plan(dirty, "plan-1"), LIMITS, FRESH)
+    led = ledger_with([rec])  # both packets carry the same plan; the order reads the ledger
+    o_clean = build_order(select_plan(led, "plan-1"), LIMITS, FRESH)
+    o_dirty = build_order(select_plan(led, "plan-1"), LIMITS, FRESH)
     assert o_clean == o_dirty
     assert o_clean["ok"] is True
     assert o_clean["order"]["entry"] == "364.18" and o_clean["order"]["stop_loss"] == "358.32"
@@ -756,7 +773,8 @@ def test_build_order_signature_pinned():
 
 
 def test_select_plan_signature_pinned():
-    assert _params(select_plan) == ["packet", "plan_id"]
+    # Deliberately changed in issue #64: plans come from the pipeline's ledger, not the packet.
+    assert _params(select_plan) == ["ledger", "plan_id"]
 
 
 def test_signature_pin_detects_added_parameter():
@@ -862,7 +880,7 @@ def test_two_confidences_same_plan_same_order():
 
     def order_for(decision, packet):
         assert decision.symbol == packet.symbol
-        return build_order(select_plan(packet, "plan-1"), LIMITS, FRESH)
+        return build_order(select_plan(ledger_with(packet.exit_plans), "plan-1"), LIMITS, FRESH)
 
     o_lo = order_for(d_lo, lo)
     o_hi = order_for(d_hi, hi)
@@ -1019,13 +1037,10 @@ def test_build_order_model_construct_valid_record_also_sizes(size_spy):
 
 # ===================== select_plan symbol check =====================
 
-def test_select_plan_symbol_mismatch_raises_keyerror():
-    aapl_packet = packet_with([plan_record(symbol="TSLA")], fake=False)
-    aapl_packet = aapl_packet.model_copy(update={"symbol": "AAPL"})
-    with pytest.raises(KeyError, match="plan symbol does not match packet"):
-        select_plan(aapl_packet, "plan-1")
+def test_ledger_refuses_a_plan_for_another_symbol():
+    with pytest.raises(LedgerError, match="plan symbol does not match the ledger"):
+        PlanLedger("AAPL").record(plan_record(symbol="TSLA"))
 
 
 def test_select_plan_matching_symbol_still_returned():
-    packet = packet_with([plan_record(symbol="TSLA")], fake=False)
-    assert select_plan(packet, "plan-1").symbol == "TSLA"
+    assert select_plan(ledger_with([plan_record(symbol="TSLA")]), "plan-1").symbol == "TSLA"

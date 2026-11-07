@@ -14,6 +14,7 @@ from typing import Any
 
 from agents.schemas import ExitPlanRecord
 from pipeline.data import MarketData, session_window
+from pipeline.ledger import PlanLedger
 from pipeline.market import NY, ny_today, run_scan
 from tools.bars import parse_bars, regular_session, summarize
 from tools.config import Limits
@@ -98,6 +99,9 @@ class ToolSession:
     criteria: ScanCriteria
     summary: dict | None = None
     exit_plans: list[ExitPlanRecord] = field(default_factory=list)
+    # The pipeline's plan ledger (issue #64): each plan is recorded the moment exit_plan
+    # produces it. None outside a pipeline run (tests, the technical smoke script).
+    ledger: PlanLedger | None = None
 
     def execute(self, name: str, tool_input: Any) -> tuple[dict, bool]:
         """Run a tool; return (result, is_error). Never raises."""
@@ -240,6 +244,8 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
             structure_level=structure_level,
             as_of=s.now.astimezone(NY).isoformat(),
         )
+        if s.ledger is not None:
+            s.ledger.record(record)  # LedgerError (sealed, wrong symbol) -> tool error below
         s.exit_plans.append(record)
         result = {**result, "plan_id": record.plan_id}
     return result, False

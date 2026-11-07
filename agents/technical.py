@@ -15,6 +15,7 @@ from agents.runner import AnalystRun, AnalystSpec, output_schema, run_analyst
 from agents.schemas import AnalystReport, CallRecord
 from agents.tool_registry import TOOLS, ToolSession
 from pipeline.data import MarketData
+from pipeline.ledger import PlanLedger
 from pipeline.market import ny_today
 from tools.config import Limits, load_limits
 from tools.scan import ScanCriteria, validate_symbols
@@ -35,8 +36,12 @@ def run_technical(
     criteria: ScanCriteria | None = None,
     calls_sink: list[CallRecord] | None = None,
     cancel: threading.Event | None = None,
+    ledger: PlanLedger | None = None,
 ) -> AnalystRun:
     """Analyse one symbol and return the full AnalystRun (report, ok flag, call records).
+
+    `ledger`, if given, is the pipeline's plan ledger: plan_exit records every plan into it
+    as it is made (issue #64). The caller seals it.
 
     Raises ValueError for a naive `now`, an invalid symbol, or an unreadable/invalid limits
     config ("limits config is invalid"). The last is the one deliberate loud failure: a
@@ -58,6 +63,7 @@ def run_technical(
         data=data,
         limits=limits,
         criteria=criteria or ScanCriteria(),
+        ledger=ledger,
     )
     cfg = config if config is not None else config_for("technical")
     return run_analyst(
