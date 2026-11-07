@@ -17,16 +17,15 @@ from pipeline.data import MarketData, session_window
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY, ny_today, run_scan
 from tools.bars import parse_bars, regular_session, summarize
-from tools.config import Limits
+from tools.config import REWARD_MULTIPLES, Limits
 from tools.exit_plan import exit_plan
 from tools.plan_labels import plan_labels
 from tools.scan import ScanCriteria, validate_symbols
 
 MAX_SCAN_SYMBOLS = 50
 PLAN_EXIT_KEYS = frozenset({"setup", "entry", "level", "reward_multiple"})
-# The only reward multiples the model may pick (a menu, not a number it supplies). exit_plan
-# computes the target; values above limits.max_reward_multiple are refused.
-REWARD_MULTIPLES = ("1", "1.5", "2", "2.5", "3")
+# REWARD_MULTIPLES (tools.config) is the only menu the model may pick from. exit_plan computes
+# the target; values above the plan's suggested_multiple are refused here.
 
 TOOLS: list[dict[str, Any]] = [
     {

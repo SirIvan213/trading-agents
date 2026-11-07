@@ -97,8 +97,13 @@ _C = re.compile(
 )
 _D = re.compile(r"(?<![\d.,])(\d+\.\d{2})(?!\d)(?!\s*%)(?!\s*x\b)", re.I)
 _ITEM = re.compile(r"item[\s_-]*$", re.I)
-# A calendar date in debate text; digit boundaries so "12026-11-021" is not one.
-_DATE_IN_TEXT = re.compile(r"(?<![\d.,])\d{4}-\d{2}-\d{2}(?!\d)(?!\.\d)")
+# A real calendar date in debate text (month 01-12, day 01-31); digit boundaries so
+# "12026-11-021" is not one, and not followed by ",<digit>" so "2026-11-02,500 shares" still
+# exposes a share count. "9999-99-99" or "0101-50-00" is not a date and is scanned as usual.
+_DATE_IN_TEXT = re.compile(
+    r"(?<![\d.,])(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+    r"(?!\d)(?!\.\d)(?!,\d)"
+)
 _CLOCK_AFTER = re.compile(r":\d\d")
 
 

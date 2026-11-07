@@ -130,6 +130,13 @@ def test_numbers_inside_a_date_are_not_money_mentions(text):
 @pytest.mark.parametrize("text,mention", [
     ("buy 300 shares on 2026-11-02", "300 shares"),
     ("$2026-11-02", "$2026"),
+    # code review: a comma-joined number after a date, and impossible "dates", stay visible
+    ("filed 2026-11-02,500 shares", "500 shares"),
+    ("buy 2026-11-02,500 shares", "500 shares"),
+    ("entry 0101-50-00", "entry 0101"),
+    ("stop 9999-99-99", "stop 9999"),
+    ("target 2026-13-02", "target 2026"),
+    ("limit 2026-11-32", "limit 2026"),
 ])
 def test_dates_do_not_hide_real_violations(text, mention):
     bad = money_violations(text, ALLOWED)
@@ -190,3 +197,5 @@ def test_trader_prompt_decides_on_labels():
     assert "minimum-multiple plan" in t
     assert "every plan has `labels.extended` true or null" in t
     assert "PASS when" in t
+    assert "`labels.atr_5m_provisional` true" in t and "weaker evidence" in t
+    assert "weaker evidence" in prompt("bear")

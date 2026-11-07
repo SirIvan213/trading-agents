@@ -11,6 +11,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
 
+# The only reward multiples the Technical analyst may request from plan_exit (a menu, not a
+# number it supplies). good_setup_multiple must be one of them, so the default target is
+# always one the model could also ask for.
+REWARD_MULTIPLES = ("1", "1.5", "2", "2.5", "3")
+
 # Regular session bounds (US/Eastern). Defined here so risk_check can import them
 # without a circular import.
 MARKET_OPEN = time(9, 30)
@@ -104,6 +109,10 @@ def validate_limits(limits: Limits) -> None:
         if not (limits.min_reward_to_risk <= good <= limits.max_reward_multiple):
             problems.append(
                 "good_setup_multiple must be between min_reward_to_risk and max_reward_multiple"
+            )
+        if good.is_finite() and not any(good == Decimal(m) for m in REWARD_MULTIPLES):
+            problems.append(
+                f"good_setup_multiple must be one of {', '.join(REWARD_MULTIPLES)}, got {good}"
             )
     except (TypeError, ArithmeticError):
         pass  # already reported above

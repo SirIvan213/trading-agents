@@ -6,11 +6,16 @@ plan, the session VWAP and the 5-minute ATR, against thresholds in Limits:
 
   extended          entry - vwap > max_extension_atr_5m * atr_5m   (None if unknown)
   tight_stop        risk_per_share <= max_stop_atr_5m * atr_5m     (None if unknown)
-  structural_stop   the stop sits under real structure: or_low, or_high, vwap or session_low
+  structural_stop   the stop sits under real structure: or_low, or_high, vwap or session_low.
+                    With entry = last_close (issue #118) the other levels (last_close,
+                    session_high) are at or above entry and exit_plan refuses them, so this is
+                    a backstop that is True on every plan plan_exit returns today.
   suggested_multiple
-      good_setup_multiple when extended is False, tight_stop is True and structural_stop is
-      True; otherwise the minimum multiple, max(min_reward_to_risk, 1). Unknown labels never
-      earn the higher multiple (fails closed).
+      good_setup_multiple when extended is False, tight_stop is True, structural_stop is True
+      and the 5-minute ATR is NOT provisional; otherwise the minimum multiple,
+      max(min_reward_to_risk, 1). Unknown labels never earn the higher multiple, and neither
+      does a provisional ATR: early opening bars are wide, so it tends to overstate the ATR,
+      which makes `extended` less likely and `tight_stop` more likely (fails closed).
 
 The suggested multiple is a CEILING: plan_exit refuses a reward multiple above it. Labels never
 change a stop, a size or a risk limit, and nothing here reads model text.
@@ -61,8 +66,9 @@ def plan_labels(
             extended = (entry - vwap) > limits.max_extension_atr_5m * atr_5m
         tight = risk_per_share <= limits.max_stop_atr_5m * atr_5m
     structural = structure_level in STRUCTURAL_LEVELS
+    provisional = bool(atr_5m_provisional) if usable else False
     floor = min_multiple(limits)
-    if extended is False and tight is True and structural:
+    if extended is False and tight is True and structural and not provisional:
         suggested = max(limits.good_setup_multiple, floor)
     else:
         suggested = floor
@@ -71,5 +77,5 @@ def plan_labels(
         "tight_stop": tight,
         "structural_stop": structural,
         "suggested_multiple": _multiple_text(suggested),
-        "atr_5m_provisional": bool(atr_5m_provisional) if usable else False,
+        "atr_5m_provisional": provisional,
     }

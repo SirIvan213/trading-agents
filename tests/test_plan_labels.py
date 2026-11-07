@@ -115,6 +115,17 @@ def test_missing_vwap_makes_only_extended_unknown():
     assert out["suggested_multiple"] == "1"  # an unknown label never earns the higher multiple
 
 
+def test_provisional_atr_never_earns_more_than_the_minimum():
+    """Early-session ATR tends to be too large (extended less likely, tight more likely), so
+    a provisional ATR fails closed: the suggestion stays at the minimum."""
+    good = labels(atr_5m_provisional=False)
+    early = labels(atr_5m_provisional=True)
+    assert good["suggested_multiple"] == "2"
+    assert (early["extended"], early["tight_stop"], early["structural_stop"]) == (
+        good["extended"], good["tight_stop"], good["structural_stop"])
+    assert early["suggested_multiple"] == "1"
+
+
 def test_provisional_flag_is_carried_when_the_atr_is_usable():
     assert labels(atr_5m_provisional=True)["atr_5m_provisional"] is True
     assert labels(atr_5m_provisional=False)["atr_5m_provisional"] is False
@@ -210,7 +221,19 @@ def test_good_setup_multiple_above_max_reward_multiple_is_rejected():
 
 def test_good_setup_multiple_exactly_at_either_bound_is_accepted():
     assert limits_from_dict(cfg(min_reward_to_risk="1.5", good_setup_multiple="1.5"))
-    assert limits_from_dict(cfg(max_reward_multiple="5", good_setup_multiple="5"))
+    assert limits_from_dict(cfg(max_reward_multiple="3", good_setup_multiple="3"))
+
+
+@pytest.mark.parametrize("good", ["1.75", "4", "5", "0.5"])
+def test_good_setup_multiple_must_be_on_the_menu(good):
+    d = cfg(good_setup_multiple=good, min_reward_to_risk="0.5")
+    with pytest.raises(ValueError, match="good_setup_multiple must be one of"):
+        limits_from_dict(d)
+
+
+@pytest.mark.parametrize("good", ["1", "1.5", "2", "2.5", "3", "2.0", "3.00"])
+def test_every_menu_spelling_of_good_setup_multiple_is_accepted(good):
+    assert limits_from_dict(cfg(good_setup_multiple=good)).good_setup_multiple == D(good)
 
 
 # ---------------- atr_5m_seeded ----------------

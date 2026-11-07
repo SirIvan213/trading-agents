@@ -32,6 +32,10 @@ def make(limits=WIDE, ledger=None) -> ToolSession:
     s = ToolSession(symbol="AAPL", now=NOW, data=FakeMarketData(), limits=limits,
                     criteria=ScanCriteria(), ledger=ledger)
     s.execute("get_bars", {"symbol": "AAPL"})
+    # The fixture is early in the session, so its 5-minute ATR is provisional, which caps the
+    # suggestion at the minimum (tests/test_plan_labels.py covers that rule). These tests are
+    # about the menu, so the summary is marked settled; no price, stop or limit changes.
+    s.summary["atr_5m_provisional"] = False
     return s
 
 
