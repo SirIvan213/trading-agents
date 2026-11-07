@@ -9,7 +9,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from zoneinfo import ZoneInfo
 
@@ -28,7 +28,7 @@ EXAMPLE_PATH = CONFIG_DIR / "limits.example.json"
 EXAMPLE = json.loads(EXAMPLE_PATH.read_text())
 LIMITS = load_limits(EXAMPLE_PATH)
 MON_1015 = datetime(2026, 10, 19, 10, 15, tzinfo=NY)
-KILL = "trading is disabled (kill switch: trading_enabled is false)"
+KILL = "trading is disabled (kill switch: trading_enabled is not true)"
 LIVE = "live trading is disabled in this phase (paper must be true)"
 
 
@@ -412,3 +412,60 @@ def test_107_CONTROL_without_the_lock_both_approve(monkeypatch, tmp_path, lim):
     # Not asserted: the line count. Two unlocked appends from two Journal objects can overwrite
     # each other on Windows (seen ~1 run in 10), which is itself a symptom of no locking.
     assert statuses(j).count(APPROVED) >= 1
+
+
+# ============================ code-review additions ============================
+
+@pytest.mark.parametrize("edge", [
+    datetime(1, 1, 1, tzinfo=ZoneInfo("UTC")),
+    # west of New York, so converting to New York time runs past year 9999
+    datetime(9999, 12, 31, 23, 59, tzinfo=timezone(timedelta(hours=-12))),
+], ids=["min", "max"])
+def test_31_out_of_range_aware_now_blocks_instead_of_raising(edge):
+    res = check(now=edge)
+    assert res["verdict"] == "BLOCK"
+    assert "now must be a timezone-aware datetime" in res["reasons"]
+
+
+@pytest.mark.parametrize("bad", [None, {}, EXAMPLE], ids=["none", "dict", "raw-config"])
+def test_31_limits_that_are_not_a_limits_block_instead_of_raising(bad):
+    res = check_order(order(), bad, DayState(), MON_1015)
+    assert res["verdict"] == "BLOCK" and "limits must be a Limits" in res["reasons"]
+
+
+def test_31_real_limits_still_pass():
+    assert check()["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("raw", [0, "false", None], ids=repr)
+def test_32_non_bool_switch_reason_says_not_true(raw):
+    res = check(limits=replace(LIMITS, trading_enabled=raw))
+    assert res["verdict"] == "BLOCK" and KILL in res["reasons"]
+
+
+def test_107_exception_inside_exclusive_releases_both_locks(tmp_path):
+    a = Journal(tmp_path / "j.jsonl")
+    with pytest.raises(RuntimeError):
+        with a.exclusive():
+            raise RuntimeError("boom")
+    assert a._holder is None
+    with a.exclusive(timeout_s=0.05):
+        pass
+    with Journal(a.path).exclusive(timeout_s=0.05):
+        pass
+
+
+def test_107_failing_unlock_does_not_hide_the_body_error_or_keep_the_lock(tmp_path, monkeypatch):
+    import journal.log as jl
+
+    def broken_unlock(fh):
+        raise OSError("unlock failed")
+
+    monkeypatch.setattr(jl, "_unlock", broken_unlock)
+    a = Journal(tmp_path / "j.jsonl")
+    with pytest.raises(RuntimeError, match="body"):
+        with a.exclusive():
+            raise RuntimeError("body")
+    monkeypatch.undo()
+    with Journal(a.path).exclusive(timeout_s=0.05):  # closing the handle released it
+        pass

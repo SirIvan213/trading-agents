@@ -65,7 +65,7 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
         reasons.append("live trading is disabled in this phase (paper must be true)")
     # Kill switch (#32): anything but exactly True blocks, with the paper check.
     if getattr(limits, "trading_enabled", None) is not True:
-        reasons.append("trading is disabled (kill switch: trading_enabled is false)")
+        reasons.append("trading is disabled (kill switch: trading_enabled is not true)")
 
     # Fail closed on the clock and the day's state (#31): block, never raise.
     bad_input = False
@@ -76,9 +76,16 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
     if state_problem is not None:
         reasons.append(state_problem)
         bad_input = True
+    if not isinstance(limits, Limits):
+        reasons.append("limits must be a Limits")
+        bad_input = True
     if bad_input:
         return {"verdict": "BLOCK", "reasons": reasons}
-    ny = now.astimezone(NY)
+    try:
+        ny = now.astimezone(NY)
+    except (OverflowError, ValueError):  # an aware datetime at the edge of the date range
+        reasons.append("now must be a timezone-aware datetime")
+        return {"verdict": "BLOCK", "reasons": reasons}
 
     # Fail closed: hand-built limits (NaN, Infinity, floats...) must never pass an order.
     try:

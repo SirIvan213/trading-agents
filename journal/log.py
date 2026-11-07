@@ -70,7 +70,6 @@ class Journal:
         self.path = Path(path) if path is not None else DEFAULT_PATH
         self._tx_lock = threading.Lock()
         self._holder: int | None = None  # thread ident holding the lock through this object
-        self._depth = 0
 
     @property
     def lock_path(self) -> Path:
@@ -86,15 +85,11 @@ class Journal:
         already holds it through this object (append() inside an approval's exclusive block).
         Raises JournalError if the lock cannot be taken within `timeout_s` (default
         LOCK_TIMEOUT_S, read at call time), so a contended or broken lock means no write and no
-        approval.
+        approval. Re-entrancy is by thread id, so never hold it across a yield or an await.
         """
         me = threading.get_ident()
         if self._holder == me:
-            self._depth += 1
-            try:
-                yield
-            finally:
-                self._depth -= 1
+            yield  # nested: the outer block releases the lock
             return
         if timeout_s is None:
             timeout_s = LOCK_TIMEOUT_S
@@ -112,12 +107,15 @@ class Journal:
                     if time.monotonic() >= deadline:
                         raise JournalError("journal lock timed out")
                     time.sleep(0.01)
-                self._holder, self._depth = me, 1
+                self._holder = me
                 try:
                     yield
                 finally:
-                    self._holder, self._depth = None, 0
-                    _unlock(fh)
+                    self._holder = None
+                    try:
+                        _unlock(fh)
+                    except OSError:
+                        pass  # closing fh below releases the OS lock anyway
             finally:
                 fh.close()
         finally:
