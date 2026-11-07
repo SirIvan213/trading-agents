@@ -39,7 +39,8 @@ Allowed values (issue #87):
   - Plan values: entry, stop, target, risk_per_share and reward_to_risk of every plan, matched
     Decimal-equal ("101.5" == "101.50"). They never allow a (b) size: "104 shares" is flagged
     even when 104.00 is a plan's target.
-  - Quoted values: any number written in the evidence of an analyst report whose run is ok,
+  - Quoted values: each ok analyst report's `confidence` as written in the payload ("0.6"),
+    and any number written in the evidence of an analyst report whose run is ok,
     matched VERBATIM as a string ("2.54" allows "2.54" but not "2.540" or "2,54"; "50,000"
     allows "50,000" but not "50000"). A quoted value is allowed in every pattern, sizes
     included: "CEO sold 50,000 shares" passes when an analyst's evidence says "50,000".
@@ -58,6 +59,7 @@ Known false positives (accepted, the guard errs on the side of flagging): a rati
 """
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -199,7 +201,8 @@ def _not_a_value(text: str, start: int, end: int, raw: str, dates: list[range]) 
 
 
 def quoted_values(packet: DecisionPacket) -> frozenset[str]:
-    """Every number written in analyst evidence, verbatim, from reports whose run is ok.
+    """Every number written in analyst evidence, verbatim, plus each report's confidence as
+    written in the payload, from reports whose run is ok.
 
     A report whose run failed (the neutral fallback) contributes nothing: its single evidence
     point is runner text, not analysis. Item numbers, clock times, dates and zero-padded
@@ -210,6 +213,9 @@ def quoted_values(packet: DecisionPacket) -> frozenset[str]:
         run = packet.runs.get(agent)
         if run is None or not run.ok:
             continue
+        # The report's confidence as written in the debate payload (JSON, e.g. "0.6"): the
+        # debaters quote it ("capped at 0.6"). Schema-bounded to [0, 1]; never reaches sizing.
+        out.add(json.dumps(report.confidence))
         for ev in report.evidence:
             point = ev.point
             dates = [range(m.start(), m.end()) for m in _DATE.finditer(point)]
