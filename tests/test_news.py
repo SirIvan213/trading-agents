@@ -168,9 +168,14 @@ def test_fetch_news_error_payload(keys):
         N.fetch_news(["ABCD"], START, NOW, opener=Opener([{"message": "forbidden"}]))
 
 
-def test_fetch_news_null_news_page(keys):
-    out = N.fetch_news(["ABCD"], START, NOW, opener=Opener([{"news": None}]))
-    assert out == {"news": []}
+def test_fetch_news_null_news_page_is_an_error_not_empty(keys):
+    """#112: a null "news" must not read as "no news" (and so "no halts")."""
+    with pytest.raises(RuntimeError, match="unexpected news response shape"):
+        N.fetch_news(["ABCD"], START, NOW, opener=Opener([{"news": None}]))
+
+
+def test_fetch_news_empty_news_list_is_no_news(keys):
+    assert N.fetch_news(["ABCD"], START, NOW, opener=Opener([{"news": []}])) == {"news": []}
 
 
 def test_fetch_news_list_body_rejected(keys):
@@ -747,8 +752,14 @@ def test_digest_skips_malformed_items_without_raising():
 
 
 @pytest.mark.parametrize("bad", [None, [], "x", {"news": None}, {"news": "x"}, {}])
-def test_digest_bad_news_container_gives_empty(bad):
-    d = digest(news=bad)
+def test_digest_bad_news_container_raises_instead_of_reading_empty(bad):
+    """#112: a malformed news reply is an error, never an empty digest ("no halts")."""
+    with pytest.raises(ValueError, match="news reply is malformed"):
+        digest(news=bad)
+
+
+def test_digest_empty_news_list_is_an_empty_digest():
+    d = digest(news={"news": []})
     assert d["headlines"] == [] and d["counts"]["news_for_symbol"] == 0
 
 

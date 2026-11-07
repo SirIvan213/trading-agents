@@ -144,7 +144,9 @@ def fetch_news(
         page = get_json(url, headers, opener=opener, expect_keys=["news"])
         if not isinstance(page, dict):
             raise RuntimeError("unexpected news response shape")
-        items = page.get("news") or []
+        # A missing or null "news" is an error, never "no news": read as empty it would also
+        # read as "no halts" (#112).
+        items = page.get("news")
         if not isinstance(items, list):
             raise RuntimeError("unexpected news response shape")
         merged.extend(items)
@@ -374,6 +376,9 @@ def digest(
     and not after `now`; de-duplicates by normalized headline (earliest kept);
     sorts newest first. Malformed items are skipped and counted. `filings` is the
     output of parse_8k_filings, passed through. Times are NY ISO strings.
+
+    Raises ValueError when `news` is not an Alpaca reply {"news": [...]}: a failed or malformed
+    fetch must never read as "no headlines, no halts" (#112).
     """
     if not isinstance(now, datetime) or now.tzinfo is None:
         raise ValueError("now must be a timezone-aware datetime")
@@ -387,7 +392,7 @@ def digest(
     start = now_utc - timedelta(hours=lookback_hours)
     raw_items = news.get("news") if isinstance(news, dict) else None
     if not isinstance(raw_items, list):
-        raw_items = []
+        raise ValueError("news reply is malformed (no news list): not the same as no news")
 
     considered = skipped = outside = 0
     kept: dict[str, tuple[datetime, dict]] = {}
