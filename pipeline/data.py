@@ -9,6 +9,7 @@ from pipeline.events import FmpCalendarCache
 from pipeline.market import NY, ny_today
 from tools.bars import fetch_bars
 from tools.earnings import cik_for_symbol, fetch_company_facts
+from tools.halt_feed import HaltFeedCache
 from tools.news import fetch_cik_map, fetch_news, fetch_submissions
 from tools.scan import fetch_snapshots
 
@@ -53,13 +54,27 @@ class EarningsData(Protocol):
         ...
 
 
+# One cache per process: every LiveData shares it, so the once-a-minute rule holds.
+_SHARED_HALT_CACHE = HaltFeedCache()
+
+
+class HaltData(Protocol):
+    """Source of the Nasdaq Trader trade-halt feed, for the event gate (#144)."""
+
+    def halt_feed(self) -> dict:
+        """{"fetched_at": NY ISO, "body": the feed's raw XML bytes}."""
+        ...
+
+
 class LiveData:
     """Live MarketData + NewsData + FilingsData + EarningsData over the tools/ fetchers."""
 
-    def __init__(self, calendar_cache: FmpCalendarCache | None = None) -> None:
+    def __init__(self, calendar_cache: FmpCalendarCache | None = None,
+                 halt_cache: HaltFeedCache | None = None) -> None:
         self._cik_map: dict[str, str] | None = None
         self._lock = threading.Lock()  # analysts run in threads; fetch the map once
         self._calendar = calendar_cache or FmpCalendarCache()
+        self._halts = halt_cache or _SHARED_HALT_CACHE
 
     def _cik(self, symbol: str) -> str | None:
         with self._lock:
@@ -84,6 +99,11 @@ class LiveData:
     def company_facts(self, symbol: str) -> dict | None:
         cik = self._cik(symbol)
         return None if cik is None else fetch_company_facts(cik)
+
+    def halt_feed(self) -> dict:
+        """The Nasdaq Trader trade-halt feed {"fetched_at", "body"}: fetched at most once a
+        minute per process (the feed's polling rule), held in memory only (#144)."""
+        return self._halts.get()
 
     def earnings_calendar(self, start: date, end: date) -> dict:
         """FMP calendar, fetched at most once per NY day (FmpCalendarCache). Billed on FMP's
