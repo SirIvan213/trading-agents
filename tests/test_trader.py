@@ -177,3 +177,11 @@ def test_bad_trader_config_is_a_forced_pass_with_no_api_call(monkeypatch):
     r = run_trader(make_packet(), debate(), client=client)
     assert r.decision.action == "PASS" and r.forced_pass == "config_error"
     assert client.calls == [] and r.run.calls == []
+
+
+@pytest.mark.parametrize("over", [{"symbol": "MSFT"}, {"as_of": "2026-11-05T10:31:00-05:00"}])
+def test_debate_for_another_packet_is_a_forced_pass_with_no_api_call(over):
+    client = FakeClient([])
+    r = run_trader(make_packet(), debate().model_copy(update=over), client=client)
+    assert r.decision.action == "PASS" and r.forced_pass == "debate_mismatch"
+    assert client.calls == []

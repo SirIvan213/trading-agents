@@ -92,6 +92,14 @@ def _forced(symbol: str, code: str) -> TraderDecision:
     )
 
 
+def forced_pass(symbol: str, code: str, config: AgentConfig) -> TraderRun:
+    """A forced PASS decided outside run_trader (e.g. the pipeline's latency budget ran out
+    before the Trader was called). Makes no API call."""
+    started = time.monotonic()
+    return TraderRun(_forced(symbol, code), False, code,
+                     _record(config, False, code, None, started))
+
+
 def _record(
     cfg: AgentConfig, ok: bool, reason: str | None, code: Any, started: float,
     result: StructuredRun | None = None,
@@ -115,7 +123,8 @@ def run_trader(
     """Decide BUY (one plan_id) or PASS. Never raises; every failure is a forced PASS.
 
     Forced PASS without an API call: a bad trader config ("config_error"), a fatal debate or
-    a fatal / missing Bear ("fatal_bear"), or no exit plans ("no_plans"). After the call:
+    a fatal / missing Bear ("fatal_bear"), a debate for another symbol or as_of
+    ("debate_mismatch"), or no exit plans ("no_plans"). After the call:
     invalid output after one retry, including a plan_id not in the packet ("invalid_output"),
     an API error, a cancel or an exception.
     """
@@ -131,7 +140,9 @@ def run_trader(
         )
     try:
         bear = debate.final_bear
-        if debate.fatal or bear is None or bear.fatal:
+        if debate.symbol != packet.symbol or debate.as_of != packet.as_of:
+            code = "debate_mismatch"  # a debate about another packet cannot clear a Bear
+        elif debate.fatal or bear is None or bear.fatal:
             code = "fatal_bear"
         elif not packet.exit_plans:
             code = "no_plans"

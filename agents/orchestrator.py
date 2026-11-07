@@ -172,6 +172,10 @@ async def run_analysts(
                  cancels[a], _extra_kwargs(a, checked, ledger))
             for a in AGENTS
         ))
+    except BaseException:
+        if ledger is not None:  # nothing from an aborted run may ever be ordered
+            ledger.seal(accept=False)
+        raise
     finally:
         for ev in cancels.values():  # also covers cancellation of run_analysts itself
             ev.set()

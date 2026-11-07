@@ -245,7 +245,7 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
             as_of=s.now.astimezone(NY).isoformat(),
         )
         if s.ledger is not None:
-            s.ledger.record(record)  # LedgerError (sealed, wrong symbol) -> tool error below
+            s.ledger.record(record)  # LedgerError -> a tool error via ToolSession.execute
         s.exit_plans.append(record)
         result = {**result, "plan_id": record.plan_id}
     return result, False

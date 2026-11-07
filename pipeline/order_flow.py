@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from agents.orchestrator import load_checked_limits
 from agents.schemas import ExitPlanRecord
@@ -55,6 +55,7 @@ class Proposal:
     sized: dict | None
     verdict: dict | None
     checked_at: str
+    expires_at: str | None = None  # plan as_of + limits.max_plan_age_s (New York time)
 
     @property
     def order(self) -> dict | None:
@@ -76,6 +77,13 @@ class Outcome:
 
 def _iso(now: datetime) -> str:
     return now.astimezone(NY).isoformat()
+
+
+def _expires_at(plan: ExitPlanRecord, max_age_s: int) -> str | None:
+    try:
+        return _iso(datetime.fromisoformat(plan.as_of) + timedelta(seconds=max_age_s))
+    except (ValueError, TypeError):
+        return None
 
 
 def propose(
@@ -112,7 +120,8 @@ def propose(
     if verdict.get("verdict") != "PASS":
         return refuse("risk", "; ".join(verdict.get("reasons", [])) or "blocked",
                       plan, sized, verdict)
-    return Proposal(True, None, None, run_id, plan_id, plan, sized, verdict, _iso(now))
+    return Proposal(True, None, None, run_id, plan_id, plan, sized, verdict, _iso(now),
+                    _expires_at(plan, limits.max_plan_age_s))
 
 
 def render_ticket(p: Proposal) -> str:
@@ -124,16 +133,19 @@ def render_ticket(p: Proposal) -> str:
     qty = o["qty"]
     return "\n".join([
         "ORDER TICKET (paper account; an approved order is journaled, NOT sent to a broker)",
-        f"  Buy {qty} shares of {o['symbol']} at market, as a bracket order.",
+        f"  Buy {qty} shares of {o['symbol']} at market, as a bracket order "
+        "(a market fill can differ from the planned entry).",
         f"  Stop-loss: sell all {qty} if the price falls to {o['stop_loss']}.",
         f"  Take-profit: sell all {qty} if the price reaches {o['take_profit']}.",
-        f"  Planned entry {o['entry']}; risk per share {sized['risk_per_share']}; "
-        f"maximum loss at the stop {sized['max_loss']}.",
+        f"  Planned entry {o['entry']}; planned risk per share {sized['risk_per_share']}; "
+        f"planned loss at the stop {sized['max_loss']} (a gap through the stop can lose more).",
         f"  Size decided by the limit: {sized['decided_by']}.",
         f"  Plan {plan.plan_id} ({plan.setup} setup), made {plan.as_of}; "
         f"flat by {plan.time_exit} ET.",
         f"  Risk check: {p.verdict['verdict'] if p.verdict else 'n/a'}. "
         f"Checked {p.checked_at}. Run {p.run_id}.",
+        f"  Approve before {p.expires_at or 'n/a'}: after that the plan is stale and the "
+        "re-check refuses it.",
     ])
 
 
@@ -175,8 +187,9 @@ def approve(
     Only the exact answer "yes" (surrounding spaces ignored, lower case) approves. After the
     answer the plan is re-sized and re-checked at a new `clock()` reading; if that fails, or
     the re-built order differs in any field from the one shown, there is no order.
-    Raises JournalError only if the approved order cannot be journaled (then nothing counts
-    as approved).
+    Raises JournalError if an entry for a declined, refused, changed or approved outcome
+    cannot be written; for an approval nothing then counts as approved. A not-ok proposal's
+    "no_order" entry is best effort.
     """
     if not p.ok:
         try:  # audit trail for a refused BUY; a broken journal must not hide the refusal

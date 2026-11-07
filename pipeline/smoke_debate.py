@@ -45,6 +45,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -54,7 +55,7 @@ from agents.debate import resolve_rounds, run_debate
 from agents.debate_common import MONEY_REASON, money_debug
 from agents.llm import EFFORTS, AgentConfig, config_for, make_client
 from agents.money_guard import ViolationDetail
-from agents.orchestrator import AGENTS, run_analysts
+from agents.orchestrator import AGENTS, load_checked_limits, run_analysts
 from agents.schemas import CallRecord, DebateRecord, DecisionPacket, RetryRecord
 from agents.trader import TraderRun, run_trader
 from journal.log import Journal
@@ -222,6 +223,20 @@ def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, Agen
           f"cache read {t['cache_read_input_tokens']}  total processed {sum(t.values())}")
 
 
+def print_latency(stage_s: dict[str, float], max_age_s: int) -> None:
+    """Real wall time per stage against the plan-age budget (issue #65). The ticket above
+    uses the fixture clock; these timings are real."""
+    total = sum(stage_s.values())
+    parts = ", ".join(f"{k} {v:.1f}s" for k, v in stage_s.items())
+    print("\n-- Latency vs plan age budget (real wall time) --")
+    print(f"{parts}: {total:.1f}s of max_plan_age_s {max_age_s}s")
+    left = max_age_s - total
+    if left <= 0:
+        print("OVER BUDGET: in a real run every plan would be stale before approval")
+    else:
+        print(f"left for human approval: {left:.0f}s")
+
+
 def print_trader(trader: TraderRun, proposal: Proposal | None) -> None:
     """The Trader's decision, its API calls and the order ticket (no approval step)."""
     d = trader.decision
@@ -291,6 +306,8 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     data = FixtureData()
     now = data.as_of()
     ledger = PlanLedger(SYMBOL)
+    stage_s: dict[str, float] = {}
+    t0 = time.monotonic()
     try:
         packet = asyncio.run(run_analysts(
             SYMBOL, now, data=data, clients=client,
@@ -299,7 +316,9 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     except ValueError as exc:  # e.g. "limits config is invalid", before any analyst starts
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    stage_s["analysts"] = time.monotonic() - t0
     rejections: list[Rejection] = []
+    t0 = time.monotonic()
     try:
         with money_debug(lambda side, items: rejections.append((side, items))):
             debate = run_debate(packet, clients=client,
@@ -308,7 +327,10 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         print_money_debug(rejections)  # still show what was collected before the crash
         raise
 
+    stage_s["debate"] = time.monotonic() - t0
+    t0 = time.monotonic()
     trader = run_trader(packet, debate, client=client, config=configs[TRADER])
+    stage_s["trader"] = time.monotonic() - t0
     proposal = None
     if trader.decision.action == "BUY" and trader.decision.plan_id:
         # The ticket is sized from the ledger at the fixture's clock (fixture plans are dated
@@ -319,6 +341,7 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
 
     report(packet, debate, configs)
     print_trader(trader, proposal)
+    print_latency(stage_s, load_checked_limits().max_plan_age_s)
     print_money_debug(rejections)
 
     calls = [c for r in packet.runs.values() for c in r.calls]

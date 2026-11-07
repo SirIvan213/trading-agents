@@ -168,3 +168,13 @@ def test_trader_api_error_gives_exit_1(smoke, capsys):
 def test_trader_failure_codes_exclude_the_legitimate_passes():
     assert S.TRADER_FAILURES == {"invalid_output", "api_error", "exception", "config_error",
                                  "cancelled"}
+
+
+def test_print_latency_reports_budget_and_over_budget(capsys):
+    from pipeline import smoke_debate as SD
+    SD.print_latency({"analysts": 100.0, "debate": 60.0, "trader": 20.0}, 300)
+    out = capsys.readouterr().out
+    assert "analysts 100.0s, debate 60.0s, trader 20.0s: 180.0s of max_plan_age_s 300s" in out
+    assert "left for human approval: 120s" in out
+    SD.print_latency({"analysts": 250.0, "debate": 60.0}, 300)
+    assert "OVER BUDGET" in capsys.readouterr().out

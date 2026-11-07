@@ -662,7 +662,8 @@ def test_extra_arguments_are_a_type_error(ledger, journal, extra):
 
 def test_proposal_and_outcome_fields_pinned():
     assert [f.name for f in dataclasses.fields(Proposal)] == [
-        "ok", "stage", "reason", "run_id", "plan_id", "plan", "sized", "verdict", "checked_at"]
+        "ok", "stage", "reason", "run_id", "plan_id", "plan", "sized", "verdict", "checked_at",
+        "expires_at"]
     assert [f.name for f in dataclasses.fields(of.Outcome)] == [
         "status", "reason", "proposal", "recheck", "approved_at", "plan_age_s"]
 

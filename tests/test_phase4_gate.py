@@ -598,8 +598,8 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
     assert all(t in dumped for t in FAKE_TEXT)
     assert not any(t in clean.model_dump_json() for t in FAKE_TEXT)
 
-    # A TraderDecision whose free text carries the fake prices is also in play. The Trader
-    # agent does not exist yet; the end-to-end Trader proof is a Phase 4 follow-up.
+    # A TraderDecision whose free text carries the fake prices is also in play (the end-to-end
+    # Trader proof through run_decision is in tests/test_phase4b_proofs.py).
     decision = TraderDecision(
         symbol="TSLA", action="BUY", confidence=0.99, plan_id=rec.plan_id,
         reasoning="; ".join(FAKE_TEXT))
@@ -739,7 +739,7 @@ def test_money_path_modules_never_touch_analyst_output(rel):
 def test_orders_module_does_not_import_analyst_report():
     src = (ROOT / "pipeline" / "orders.py").read_text(encoding="utf-8")
     assert not imports_analyst_report(src)
-    assert "DecisionPacket" in src  # sanity: the checker is looking at the right file
+    assert "def select_plan" in src  # sanity: the checker is looking at the right file
 
 
 # ===================== #50: signatures =====================
@@ -862,9 +862,8 @@ def test_non_dict_order_with_invalid_limits_reports_limits_first():
 # ===================== #50: confidence cannot change the order =====================
 
 def test_two_confidences_same_plan_same_order():
-    # NOTE: the Trader agent does not exist yet. The end-to-end proof (a real Trader run feeding
-    # select_plan -> build_order) is a Phase 4 follow-up; here each decision is carried
-    # alongside its packet and the order is built in that decision's context.
+    # Unit-level check; the end-to-end Trader proof through run_decision is in
+    # tests/test_phase4b_proofs.py. Here each decision is carried alongside its packet.
     rec = plan_record()
     lo = packet_with([rec], fake=False, confidence=0.1, stance="bearish")
     hi = packet_with([rec], fake=False, confidence=0.99, stance="bullish")
@@ -1231,3 +1230,15 @@ def test_decide_scanner_would_catch_a_leaked_argument():
     (call,) = _calls_named(bad, "propose")
     assert sorted(k.arg for k in call.keywords) != ["clock", "journal"]
     assert not _names_in(call) <= {"propose", "ledger", "plan_id", "journal", "clock"}
+
+
+
+# Modules that feed plans, sizing, the risk gate or DayState never reference model output.
+@pytest.mark.parametrize("rel", [
+    "pipeline/orders.py", "tools/size.py", "tools/risk_check.py", "pipeline/ledger.py",
+    "journal/log.py", "pipeline/order_flow.py",
+])
+def test_money_feeding_modules_reference_no_model_output_types(rel):
+    src = (ROOT / rel).read_text(encoding="utf-8")
+    assert referenced_types(src) == set(), rel
+    assert forbidden_uses(src) == [], rel

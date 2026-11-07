@@ -42,6 +42,15 @@ FAKE_TEXT = "; ".join(FAKE_WORDS)
 
 
 @pytest.fixture(autouse=True)
+def isolated_agent_env(monkeypatch):
+    """The shell's TRADING_AGENTS_* settings must not change these tests."""
+    import os
+    for name in list(os.environ):
+        if name.startswith("TRADING_AGENTS_"):
+            monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def fixed_limits(monkeypatch):
     """The example limits for the analysts and the order flow, whatever config/ holds."""
     monkeypatch.setattr(orch, "load_limits", lambda *a, **k: LIMITS)
@@ -52,7 +61,7 @@ class Router:
     """One shared client: pops the next scripted reply for whichever agent is calling."""
 
     def __init__(self, scripts: dict[str, list]) -> None:
-        assert set(PROMPT_TO_AGENT.values()) == set(PROMPT_TO_AGENT.values())  # prompts distinct
+        assert len(PROMPT_TO_AGENT) == 6  # six distinct system prompts, one per agent
         self.scripts = {a: list(q) for a, q in scripts.items()}
         self.calls: list[str] = []
         self.requests: list[dict] = []
@@ -360,7 +369,9 @@ def test_ask_none_stops_after_the_ticket(tmp_path):
 
 
 def test_slow_pipeline_makes_the_plan_stale_before_approval(tmp_path):
-    clock = StepClock(NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=301))
+    # readings: analysts start, before the Trader, proposal, re-check after approval
+    clock = StepClock(NOON, NOON + timedelta(seconds=10), NOON + timedelta(seconds=20),
+                      NOON + timedelta(seconds=301))
     result, _, journal = go(tmp_path, scripts(), clock=clock)
     assert result.proposal.ok
     assert result.outcome.status == "refused_after_approval"
@@ -368,7 +379,9 @@ def test_slow_pipeline_makes_the_plan_stale_before_approval(tmp_path):
 
 
 def test_the_plan_age_limit_boundary_through_the_pipeline(tmp_path):
-    clock = StepClock(NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=300))
+    # readings: analysts start, before the Trader, proposal, re-check after approval
+    clock = StepClock(NOON, NOON + timedelta(seconds=10), NOON + timedelta(seconds=20),
+                      NOON + timedelta(seconds=300))
     result, _, _ = go(tmp_path, scripts(), clock=clock)
     assert result.outcome.status == APPROVED and result.outcome.plan_age_s == 300
 
@@ -407,3 +420,102 @@ def test_each_run_has_its_own_ledger(tmp_path):
     b, _, _ = go(tmp_path, scripts(), name="b.jsonl")
     assert a.ledger_run_id != b.ledger_run_id
     assert a.outcome.recheck.plan == b.outcome.recheck.plan  # same plan, separate ledgers
+
+
+
+# ===================== latency budget (#65) =====================
+
+def test_budget_is_recorded_against_max_plan_age(tmp_path):
+    result, _, _ = go(tmp_path, scripts())
+    b = result.budget
+    assert b["max_plan_age_s"] == LIMITS.max_plan_age_s
+    assert b["analyst_timeout_s"] == 10  # go() passes timeout_s=10
+    assert b["age_before_trader_s"] == 20 and b["age_at_proposal_s"] == 40
+    assert b["plan_age_at_approval_s"] == 40
+    assert set(result.timings_ms) == {"analysts", "debate", "trader", "approval"}
+
+
+def test_plans_stale_before_the_trader_skip_the_trader_call(tmp_path):
+    clock = StepClock(NOON, NOON + timedelta(seconds=LIMITS.max_plan_age_s + 1))
+    result, router, journal = go(tmp_path, scripts(), clock=clock,
+                                 ask=lambda _: pytest.fail("must not ask"))
+    assert "trader" not in router.calls  # no billed Trader call
+    assert result.trader.forced_pass == "stale_before_trader"
+    assert result.trader.decision.action == "PASS" and result.proposal is None
+    assert [e["status"] for e in raw_lines(journal)] == ["pass"]
+
+
+def test_budget_boundary_still_calls_the_trader(tmp_path):
+    clock = StepClock(NOON, NOON + timedelta(seconds=LIMITS.max_plan_age_s))
+    result, router, _ = go(tmp_path, scripts(), clock=clock, ask=lambda _: "no")
+    assert "trader" in router.calls and result.trader.ok
+
+
+@pytest.mark.parametrize("bad", [0, -1, LIMITS.max_plan_age_s, LIMITS.max_plan_age_s + 60])
+def test_analyst_timeout_must_leave_room_for_the_rest(tmp_path, bad):
+    router = Router(scripts())
+    with pytest.raises(ValueError, match="timeout_s must be above 0 and below"):
+        run_decision(SYMBOL, data=FakeAllData(), clients=router,
+                     journal=Journal(tmp_path / "j.jsonl"), clock=StepClock(NOON),
+                     ask=lambda _: "yes", rounds=1, timeout_s=bad)
+    assert router.calls == []
+
+
+def test_default_analyst_timeout_is_half_the_plan_age(tmp_path, monkeypatch):
+    seen = {}
+    real = orch.run_analysts
+
+    async def spy(*a, **k):
+        seen["timeout_s"] = k["timeout_s"]
+        return await real(*a, **k)
+
+    monkeypatch.setattr(decide, "run_analysts", spy)
+    run_decision(SYMBOL, data=FakeAllData(), clients=Router(scripts()),
+                 journal=Journal(tmp_path / "j.jsonl"),
+                 clock=StepClock(NOON, NOON + timedelta(seconds=20)), ask=lambda _: "no",
+                 rounds=1)
+    assert seen["timeout_s"] == LIMITS.max_plan_age_s / 2
+
+
+@pytest.mark.parametrize("var", ["TRADING_AGENTS_TRADER_EFFORT", "TRADING_AGENTS_BEAR_EFFORT"])
+def test_bad_agent_config_fails_before_any_api_call(tmp_path, monkeypatch, var):
+    monkeypatch.setenv(var, "turbo")
+    router = Router(scripts())
+    with pytest.raises(ValueError):
+        run_decision(SYMBOL, data=FakeAllData(), clients=router,
+                     journal=Journal(tmp_path / "j.jsonl"), clock=StepClock(NOON),
+                     ask=lambda _: "yes", rounds=1, timeout_s=10)
+    assert router.calls == []
+
+
+@pytest.mark.parametrize("bad", [None, 123, "", "toolongsymbol"])
+def test_bad_symbol_is_a_value_error_before_any_call(tmp_path, bad):
+    router = Router(scripts())
+    with pytest.raises(ValueError, match="symbol must be a valid ticker"):
+        run_decision(bad, data=FakeAllData(), clients=router,  # type: ignore[arg-type]
+                     journal=Journal(tmp_path / "j.jsonl"), clock=StepClock(NOON),
+                     ask=lambda _: "yes", rounds=1, timeout_s=10)
+    assert router.calls == []
+
+
+def test_ticket_says_when_the_plan_expires(tmp_path):
+    result, _, _ = go(tmp_path, scripts(), ask=lambda _: "no")
+    assert result.proposal.expires_at == (NOON + timedelta(
+        seconds=LIMITS.max_plan_age_s)).isoformat()
+    assert f"Approve before {result.proposal.expires_at}" in result.ticket
+
+
+def test_ledger_is_sealed_unaccepted_when_run_analysts_raises(monkeypatch):
+    import asyncio
+
+    from pipeline.ledger import PlanLedger
+
+    async def boom(*a, **k):
+        raise RuntimeError("worker crashed")
+
+    monkeypatch.setattr(orch, "_one", boom)
+    led = PlanLedger(SYMBOL)
+    with pytest.raises(RuntimeError):
+        asyncio.run(orch.run_analysts(SYMBOL, NOON, data=FakeAllData(), clients=Router({}),
+                                      limits=LIMITS, ledger=led))
+    assert led.sealed and led.plan_ids() == []
