@@ -159,6 +159,56 @@ OTHER_REPORTS = [
 ]
 
 
+def halt_item(symbol: str, name: str, market: str, day: str, time: str, code: str,
+              resumed: tuple[str, str, str] = ("", "", "")) -> str:
+    """One <item> of the Nasdaq Trader trade-halt RSS feed (SYNTHETIC data in the feed's
+    documented shape; never a copy of the real feed: its terms restrict storing copies)."""
+    rdate, rquote, rtrade = resumed
+    return (
+        f"<item><title>{symbol}</title><pubDate>Tue, 03 Nov 2026 05:00:00 GMT</pubDate>"
+        f"<ndaq:HaltDate>{day}</ndaq:HaltDate><ndaq:HaltTime>{time}</ndaq:HaltTime>"
+        f"<ndaq:IssueSymbol>{symbol}</ndaq:IssueSymbol><ndaq:IssueName>{name}</ndaq:IssueName>"
+        f"<ndaq:Market>{market}</ndaq:Market><ndaq:ReasonCode>{code}</ndaq:ReasonCode>"
+        f"<ndaq:PauseThresholdPrice />"
+        + (f"<ndaq:ResumptionDate>{rdate}</ndaq:ResumptionDate>" if rdate
+           else "<ndaq:ResumptionDate />")
+        + (f"<ndaq:ResumptionQuoteTime>{rquote}</ndaq:ResumptionQuoteTime>" if rquote
+           else "<ndaq:ResumptionQuoteTime />")
+        + (f"<ndaq:ResumptionTradeTime>{rtrade}</ndaq:ResumptionTradeTime>" if rtrade
+           else "<ndaq:ResumptionTradeTime />")
+        + "<description><![CDATA[synthetic fixture]]></description></item>")
+
+
+# Other issues' halts in every scenario's feed: a long-standing SEC suspension, a news halt
+# yesterday that resumed, and a LULD pause today in another symbol.
+OTHER_HALTS = [
+    halt_item("QZXA", "Quazex Holdings", "NASDAQ", "08/14/2025", "09:30:00", "H10"),
+    halt_item("WYLD", "Wyldcrest Inc.", "NYSE", "11/02/2026", "14:02:11.512", "T1",
+              ("11/02/2026", "14:55:00", "15:00:00")),
+    halt_item("PLMX", "Palmex Corp.", "NASDAQ", "11/03/2026", "10:21:04.118", "LUDP",
+              ("11/03/2026", "10:26:04", "10:26:04")),
+]
+
+
+def halt_feed(items: list[str], pub: str = "Tue, 03 Nov 2026 15:59:00 GMT") -> str:
+    """The trade-halt RSS document (synthetic). pubDate 10:59 ET, a minute before the
+    scenarios' 11:00 run."""
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<rss version="2.0" xmlns:ndaq="http://www.nasdaqtrader.com/"><channel>'
+        "<title>NASDAQTrader.com</title><link>http://www.nasdaqtrader.com</link>"
+        "<description>NASDAQ Trade Halts</description>"
+        "<copyright>Copyright 2026. All rights reserved.</copyright>"
+        f"<pubDate>{pub}</pubDate><ttl>1</ttl><ndaq:numItems>{len(items)}</ndaq:numItems>"
+        + "".join(items) + "</channel></rss>\n")
+
+
+def write_text(folder: str, name: str, text: str) -> None:
+    path = HERE / folder / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def write(folder: str, name: str, obj: dict | list) -> None:
     path = HERE / folder / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,6 +236,7 @@ def build() -> None:
         ("2026-10-29T20:01:00.000Z", "8-K", "2.02,9.01", "brko-8k_20261029.htm"),
     ]))
     write("clean-buy", "earnings_calendar.json", OTHER_REPORTS)
+    write_text("clean-buy", "halts.xml", halt_feed(OTHER_HALTS))
     write("clean-buy", "companyfacts.json", company_facts(9900001, "Brookfield Optics", 0.05))
 
     # ---- red-flag: VNTR, the same chart shifted, a five-minute halt in the bars, a halt
@@ -210,6 +261,11 @@ def build() -> None:
     ]))
     write("red-flag", "earnings_calendar.json",
           [fmp_row("VNTR", "2026-11-03", None, True), *OTHER_REPORTS])
+    # The 10:05-10:09 gap in the bars: a LULD volatility pause, resumed at 10:10
+    write_text("red-flag", "halts.xml", halt_feed([
+        halt_item("VNTR", "Ventara Inc.", "NASDAQ", "11/03/2026", "10:05:00.214", "LUDP",
+                  ("11/03/2026", "10:10:00", "10:10:00")),
+        *OTHER_HALTS]))
     write("red-flag", "companyfacts.json",
           company_facts(9900002, "Ventara", 0.08, filed_before="2026-10-01"))
 
@@ -233,6 +289,8 @@ def build() -> None:
             ("2026-10-29T20:01:00.000Z", "8-K", "2.02,9.01", "chsw-8k_20261029.htm"),
         ]))
     write("extended-chase", "earnings_calendar.json", OTHER_REPORTS)
+    write_text("extended-chase", "halts.xml", halt_feed(OTHER_HALTS))
+    (FIXTURES / "nasdaq_halts_tsla.xml").write_text(halt_feed(OTHER_HALTS), encoding="utf-8")
     # The TSLA baseline's calendar for the same window (TSLA reported on 2026-10-22).
     (FIXTURES / "fmp_earnings_calendar_tsla.json").write_text(
         json.dumps(OTHER_REPORTS, indent=1) + "\n", encoding="utf-8")

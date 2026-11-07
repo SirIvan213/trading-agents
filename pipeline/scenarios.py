@@ -3,7 +3,8 @@
 Each scenario lives in tests/fixtures/scenarios/<name>/scenario.json:
     {"name", "symbol", "description",
      "files": {"bars", "snapshot", "news", "submissions", "companyfacts",
-               "earnings_calendar"},  # relative paths; earnings_calendar = an FMP reply list
+               "earnings_calendar", "halts"},  # relative paths; earnings_calendar = an
+                                                # FMP reply list, halts = the Nasdaq feed XML
      "expected": {"action": "BUY" | "PASS" | null, "fatal_bear": true | false | null, "why"}}
 File paths are relative to the scenario folder and must stay inside tests/fixtures/.
 `ScenarioData` serves them through the same methods the live data classes have (bars,
@@ -26,7 +27,10 @@ from tools.scan import validate_symbols
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
 SCENARIOS_DIR = FIXTURES / "scenarios"
-FILE_KEYS = ("bars", "snapshot", "news", "submissions", "companyfacts", "earnings_calendar")
+FILE_KEYS = ("bars", "snapshot", "news", "submissions", "companyfacts", "earnings_calendar",
+             "halts")
+TEXT_KEYS = frozenset({"halts"})  # raw files (the halt feed is XML), not JSON
+HALT_FEED_LAG = timedelta(seconds=30)  # the scenario's feed fetch, just before its clock
 CALENDAR_FETCH_TIME = time(8, 30)  # the scenario day's once-a-day FMP fetch, before the open
 DEFAULT = "tsla"
 
@@ -92,11 +96,13 @@ class ScenarioData:
     def __init__(self, scenario: Scenario) -> None:
         self.scenario = scenario
         self.symbol = scenario.symbol
-        load = {k: json.loads(p.read_text(encoding="utf-8")) for k, p in scenario.files.items()}
+        load = {k: (p.read_bytes() if k in TEXT_KEYS else json.loads(p.read_text(encoding="utf-8")))
+                for k, p in scenario.files.items()}
         self._bars, self._snapshots = load["bars"], load["snapshot"]
         self._news, self._subs = load["news"], load["submissions"]
         self._facts = load["companyfacts"]
         self._calendar = load["earnings_calendar"]
+        self._halts = load["halts"]
 
     def bars(self, symbol: str, start: datetime, end: datetime) -> dict:
         if symbol.upper() != self.symbol:
@@ -127,6 +133,12 @@ class ScenarioData:
         rows = [r for r in self._calendar
                 if isinstance(r, dict) and lo <= str(r.get("date", "")) <= hi]
         return {"fetched_at": fetched.isoformat(), "from": lo, "to": hi, "reply": rows}
+
+    def halt_feed(self) -> dict:
+        """The saved (synthetic) Nasdaq halt feed, as LiveData returns it: fetched 30 s before
+        the scenario clock. Its pubDate is 10:59 ET on the scenario day."""
+        fetched = self.as_of() - HALT_FEED_LAG
+        return {"fetched_at": fetched.isoformat(), "body": self._halts}
 
     def as_of(self) -> datetime:
         """One minute after the last fixture bar, in New York time."""
