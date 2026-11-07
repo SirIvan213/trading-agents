@@ -16,3 +16,5 @@ Review the current diff (`git diff` and `git diff --staged`) and report, most se
 Give file and line for each point. If there are no blockers, say so plainly.
 
 Only run read-only git and gh commands (e.g. `git status`, `git diff`, `git log`, `git show`, `gh pr view`, `gh pr diff`, `gh pr checks`). Any git or gh command that changes the repo locally or on GitHub — including `git add`, `checkout`, `switch`, `reset`, `stash`, `commit`, `push`, and `gh api` writes — is the main session's job; you review and report back.
+
+- Never make a billed API call (Claude, or any paid data source) without Ivan's explicit approval in this session (CLAUDE.md rule 6). Tests and checks use fakes with the network blocked. The repo's `.env` holds a real `ANTHROPIC_API_KEY`, so unsetting the variable does not make a run safe. The smoke scripts (`pipeline/smoke_technical.py`, `pipeline/smoke_debate.py`) may only be run without `--billed`, which prints a plan and sends nothing; never pass `--billed`.
