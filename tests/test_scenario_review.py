@@ -14,6 +14,7 @@ from agents.tool_registry import ToolSession, price_levels
 from pipeline.ledger import PlanLedger
 from pipeline.orders import build_order, select_plan
 from pipeline.scenarios import ScenarioData, load_scenario
+from tests.order_helpers import fresh_quote
 from tests.test_scenarios import tmp_scen  # noqa: F401  (fixture)
 from tests.test_smoke_scenarios import debaters, reply, smoke, tail, trader  # noqa: F401
 from tools.bars import parse_bars, regular_session, summarize
@@ -83,7 +84,8 @@ def test_clean_buy_vwap_plan_passes_the_risk_check_at_its_suggested_2r():
                                       "level": lv["vwap"], "reward_multiple": "3"})
     assert over["ok"] is False and len(s.exit_plans) == 1
     led.seal(accept=True)
-    sized = build_order(select_plan(led, res["plan_id"]), LIMITS, s.now)
+    chosen = select_plan(led, res["plan_id"])
+    sized = build_order(chosen, LIMITS, s.now, fresh_quote(chosen.entry, s.now))
     assert sized["ok"] is True
     assert check_order(sized["order"], LIMITS, DayState(), s.now)["verdict"] == "PASS"
 

@@ -16,6 +16,7 @@ import pipeline.scenarios as sc
 from agents.tool_registry import ToolSession, price_levels
 from pipeline.orders import build_order
 from pipeline.scenarios import Expected, ScenarioData, compare, load_scenario, scenario_names
+from tests.order_helpers import fresh_quote
 from tools.bars import parse_bars, regular_session, summarize
 from tools.config import CONFIG_DIR, load_limits
 from tools.earnings import earnings_facts
@@ -122,7 +123,8 @@ def test_clean_buy_order_passes_the_risk_check(clean):
     assert err is False and res["ok"] is True and res["target"] == plan["target"]
     assert res["target_vs_session_high"] == "at_or_above"
     assert Decimal(res["session_high_vs_entry_atr_5m"]) < 1
-    sized = build_order(session.exit_plans[0], LIMITS, clean.now)
+    plan0 = session.exit_plans[0]
+    sized = build_order(plan0, LIMITS, clean.now, fresh_quote(plan0.entry, clean.now))
     assert sized["ok"] is True
     verdict = check_order(sized["order"], LIMITS, DayState(), clean.now)
     assert verdict == {"verdict": "PASS", "reasons": []}

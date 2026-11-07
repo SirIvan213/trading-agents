@@ -19,10 +19,12 @@ from tools.config import CONFIG_DIR, load_limits
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
 # The level plan (entry = last close, level = VWAP, 2R) each scenario's real tools produce.
 PLANS = {
-    "clean-buy": dict(symbol="BRKO", entry="80.42", stop="80.26", target="80.74",
-                      risk_per_share="0.16", reward_to_risk="2.00", last_close="80.42"),
-    "red-flag": dict(symbol="VNTR", entry="92.42", stop="92.27", target="92.72",
-                     risk_per_share="0.15", reward_to_risk="2.00", last_close="92.42"),
+    # The scenarios' real VWAP-level plans at 11:00 ET (entry = last_close, #118), so the
+    # saved snapshot quote (last close + 0.01) passes the real fixture_quotes path (#68).
+    "clean-buy": dict(symbol="BRKO", entry="80.72", stop="80.38", target="81.40",
+                      risk_per_share="0.34", reward_to_risk="2.00", last_close="80.72"),
+    "red-flag": dict(symbol="VNTR", entry="92.72", stop="92.37", target="93.42",
+                     risk_per_share="0.35", reward_to_risk="2.00", last_close="92.72"),
     "tsla": dict(symbol="TSLA"),
 }
 SHARES = {"clean-buy": 37, "red-flag": 32, "tsla": 8}
@@ -109,7 +111,7 @@ def smoke(monkeypatch, tmp_path):
     monkeypatch.setattr(of, "load_checked_limits", lambda *a, **k: LIMITS)
     monkeypatch.setenv("TRADING_AGENTS_DEBATE_ROUNDS", "1")
 
-    def run(name, replies, capsys):
+    def run(name, replies, capsys, plan_over=None):
         data = ScenarioData(load_scenario(name))
         now, symbol = data.as_of(), data.symbol
         seen = []
@@ -117,7 +119,7 @@ def smoke(monkeypatch, tmp_path):
         def fake_analysts(sym, at, **k):
             seen.append((sym, at, k["data"]))
             ledger: PlanLedger = k["ledger"]
-            p = plan(as_of=now.isoformat(), **PLANS[name])
+            p = plan(as_of=now.isoformat(), **{**PLANS[name], **(plan_over or {})})
             ledger.record(p)
             ledger.seal(accept=True)
             return packet_for(symbol, [p], now.isoformat())
@@ -162,7 +164,8 @@ def test_clean_buy_with_a_trader_buy_matches(smoke, capsys):
     _, line = tail(out, "clean-buy")
     assert line.startswith("expected BUY | actual BUY (fatal Bear: no)")
     assert line.endswith("-> MATCH")
-    assert "Buy 37 shares of BRKO" in out and "80.26" in out and "80.74" in out
+    assert "Buy 37 shares of BRKO" in out and "80.38" in out and "81.40" in out
+    assert "slippage allowance 0.09 per share (live ask 80.73)" in out
     assert seen[0][0] == "BRKO" and isinstance(seen[0][2], ScenarioData)
     assert seen[0][1].isoformat() == "2026-11-03T11:00:00-05:00"
     assert len(client.calls) == 3
@@ -198,6 +201,19 @@ def test_clean_buy_mismatch_when_the_trader_passes(smoke, capsys):
     _, line = tail(out, "clean-buy")
     assert line == "expected BUY | actual PASS (fatal Bear: no) -> MISMATCH"
     assert "ORDER TICKET" not in out
+
+
+def test_quote_above_entry_plus_allowance_is_refused_as_price_moved(smoke, capsys):
+    """A plan whose entry is 30 cents under the saved quote (ask 80.73 > 80.42 + allowance
+    0.09) gets NO ORDER with the price-moved reason through the real fixture_quotes (#68)."""
+    sym = "BRKO"
+    stale_plan = dict(entry="80.42", stop="80.26", target="80.74", risk_per_share="0.16",
+                      last_close="80.42")
+    code, out, _, _ = smoke("clean-buy", [*debaters(sym), reply(trader(sym))], capsys,
+                            plan_over=stale_plan)
+    assert code == 0
+    assert "NO ORDER for plan plan-1: price moved: ask 80.73 is above entry 80.42" in out
+    assert "refused at size" in out and "Buy 37 shares" not in out
 
 
 def test_red_flag_mismatch_when_the_trader_buys(smoke, capsys):

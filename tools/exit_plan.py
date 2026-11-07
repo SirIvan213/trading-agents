@@ -58,6 +58,8 @@ def exit_plan(
     opening_range: dict | None = None,
     level: Decimal | None = None,
     atr: Decimal | None = None,
+    atr_5m: Decimal | None = None,
+    atr_5m_provisional: bool = False,
     reward_multiple: Decimal | None = None,
     buffer_atr: Decimal = Decimal("0.10"),
     session_day: date | None = None,
@@ -80,8 +82,14 @@ def exit_plan(
 
     Minimum stop distance: a stop a few cents from entry is a noise stop that
     sizing then pushes to the position cap. After the other checks, the plan is
-    refused when risk per share is below limits.min_risk_per_share, or, when an
-    ATR is given and limits.min_risk_atr_multiple > 0, below that multiple of ATR.
+    refused when risk per share is below limits.min_risk_per_share, or, when
+    limits.min_risk_atr_multiple > 0, below that multiple of the LARGER of the 1-minute `atr`
+    and the 5-minute `atr_5m` (issue #115). Each ATR counts only when given. A provisional
+    5-minute ATR (fewer than 14 five-minute bars, `atr_5m_provisional` True; early in the
+    session) counts too: the larger of the two still applies, and a provisional value tends to
+    run high, so this errs toward refusing. Before any 5-minute ATR exists (before 09:45 ET,
+    outside the entry window) only the 1-minute rule applies. The stop BUFFER stays on the
+    1-minute `atr`.
     """
     if setup not in SETUPS:
         return _refuse(f"unknown setup {setup!r}")
@@ -120,6 +128,13 @@ def exit_plan(
             return _refuse(err)
         if atr_d < 0:
             return _refuse("atr must not be negative")
+    atr_5m_d: Decimal | None = None
+    if atr_5m is not None:
+        atr_5m_d, err = _dec(atr_5m, "atr_5m")
+        if err:
+            return _refuse(err)
+        if atr_5m_d < 0:
+            return _refuse("atr_5m must not be negative")
     buffer_atr, err = _dec(buffer_atr, "buffer_atr")
     if err:
         return _refuse(err)
@@ -172,6 +187,15 @@ def exit_plan(
     ):
         return _refuse(
             f"risk per share {risk} is below {limits.min_risk_atr_multiple} x ATR {atr_d}"
+        )
+    if (
+        atr_5m_d is not None
+        and limits.min_risk_atr_multiple > 0
+        and risk < limits.min_risk_atr_multiple * atr_5m_d
+    ):
+        kind = "provisional 5-minute ATR" if atr_5m_provisional else "5-minute ATR"
+        return _refuse(
+            f"risk per share {risk} is below {limits.min_risk_atr_multiple} x {kind} {atr_5m_d}"
         )
     target = (entry + r * risk).quantize(CENT, rounding=ROUND_CEILING)
     # Rounded down so the reported ratio never overstates the real one.

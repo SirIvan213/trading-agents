@@ -49,6 +49,7 @@ import sys
 import tempfile
 import time
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,11 +62,12 @@ from agents.schemas import CallRecord, DebateRecord, DecisionPacket, RetryRecord
 from agents.trader import TraderRun, run_trader
 from journal.log import Journal
 from pipeline.ledger import PlanLedger
-from pipeline.order_flow import Proposal, propose, render_ticket
+from pipeline.order_flow import Proposal, propose, quotes_from, render_ticket
 from pipeline.scenarios import DEFAULT as DEFAULT_SCENARIO
 from pipeline.scenarios import ScenarioData, compare, load_scenario, scenario_names
 from pipeline.smoke_common import ROOT, add_safety_flags, key_hint, load_env, refuse_unbilled
 from pipeline.smoke_technical import token_totals
+from tools.market_calendar import coverage_warning
 
 DEBATERS = ("bull", "bear")
 TRADER = "trader"
@@ -141,9 +143,24 @@ def print_money_debug(rejections: list[Rejection]) -> None:
             print(f"    excerpt: {d.excerpt}")
 
 
+def fixture_quotes(data: Any, now: Any) -> Any:
+    """The scenario's saved latestQuote, re-stamped at the run clock (#68). Fixture quotes are
+    minutes older than the fixture clock, and this smoke ticket is never sent anywhere; the
+    real order path (pipeline.decide) reads a live quote and enforces its age."""
+    live = quotes_from(data)
+
+    def read(symbol: str) -> object:
+        q = live(symbol)
+        return {**q, "t": now.isoformat()} if isinstance(q, dict) else q
+    return read
+
+
 def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, AgentConfig]) -> None:
     """Print the analysts, the debate, every call's serving model and the token totals."""
     print(f"== Analysts + debate smoke run: {packet.symbol} as of {packet.as_of} ==")
+    warning = coverage_warning(datetime.fromisoformat(packet.as_of).date())
+    if warning:
+        print(f"WARNING: {warning}")
     for agent, cfg in configs.items():
         print(f"{agent:<12} requested {cfg.model}  effort {cfg.effort}  "
               f"fallbacks {'on' if cfg.fallbacks else 'off'}")
@@ -325,7 +342,8 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         # 2026-11-03). A throwaway journal: the smoke run never writes the real one.
         with tempfile.TemporaryDirectory() as tmp:
             proposal = propose(ledger, trader.decision.plan_id,
-                               journal=Journal(Path(tmp) / "smoke.jsonl"), clock=lambda: now)
+                               journal=Journal(Path(tmp) / "smoke.jsonl"), clock=lambda: now,
+                               quotes=fixture_quotes(data, now))
 
     report(packet, debate, configs)
     print_trader(trader, proposal)

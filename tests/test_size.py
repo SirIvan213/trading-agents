@@ -8,6 +8,7 @@ import pytest
 from tools.config import CONFIG_DIR, load_limits
 from tools.risk_check import DayState, check_order
 from tools.size import Plan, size_position
+from tools.slippage import minimum_allowance
 
 # Example config: $5,000 account, $50 max loss (explicit path, never a local limits.json).
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
@@ -61,7 +62,8 @@ def test_missing_or_non_string_symbol_is_refused(symbol):
 
 def test_padded_symbol_chain_is_blocked_by_risk_check():
     limits = replace(LIMITS, blocked_symbols=frozenset({"GME"}))
-    sized = size_position(Plan(" gme ", D("20.00"), D("19.00"), D("21.00")), limits)
+    plan = Plan(" gme ", D("20.00"), D("19.00"), D("21.00"))
+    sized = size_position(plan, limits, slippage=minimum_allowance(plan.entry, limits))
     assert sized["ok"]
     now = datetime(2026, 10, 19, 10, 15, tzinfo=ZoneInfo("America/New_York"))
     r = check_order(sized["order"], limits, DayState(), now)
@@ -70,7 +72,8 @@ def test_padded_symbol_chain_is_blocked_by_risk_check():
 
 def test_padded_other_symbol_chain_passes():
     limits = replace(LIMITS, blocked_symbols=frozenset({"GME"}))
-    sized = size_position(Plan(" aapl ", D("20.00"), D("19.00"), D("21.00")), limits)
+    plan = Plan(" aapl ", D("20.00"), D("19.00"), D("21.00"))
+    sized = size_position(plan, limits, slippage=minimum_allowance(plan.entry, limits))
     now = datetime(2026, 10, 19, 10, 15, tzinfo=ZoneInfo("America/New_York"))
     assert check_order(sized["order"], limits, DayState(), now) == {
         "verdict": "PASS", "reasons": []}

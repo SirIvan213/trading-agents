@@ -10,11 +10,14 @@ from tools.config import CONFIG_DIR, limits_from_dict, load_limits
 from tools.exit_plan import exit_plan
 from tools.risk_check import DayState, check_order
 from tools.size import Plan, size_position
+from tools.slippage import minimum_allowance
 
 NY = ZoneInfo("America/New_York")
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
+# Sized with the 0.37 allowance order_flow would use for this price (0.10% of 364.18, rounded up
+# to the cent, beats a 2-cent spread): 8 shares, worst-case loss (5.86 + 0.37) x 8 = 49.84.
 ORDER = size_position(
-    Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS
+    Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS, slippage=D("0.37")
 )["order"]
 MON_1015 = datetime(2026, 10, 19, 10, 15, tzinfo=NY)
 
@@ -61,8 +64,10 @@ def test_daily_loss_limit_blocks():
 
 
 def test_daily_loss_limit_at_boundary_passes():
-    # 103.12 used + 46.88 this order = exactly 150.00
-    assert check(state=DayState(risk_used_today=D("103.12")))["verdict"] == "PASS"
+    # 100.16 used + 49.84 worst-case loss of this order (#68: 8 x (5.86 + 0.37)) = exactly 150.00
+    assert check(state=DayState(risk_used_today=D("100.16")))["verdict"] == "PASS"
+    r = check(state=DayState(risk_used_today=D("100.17")))
+    assert r["verdict"] == "BLOCK" and any("daily limit" in x for x in r["reasons"])
 
 
 def test_trade_count_blocks():
@@ -106,6 +111,7 @@ def cap_order(target, entry="100.00", stop="99.00", qty=10):
     return {
         "symbol": "AAPL", "side": "buy", "qty": qty, "type": "market",
         "order_class": "bracket", "entry": entry, "stop_loss": stop, "take_profit": target,
+        "slippage": str(minimum_allowance(D(entry), LIMITS)),
     }
 
 

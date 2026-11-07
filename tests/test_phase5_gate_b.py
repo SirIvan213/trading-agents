@@ -19,6 +19,7 @@ from tools.exit_plan import exit_plan
 from tools.risk_check import DayState, check_order
 from tools.scan import ScanCriteria, criteria_from_dict, scan
 from tools.size import Plan, size_position
+from tools.slippage import minimum_allowance
 
 NY = ZoneInfo("America/New_York")
 EXAMPLE_PATH = CONFIG_DIR / "limits.example.json"
@@ -31,7 +32,8 @@ def at(y, m, d, hh, mm, s=0):
 
 
 def order(limits=LIMITS):
-    sized = size_position(Plan("AAPL", D("20.00"), D("19.00"), D("21.00")), limits)
+    plan = Plan("AAPL", D("20.00"), D("19.00"), D("21.00"))
+    sized = size_position(plan, limits, slippage=minimum_allowance(plan.entry, limits))
     assert sized["ok"], sized
     return sized["order"]
 
@@ -46,14 +48,17 @@ HOL_2026 = [(1, 1), (1, 19), (2, 16), (4, 3), (5, 25), (6, 19), (7, 3), (9, 7), 
             (12, 25)]
 HOL_2027 = [(1, 1), (1, 18), (2, 15), (3, 26), (5, 31), (6, 18), (7, 5), (9, 6), (11, 25),
             (12, 24)]
-HOLIDAYS = [date(2026, m, d) for m, d in HOL_2026] + [date(2027, m, d) for m, d in HOL_2027]
-EARLY = [date(2026, 11, 27), date(2026, 12, 24), date(2027, 11, 26)]
+HOL_2028 = [(1, 17), (2, 21), (4, 14), (5, 29), (6, 19), (7, 4), (9, 4), (11, 23), (12, 25)]
+HOLIDAYS = ([date(2026, m, d) for m, d in HOL_2026] + [date(2027, m, d) for m, d in HOL_2027]
+            + [date(2028, m, d) for m, d in HOL_2028])
+EARLY = [date(2026, 11, 27), date(2026, 12, 24), date(2027, 11, 26), date(2028, 7, 3),
+         date(2028, 11, 24)]
 
 
 def test_holiday_table_is_exactly_the_listed_dates():
     assert set(cal.FULL_HOLIDAYS) == set(HOLIDAYS)
     assert set(cal.EARLY_CLOSES) == set(EARLY)
-    assert cal.COVERED_YEARS == {2026, 2027}
+    assert cal.COVERED_YEARS == {2026, 2027, 2028}
 
 
 @pytest.mark.parametrize("day", HOLIDAYS, ids=str)
@@ -74,7 +79,7 @@ def test_normal_weekday_and_weekend():
     assert cal.closed_reason(date(2026, 11, 28)) == "weekend"
 
 
-@pytest.mark.parametrize("day", [date(2025, 11, 3), date(2028, 3, 1)], ids=str)
+@pytest.mark.parametrize("day", [date(2025, 11, 3), date(2029, 3, 1)], ids=str)
 def test_uncovered_year_raises(day):
     assert cal.covers(day) is False
     with pytest.raises(cal.CalendarError, match="does not cover"):
@@ -165,7 +170,7 @@ def test_normal_day_entry_window_still_1530():
     assert r["reasons"] == ["outside entry window 09:45-15:30 ET"]  # no early-close suffix
 
 
-@pytest.mark.parametrize("day", [(2025, 11, 3), (2028, 3, 1)])
+@pytest.mark.parametrize("day", [(2025, 11, 3), (2029, 3, 1)])
 def test_uncovered_year_blocked(day):
     r = check(at(*day, 11, 0))
     assert r == {"verdict": "BLOCK", "reasons": ["market calendar does not cover this date"]}
@@ -201,7 +206,7 @@ def test_regular_session_holiday_or_weekend_has_no_bars(day):
 
 
 def test_regular_session_uncovered_year_falls_back_to_1600():
-    kept = B.regular_session(B.parse_bars(minute_bars(date(2028, 3, 1))))
+    kept = B.regular_session(B.parse_bars(minute_bars(date(2029, 3, 1))))
     assert len(kept) == 390
 
 
@@ -245,7 +250,7 @@ def test_exit_plan_holiday_or_weekend_refused(day):
 
 def test_exit_plan_uncovered_year_refused():
     r = exit_plan("orb", D("102.50"), LIMITS, opening_range=GOOD_OR, atr=D("0.80"),
-                  session_day=date(2028, 3, 1))
+                  session_day=date(2029, 3, 1))
     assert r == {"ok": False, "reason": "market calendar does not cover this date"}
 
 
@@ -568,8 +573,8 @@ def test_staleness_parses_nanoseconds_and_compares_exactly(t, expected):
 
 def test_weekend_bars_are_dropped_even_in_an_uncovered_year():
     from tools.bars import Bar, regular_session
-    sat = datetime(2028, 3, 4, 10, 0, tzinfo=NY)  # a Saturday, year not in the calendar
-    mon = datetime(2028, 3, 6, 10, 0, tzinfo=NY)
+    sat = datetime(2029, 3, 3, 10, 0, tzinfo=NY)  # a Saturday, year not in the calendar
+    mon = datetime(2029, 3, 5, 10, 0, tzinfo=NY)
     bars = [Bar(ts=t, open=D("1"), high=D("1"), low=D("1"), close=D("1"), volume=1)
             for t in (sat, mon)]
     assert [b.ts for b in regular_session(bars)] == [mon]

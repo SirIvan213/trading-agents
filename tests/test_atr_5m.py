@@ -11,6 +11,7 @@ import pytest
 import agents.tool_registry as reg
 from agents.tool_registry import price_levels
 from pipeline.orders import build_order
+from tests.order_helpers import fresh_quote
 from tests.test_scenario_review import LIMITS, session
 from tests.test_scenarios import Loaded
 from tools import bars as B
@@ -163,7 +164,7 @@ def test_clean_buy_plan_exit_context_exact_values():
     assert orb["entry_vs_vwap_atr_5m"] == "1.71" and orb["target_vs_session_high"] == "at_or_above"
 
 
-@pytest.mark.parametrize("bad", [None, "0", "0.0000", "-1"])
+@pytest.mark.parametrize("bad", [None, "0", "0.0000"])
 def test_plan_exit_context_fields_are_none_when_atr_5m_missing_or_not_positive(bad):
     s = session("clean-buy")
     s.summary = {**s.summary, "atr_5m": bad}
@@ -211,33 +212,60 @@ def test_exit_plan_still_gets_the_1_minute_atr(spy, setup):
         assert kw["atr"] != D(s.summary["atr_5m"])
 
 
+def test_plan_exit_negative_atr_5m_in_the_summary_is_refused_fail_closed():
+    s = session("clean-buy")
+    s.summary = {**s.summary, "atr_5m": "-1"}
+    lv = price_levels(s.summary)
+    res, err = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
+                                       "level": lv["vwap"]})
+    assert err is False
+    assert res["ok"] is False and res["reason"] == "atr_5m must not be negative"
+    assert not s.exit_plans
+
+
 def test_stop_buffer_uses_the_1_minute_atr_not_atr_5m():
     s = session("clean-buy")
     lv = price_levels(s.summary)
-    s.summary = {**s.summary, "atr_5m": "5.0000"}  # a huge 5-minute ATR must change nothing
-    res, _ = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
-                                     "level": lv["vwap"]})
+    inp = {"setup": "level", "entry": lv["last_close"], "level": lv["vwap"]}
+    base, _ = s.execute("plan_exit", inp)
+    assert base["ok"] is True and base["stop"] == "80.38" and base["risk_per_share"] == "0.34"
+    # a 5-minute ATR that does not bind (0.30 < risk 0.34) must change nothing, buffer included:
+    # 0.10 x 0.1301 = 0.0130 keeps the stop at 80.38; 0.10 x 0.30 would have moved it
+    s2 = session("clean-buy")
+    s2.summary = {**s2.summary, "atr_5m": "0.3000"}
+    res, _ = s2.execute("plan_exit", inp)
     assert res["ok"] is True and res["stop"] == "80.38" and res["risk_per_share"] == "0.34"
+    # a huge 5-minute ATR does not widen the stop either: the plan is refused, not rebuffered
+    s3 = session("clean-buy")
+    s3.summary = {**s3.summary, "atr_5m": "5.0000"}
+    res, _ = s3.execute("plan_exit", inp)
+    assert res == {"ok": False,
+                   "reason": "risk per share 0.34 is below 1.0 x 5-minute ATR 5.0000"}
 
 
-def test_min_risk_atr_multiple_refusal_is_judged_on_the_1_minute_atr():
+def test_min_risk_atr_multiple_refusal_follows_the_larger_of_the_two_atrs():
     assert LIMITS.min_risk_atr_multiple == D("1.0")
     s = session("clean-buy")
-    # a vwap level of 80.61 puts the stop at 80.59: risk 0.13, above the 0.10 floor but just
-    # under 1.0 x the 1-minute ATR 0.1301
+    # entry 80.72 with a vwap level of 80.61:
+    # stop floor(80.61 - 0.0130) = 80.59, risk 0.13: above the 0.10 floor, just under 1.0 x
+    # the 1-minute ATR 0.1301
     s.summary = {**s.summary, "price_levels": {**s.summary["price_levels"], "vwap": "80.61"}}
     inp = {"setup": "level", "entry": "80.72", "level": "80.61"}
     res, err = s.execute("plan_exit", inp)
     assert err is False and res["ok"] is False
-    assert "ATR 0.1301" in res["reason"]
+    assert res["reason"] == "risk per share 0.13 is below 1.0 x ATR 0.1301"
     assert not s.exit_plans
-    # a tiny atr_5m cannot turn the refusal into a pass
+    # a tiny atr_5m cannot turn the refusal into a pass (the larger ATR, the 1-minute one, binds)
     s.summary = {**s.summary, "atr_5m": "0.0001"}
     res, _ = s.execute("plan_exit", inp)
     assert res["ok"] is False and "ATR 0.1301" in res["reason"]
-    # with a 1-minute ATR of 0.05 the same plan passes although 0.12 < atr_5m 0.1868:
-    # the check follows the 1-minute ATR only
+    # with a 1-minute ATR of 0.05 the 1-minute rule passes, but the 5-minute 0.1868 now binds
     s.summary = {**s.summary, "atr": "0.05", "atr_5m": "0.1868"}
+    res, _ = s.execute("plan_exit", inp)
+    assert res["ok"] is False
+    assert res["reason"] == "risk per share 0.12 is below 1.0 x 5-minute ATR 0.1868"
+    # (the smaller 1-minute ATR also shrinks the buffer: risk 0.12) and passes at exactly 0.12
+    s.summary = {**s.summary, "atr": "0.05", "atr_5m": "0.1200"}
     res, _ = s.execute("plan_exit", inp)
     assert res["ok"] is True and res["risk_per_share"] == "0.12"
 
@@ -297,7 +325,8 @@ def test_clean_buy_both_plans_valid_and_both_orders_pass(clean):
     for setup, extra, rr in (("level", {"level": lv["vwap"]}, "2.00"), ("orb", {}, "1.00")):
         res, err = s.execute("plan_exit", {"setup": setup, "entry": lv["last_close"], **extra})
         assert err is False and res["ok"] is True and res["reward_to_risk"] == rr
-        sized = build_order(s.exit_plans[-1], LIMITS, s.now)
+        quote = fresh_quote(s.exit_plans[-1].entry, s.now)  # live quote (#68), ask at entry
+        sized = build_order(s.exit_plans[-1], LIMITS, s.now, quote)
         assert sized["ok"] is True, sized
         assert check_order(sized["order"], LIMITS, DayState(), s.now) == {
             "verdict": "PASS", "reasons": []}

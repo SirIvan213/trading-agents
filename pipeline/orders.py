@@ -17,6 +17,7 @@ from pipeline.market import NY
 from tools.config import Limits
 from tools.scan import validate_symbols
 from tools.size import Plan, size_position
+from tools.slippage import slippage_from_quote
 
 _CENT = Decimal("0.01")
 _SKEW = timedelta(seconds=5)  # tolerated clock skew for a plan dated slightly ahead of now
@@ -70,7 +71,9 @@ def _freshness_error(plan: ExitPlanRecord, limits: Limits, now: datetime) -> str
     return None
 
 
-def build_order(plan: ExitPlanRecord, limits: Limits, now: datetime) -> dict:
+def build_order(
+    plan: ExitPlanRecord, limits: Limits, now: datetime, quote: object = None
+) -> dict:
     """Re-validate the plan, check it is fresh at `now`, then size it (size_position result).
 
     The plan is refused unless its entry is its last_close (entry_level "last_close" and the
@@ -79,6 +82,10 @@ def build_order(plan: ExitPlanRecord, limits: Limits, now: datetime) -> dict:
     is naive, plan.as_of is not an aware ISO datetime, the plan is from another New York
     session day, it is dated more than 5 s in the future, or it is older than
     limits.max_plan_age_s. Never raises for a bad plan: returns {"ok": False, "reason": ...}.
+    `quote` is the symbol's live Alpaca latestQuote, read by the caller at `now` (#68). Without
+    a fresh, uncrossed quote, or when its ask is above entry + slippage allowance, there is no
+    order. The order is sized with that allowance (tools.slippage, tools.size); the result
+    gains "quote" (bid, ask, spread, quote_t, age_s) for the ticket and the journal.
     """
     try:
         validate_symbols([plan.symbol])
@@ -103,4 +110,11 @@ def build_order(plan: ExitPlanRecord, limits: Limits, now: datetime) -> dict:
     stale = _freshness_error(plan, limits, now)
     if stale is not None:
         return {"ok": False, "reason": stale}
-    return size_position(Plan(plan.symbol, entry, stop, target), limits)
+    slip = slippage_from_quote(entry, quote, limits, now)
+    if slip.get("ok") is not True:
+        return {"ok": False, "reason": str(slip.get("reason", "no live quote"))}
+    sized = size_position(Plan(plan.symbol, entry, stop, target), limits,
+                          slippage=Decimal(slip["allowance"]))
+    if sized.get("ok") is True:
+        sized["quote"] = {k: slip[k] for k in ("bid", "ask", "spread", "quote_t", "age_s")}
+    return sized

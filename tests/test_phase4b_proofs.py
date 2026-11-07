@@ -26,7 +26,7 @@ from journal.log import APPROVED, Journal
 from pipeline.decide import run_decision
 from tests.debate_helpers import bear_json, bull_json, reply
 from tests.fakes import NOON, FakeAllData, report_json, response, text, tool_use
-from tests.order_helpers import StepClock, raw_lines
+from tests.order_helpers import QuotingData, StepClock, raw_lines
 from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (autouse fixtures)
 from tools.config import CONFIG_DIR, load_limits
 
@@ -121,7 +121,8 @@ def go(tmp_path, scr, *, ask=lambda _: "yes", clock=None, name="j.jsonl"):
     router = Router(scr)
     journal = Journal(tmp_path / name)
     clock = clock or StepClock(NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=40))
-    result = run_decision(SYMBOL, data=FakeAllData(), clients=router, journal=journal,
+    data = QuotingData(FakeAllData(), clock, SYMBOL, "103.10")  # live quote (#68), ask = entry
+    result = run_decision(SYMBOL, data=data, clients=router, journal=journal,
                           clock=clock, ask=ask, rounds=1, timeout_s=10)
     return result, router, journal
 

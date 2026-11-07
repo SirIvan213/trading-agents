@@ -1,9 +1,15 @@
 """NYSE trading calendar: full holidays and early closes (issue #11).
 
-Source: the official NYSE "Holidays & Trading Hours" page,
-https://www.nyse.com/markets/hours-calendars (read 2026-11-06). Update the tables below from
-that page each year; a year that is not in COVERED_YEARS is not a trading day as far as
-risk_check is concerned (it BLOCKs: "market calendar does not cover this date").
+Sources:
+- 2026-2028: NYSE Group press release "NYSE Group Announces 2026, 2027 and 2028 Holiday and
+  Early Closings Calendar", Dec 23, 2025,
+  https://ir.theice.com/press/news-details/2025/NYSE-Group-Announces-2026-2027-and-2028-Holiday-and-Early-Closings-Calendar/default.aspx
+  (read 2026-11-07).
+- Cross-checked against the official NYSE "Holidays & Trading Hours" page,
+  https://www.nyse.com/markets/hours-calendars (read 2026-11-06).
+Add each new year from NYSE's next announcement; a year that is not in COVERED_YEARS is not a
+trading day as far as risk_check is concerned (it BLOCKs: "market calendar does not cover
+this date"), and coverage_warning() says so from December of the last covered year.
 
 Early closes are at 13:00 ET (1:15 p.m. for eligible options, not relevant here). On an early
 close the flat-by time moves to 12:55 ET and the entry window ends as many minutes before it
@@ -41,17 +47,29 @@ FULL_HOLIDAYS: dict[date, str] = {
     date(2027, 9, 6): "Labor Day",
     date(2027, 11, 25): "Thanksgiving Day",
     date(2027, 12, 24): "Christmas Day (observed)",
+    # 2028: no New Year's Day holiday (Jan 1 is a Saturday; NYSE observes none)
+    date(2028, 1, 17): "Martin Luther King, Jr. Day",
+    date(2028, 2, 21): "Washington's Birthday",
+    date(2028, 4, 14): "Good Friday",
+    date(2028, 5, 29): "Memorial Day",
+    date(2028, 6, 19): "Juneteenth National Independence Day",
+    date(2028, 7, 4): "Independence Day",
+    date(2028, 9, 4): "Labor Day",
+    date(2028, 11, 23): "Thanksgiving Day",
+    date(2028, 12, 25): "Christmas Day",
 }
 
-# 13:00 ET closes. NYSE lists none for Christmas Eve 2027 (a full holiday that year) and
-# none for July 3 in 2026 or 2027.
+# 13:00 ET closes. NYSE lists none for Christmas Eve 2027 (a full holiday that year) or 2028
+# (a Sunday; Christmas is Monday Dec 25), and none for July 3 in 2026 or 2027.
 EARLY_CLOSES: dict[date, str] = {
     date(2026, 11, 27): "Day after Thanksgiving",
     date(2026, 12, 24): "Christmas Eve",
     date(2027, 11, 26): "Day after Thanksgiving",
+    date(2028, 7, 3): "Day before Independence Day",
+    date(2028, 11, 24): "Day after Thanksgiving",
 }
 
-COVERED_YEARS = frozenset({2026, 2027})
+COVERED_YEARS = frozenset({2026, 2027, 2028})
 EARLY_CLOSE = time(13, 0)
 EARLY_CLOSE_FLAT_BY = time(12, 55)
 
@@ -63,6 +81,19 @@ class CalendarError(ValueError):
 def covers(day: date) -> bool:
     """True if the calendar tables include `day`'s year."""
     return day.year in COVERED_YEARS
+
+
+def coverage_warning(today: date) -> str | None:
+    """A warning from December 1 of a covered year when the next year is not covered (#132),
+    or when `today` itself is not covered; None otherwise. Advisory text only."""
+    if not covers(today):
+        return (f"market calendar does not cover {today.year}: every order is blocked; add "
+                f"NYSE's {today.year} holidays to tools/market_calendar.py")
+    if today.month == 12 and not covers(date(today.year + 1, 1, 1)):
+        return (f"market calendar ends on December 31, {today.year}: add NYSE's "
+                f"{today.year + 1} holidays to tools/market_calendar.py before January 1, "
+                "or every order will be blocked")
+    return None
 
 
 def session_hours(day: date) -> tuple[time, time] | None:

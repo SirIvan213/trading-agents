@@ -16,7 +16,7 @@ from agents.trader import build_trader_payload
 from pipeline.ledger import PlanLedger
 from pipeline.orders import build_order
 from tests.debate_helpers import make_packet
-from tests.order_helpers import AS_OF, T0, plan
+from tests.order_helpers import AS_OF, T0, fresh_quote, plan
 from tests.test_atr_5m import _early_session
 from tests.test_scenario_review import LIMITS, session
 
@@ -228,7 +228,7 @@ def test_plan_labels_model_forbids_extra_fields_and_is_frozen():
 # ---------------- build_order: a market order needs entry == last_close ----------------
 
 def test_build_order_passes_when_the_entry_is_the_last_close():
-    out = build_order(plan(), LIMITS, T0)
+    out = build_order(plan(), LIMITS, T0, fresh_quote("364.18", T0))
     assert out["ok"] is True and out["order"]["entry"] == "364.18"
 
 

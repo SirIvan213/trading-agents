@@ -44,6 +44,7 @@ from pipeline.order_flow import (
     Proposal,
     approve,
     propose,
+    quotes_from,
     render_ticket,
     wall_clock,
 )
@@ -154,13 +155,15 @@ def run_decision(
         return result
 
     plan_id: str = decision.plan_id  # the ONLY value that crosses to the order path
-    result.proposal = propose(ledger, plan_id, journal=journal, clock=clock)
+    quotes = quotes_from(data)  # live quote, read again in the approval re-check (#68)
+    result.proposal = propose(ledger, plan_id, journal=journal, clock=clock, quotes=quotes)
     budget["age_at_proposal_s"] = _elapsed_s(
         started, datetime.fromisoformat(result.proposal.checked_at))
     if ask is None:
         return result
     t0 = time.monotonic()
-    result.outcome = approve(result.proposal, ledger, journal=journal, ask=ask, clock=clock)
+    result.outcome = approve(result.proposal, ledger, journal=journal, ask=ask, clock=clock,
+                             quotes=quotes)
     timings["approval"] = int((time.monotonic() - t0) * 1000)
     budget["plan_age_at_approval_s"] = result.outcome.plan_age_s
     return result

@@ -31,6 +31,7 @@ from tests.order_helpers import (
     approved_entry,
     journal_with,
     plan,
+    quotes_at,
     raw_lines,
     sealed_ledger,
 )
@@ -68,7 +69,7 @@ def never_ask(_prompt: str) -> str:
 
 
 def good(ledger, journal, t=T0) -> Proposal:
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(t))
+    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(t), quotes=quotes_at(t))
     assert p.ok, p.reason
     return p
 
@@ -81,14 +82,15 @@ def test_propose_sizes_and_passes(ledger, journal):
     assert p.plan_id == "plan-1" and p.run_id == ledger.run_id
     assert p.order == {
         "symbol": "TSLA", "side": "buy", "qty": 8, "type": "market", "order_class": "bracket",
-        "entry": "364.18", "stop_loss": "358.32", "take_profit": "370.04"}
-    assert p.sized["max_loss"] == "46.88" and p.verdict == {"verdict": "PASS", "reasons": []}
+        "entry": "364.18", "stop_loss": "358.32", "take_profit": "370.04", "slippage": "0.37"}
+    # #68: allowance 0.37 (0.10% of entry beats the 0.02 spread): (5.86 + 0.37) x 8 = 49.84
+    assert p.sized["max_loss"] == "49.84" and p.verdict == {"verdict": "PASS", "reasons": []}
     assert p.checked_at == T0.isoformat()
 
 
 def test_propose_reads_the_clock_once_and_never_the_plan_date(ledger, journal):
     clock = StepClock(T0)
-    propose(ledger, "plan-1", journal=journal, clock=clock)
+    propose(ledger, "plan-1", journal=journal, clock=clock, quotes=quotes_at(T0))
     assert clock.calls == 1
 
 
@@ -118,7 +120,8 @@ def refused(p: Proposal, stage: str, reason_part: str):
 
 @pytest.mark.parametrize("bad", ["plan-9", "", "PLAN-1", "plan-1 ", None, 1, ["plan-1"]])
 def test_unknown_plan_id(ledger, journal, bad):
-    p = propose(ledger, bad, journal=journal, clock=clock_at(T0))  # type: ignore[arg-type]
+    p = propose(ledger, bad, journal=journal, clock=clock_at(T0),
+            quotes=quotes_at(T0))  # type: ignore[arg-type]
     refused(p, "plan", "unknown plan_id")
     assert p.plan is None and p.sized is None and p.verdict is None
 
@@ -126,50 +129,59 @@ def test_unknown_plan_id(ledger, journal, bad):
 def test_unsealed_ledger(journal):
     led = PlanLedger("TSLA")
     led.record(plan())
-    refused(propose(led, "plan-1", journal=journal, clock=clock_at(T0)), "plan", "unknown")
+    refused(propose(led, "plan-1", journal=journal, clock=clock_at(T0),
+            quotes=quotes_at(T0)), "plan", "unknown")
 
 
 def test_sealed_but_not_accepted_ledger(journal):
-    refused(propose(sealed_ledger(accept=False), "plan-1", journal=journal, clock=clock_at(T0)),
+    refused(propose(sealed_ledger(accept=False), "plan-1", journal=journal, clock=clock_at(T0),
+            quotes=quotes_at(T0)),
             "plan", "unknown")
 
 
 def test_not_a_ledger_at_all(journal):
-    p = propose(object(), "plan-1", journal=journal, clock=clock_at(T0))  # type: ignore[arg-type]
+    p = propose(object(), "plan-1", journal=journal, clock=clock_at(T0),
+            quotes=quotes_at(T0))  # type: ignore[arg-type]
     refused(p, "plan", "unknown plan_id")
     assert p.run_id == ""
 
 
 def test_stale_plan(ledger, journal):
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(AS_OF + timedelta(seconds=301)))
+    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(AS_OF + timedelta(seconds=301)),
+            quotes=quotes_at(AS_OF + timedelta(seconds=301)))
     refused(p, "size", "301s old")
     assert p.plan is not None and p.verdict is None
 
 
 def test_plan_age_boundary_exactly_max_plan_age_s_passes(ledger, journal):
     at_limit = propose(ledger, "plan-1", journal=journal,
-                       clock=clock_at(AS_OF + timedelta(seconds=LIMITS.max_plan_age_s)))
+                       clock=clock_at(AS_OF + timedelta(seconds=LIMITS.max_plan_age_s)),
+                               quotes=quotes_at(AS_OF + timedelta(seconds=LIMITS.max_plan_age_s)))
     assert at_limit.ok
     over = propose(ledger, "plan-1", journal=journal,
-                   clock=clock_at(AS_OF + timedelta(seconds=LIMITS.max_plan_age_s + 1)))
+                   clock=clock_at(AS_OF + timedelta(seconds=LIMITS.max_plan_age_s + 1)),
+                           quotes=quotes_at(AS_OF + timedelta(seconds=LIMITS.max_plan_age_s + 1)))
     refused(over, "size", "old")
 
 
 def test_plan_dated_in_the_future(ledger, journal):
-    early = clock_at(AS_OF - timedelta(seconds=60))
-    refused(propose(ledger, "plan-1", journal=journal, clock=early), "size", "future")
+    t = AS_OF - timedelta(seconds=60)
+    refused(propose(ledger, "plan-1", journal=journal, clock=clock_at(t), quotes=quotes_at(t)),
+            "size", "future")
 
 
 def test_plan_from_another_session_day(ledger, journal):
     next_day = AS_OF + timedelta(days=1)
-    refused(propose(ledger, "plan-1", journal=journal, clock=clock_at(next_day)),
+    refused(propose(ledger, "plan-1", journal=journal, clock=clock_at(next_day),
+            quotes=quotes_at(next_day)),
             "size", "another session day")
 
 
 def test_risk_block_outside_entry_hours(journal):
     early = AS_OF.replace(hour=9, minute=31)
     led = sealed_ledger([plan(as_of=early.isoformat())])
-    p = propose(led, "plan-1", journal=journal, clock=clock_at(early + timedelta(seconds=10)))
+    p = propose(led, "plan-1", journal=journal, clock=clock_at(early + timedelta(seconds=10)),
+            quotes=quotes_at(early + timedelta(seconds=10)))
     refused(p, "risk", "entry")
     assert p.sized is not None and p.verdict["verdict"] == "BLOCK"
 
@@ -177,16 +189,19 @@ def test_risk_block_outside_entry_hours(journal):
 def test_entry_window_start_boundary_passes(journal):
     start = AS_OF.replace(hour=9, minute=45)
     led = sealed_ledger([plan(as_of=start.isoformat())])
-    assert propose(led, "plan-1", journal=journal, clock=clock_at(start)).ok
+    assert propose(led, "plan-1", journal=journal, clock=clock_at(start),
+            quotes=quotes_at(start)).ok
     before = start - timedelta(minutes=1)
     led2 = sealed_ledger([plan(as_of=before.isoformat())])
-    refused(propose(led2, "plan-1", journal=journal, clock=clock_at(before)), "risk", "entry")
+    refused(propose(led2, "plan-1", journal=journal, clock=clock_at(before),
+            quotes=quotes_at(before)), "risk", "entry")
 
 
 def test_market_closed_weekend_is_blocked(journal):
     sat = AS_OF.replace(day=24)  # Saturday 2026-10-24
     led = sealed_ledger([plan(as_of=sat.isoformat())])
-    p = propose(led, "plan-1", journal=journal, clock=clock_at(sat + timedelta(seconds=5)))
+    p = propose(led, "plan-1", journal=journal, clock=clock_at(sat + timedelta(seconds=5)),
+            quotes=quotes_at(sat + timedelta(seconds=5)))
     assert p.ok is False and p.stage == "risk"
 
 
@@ -194,24 +209,25 @@ def test_risk_block_when_journal_is_at_max_trades_per_day(ledger, journal):
     n = LIMITS.max_trades_per_day
     for i in range(n - 1):  # one below the limit: still passes
         journal.append(approved_entry(T0 - timedelta(minutes=i + 1)))
-    assert propose(ledger, "plan-1", journal=journal, clock=clock_at(T0)).ok
+    assert propose(ledger, "plan-1", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0)).ok
     journal.append(approved_entry(T0 - timedelta(minutes=n + 1)))
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0))
+    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0))
     refused(p, "risk", f"already {n} trades today")
 
 
 def test_risk_block_on_daily_loss_limit_boundary(ledger, tmp_path):
-    # max loss of this order is 46.88; 103.12 used makes exactly the 150.00 limit: allowed
-    j_ok = journal_with(tmp_path / "a.jsonl", [approved_entry(T0, "103.12")])
-    assert propose(ledger, "plan-1", journal=j_ok, clock=clock_at(T0)).ok
-    j_bad = journal_with(tmp_path / "b.jsonl", [approved_entry(T0, "103.13")])
-    refused(propose(ledger, "plan-1", journal=j_bad, clock=clock_at(T0)), "risk", "daily limit")
+    # worst-case loss of this order is 49.84 (#68); 100.16 used makes exactly 150.00: allowed
+    j_ok = journal_with(tmp_path / "a.jsonl", [approved_entry(T0, "100.16")])
+    assert propose(ledger, "plan-1", journal=j_ok, clock=clock_at(T0), quotes=quotes_at(T0)).ok
+    j_bad = journal_with(tmp_path / "b.jsonl", [approved_entry(T0, "100.17")])
+    refused(propose(ledger, "plan-1", journal=j_bad, clock=clock_at(T0),
+            quotes=quotes_at(T0)), "risk", "daily limit")
 
 
 def test_yesterdays_approvals_do_not_block_today(ledger, journal):
     for i in range(5):
         journal.append(approved_entry(T0 - timedelta(days=1, minutes=i), "100.00"))
-    assert propose(ledger, "plan-1", journal=journal, clock=clock_at(T0)).ok
+    assert propose(ledger, "plan-1", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0)).ok
 
 
 def test_invalid_limits(ledger, journal, monkeypatch):
@@ -219,27 +235,28 @@ def test_invalid_limits(ledger, journal, monkeypatch):
         raise ValueError("limits config is invalid")
 
     monkeypatch.setattr(of, "load_checked_limits", boom)
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0))
+    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0))
     refused(p, "limits", "limits config is invalid")
     assert p.plan is None and p.sized is None
 
 
 def test_paper_false_limits_block(ledger, journal, monkeypatch):
     monkeypatch.setattr(of, "load_checked_limits", lambda *a, **k: replace(LIMITS, paper=False))
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0))
+    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0))
     refused(p, "risk", "paper")
 
 
 @pytest.mark.parametrize("junk", ["not json\n", "[1]\n", '{"status": "approved_not_sent"}\n'])
 def test_corrupt_or_malformed_journal(ledger, journal, junk):
     journal.path.write_text(junk, encoding="utf-8")
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0))
+    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0))
     refused(p, "journal", "journal")
     assert p.sized is not None and p.verdict is None  # sized, but never checked or ordered
 
 
 def test_naive_clock(ledger, journal):
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0.replace(tzinfo=None)))
+    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0.replace(tzinfo=None)),
+            quotes=quotes_at(T0.replace(tzinfo=None)))
     refused(p, "plan", "timezone-aware")
 
 
@@ -252,7 +269,8 @@ def test_zero_negative_and_inverted_plans_never_size(journal):
         plan(risk_per_share="1.00"),  # risk does not match entry - stop
     ]
     for p in bad:
-        out = propose(sealed_ledger([p]), "plan-1", journal=journal, clock=clock_at(T0))
+        out = propose(sealed_ledger([p]), "plan-1", journal=journal, clock=clock_at(T0),
+                quotes=quotes_at(T0))
         assert out.ok is False and out.stage == "size" and out.order is None
 
 
@@ -261,19 +279,21 @@ def test_zero_negative_and_inverted_plans_never_size(journal):
 def test_ticket_names_everything_a_human_must_check(ledger, journal):
     p = good(ledger, journal)
     t = render_ticket(p)
-    for part in ("Buy 8 shares of TSLA", "358.32", "370.04", "364.18", "46.88", "plan-1",
+    for part in ("Buy 8 shares of TSLA", "358.32", "370.04", "364.18", "49.84", "0.37",
+                 "Worst-case loss", "plan-1",
                  ledger.run_id, "NOT sent to a broker", "paper account", "15:55"):
         assert part in t, part
     assert "max_loss_per_trade" in t  # which limit decided the size
 
 
 def test_ticket_for_a_refusal_says_no_order(ledger, journal):
-    p = propose(ledger, "plan-9", journal=journal, clock=clock_at(T0))
+    p = propose(ledger, "plan-9", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0))
     t = render_ticket(p)
     assert t.startswith("NO ORDER for plan plan-9") and "unknown plan_id" in t
     assert "Buy" not in t
-    assert render_ticket(propose(ledger, None, journal=journal,  # type: ignore[arg-type]
-                                 clock=clock_at(T0))).startswith("NO ORDER for plan (none)")
+    none = propose(ledger, None, journal=journal,  # type: ignore[arg-type]
+                   clock=clock_at(T0), quotes=quotes_at(T0))
+    assert render_ticket(none).startswith("NO ORDER for plan (none)")
 
 
 def test_approval_prompt_names_the_exact_order(ledger, journal):
@@ -285,7 +305,7 @@ def test_ask_gets_the_ticket_and_the_prompt(ledger, journal):
     p = good(ledger, journal)
     seen = []
     approve(p, ledger, journal=journal, ask=lambda q: seen.append(q) or "no",
-            clock=clock_at(T0))
+            clock=clock_at(T0), quotes=quotes_at(T0))
     assert seen == [render_ticket(p) + "\n" + approval_prompt(p)]
 
 
@@ -294,7 +314,8 @@ def test_ask_gets_the_ticket_and_the_prompt(ledger, journal):
 @pytest.mark.parametrize("answer", ["yes", " yes \n", "yes\n", "\tyes", "  yes  "])
 def test_only_exact_yes_approves(ledger, journal, answer):
     out = approve(good(ledger, journal), ledger, journal=journal, ask=lambda _: answer,
-                  clock=clock_at(T0 + timedelta(seconds=10)))
+                  clock=clock_at(T0 + timedelta(seconds=10)),
+                          quotes=quotes_at(T0 + timedelta(seconds=10)))
     assert out.status == APPROVED and out.reason is None
 
 
@@ -305,7 +326,7 @@ def test_only_exact_yes_approves(ledger, journal, answer):
 ])
 def test_everything_else_declines(ledger, journal, answer):
     out = approve(good(ledger, journal), ledger, journal=journal, ask=lambda _: answer,
-                  clock=clock_at(T0))
+                  clock=clock_at(T0), quotes=quotes_at(T0))
     assert out.status == "declined" and out.reason == "not approved"
     assert out.recheck is None
     entries = raw_lines(journal)
@@ -317,20 +338,23 @@ def test_eof_declines(ledger, journal):
     def eof(_):
         raise EOFError
 
-    out = approve(good(ledger, journal), ledger, journal=journal, ask=eof, clock=clock_at(T0))
+    out = approve(good(ledger, journal), ledger, journal=journal, ask=eof, clock=clock_at(T0),
+            quotes=quotes_at(T0))
     assert out.status == "declined"
     assert [e["status"] for e in raw_lines(journal)] == ["declined"]
 
 
 def test_a_decline_does_not_re_read_the_clock(ledger, journal):
     clock = StepClock(T0)
-    approve(good(ledger, journal), ledger, journal=journal, ask=lambda _: "no", clock=clock)
+    approve(good(ledger, journal), ledger, journal=journal, ask=lambda _: "no", clock=clock,
+            quotes=quotes_at(T0))
     assert clock.calls == 0
 
 
 def test_a_not_ok_proposal_never_asks(ledger, journal):
-    p = propose(ledger, "plan-9", journal=journal, clock=clock_at(T0))
-    out = approve(p, ledger, journal=journal, ask=never_ask, clock=StepClock(T0))
+    p = propose(ledger, "plan-9", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0))
+    out = approve(p, ledger, journal=journal, ask=never_ask, clock=StepClock(T0),
+                  quotes=quotes_at(T0))
     assert out.status == "no_order" and out.reason == "unknown plan_id"
     assert out.proposal is p and out.recheck is None
     # audited as "no_order" with its stage; never approved
@@ -351,10 +375,10 @@ def test_every_refused_proposal_never_asks(ledger, journal, monkeypatch, stage_c
                             lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
     elif stage_case == "journal":
         journal.path.write_text("garbage\n", encoding="utf-8")
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(t))
+    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(t), quotes=quotes_at(t))
     assert p.ok is False
     before = journal.path.read_text(encoding="utf-8") if journal.path.exists() else ""
-    out = approve(p, ledger, journal=journal, ask=never_ask, clock=clock_at(t))
+    out = approve(p, ledger, journal=journal, ask=never_ask, clock=clock_at(t), quotes=quotes_at(t))
     assert out.status == "no_order"
     after = journal.path.read_text(encoding="utf-8") if journal.path.exists() else ""
     added = after[len(before):].splitlines()
@@ -368,7 +392,8 @@ def test_every_refused_proposal_never_asks(ledger, journal, monkeypatch, stage_c
 def test_approval_re_reads_the_clock_and_records_the_new_time(ledger, journal):
     p = good(ledger, journal)
     clock = StepClock(T0 + timedelta(seconds=45))
-    out = approve(p, ledger, journal=journal, ask=yes, clock=clock)
+    out = approve(p, ledger, journal=journal, ask=yes, clock=clock,
+                  quotes=quotes_at(T0 + timedelta(seconds=45)))
     assert clock.calls == 1
     assert out.status == APPROVED
     assert out.approved_at == (T0 + timedelta(seconds=45)).isoformat() != p.checked_at
@@ -379,7 +404,7 @@ def test_approval_re_reads_the_clock_and_records_the_new_time(ledger, journal):
 def test_clock_past_max_plan_age_between_propose_and_approve_refuses(ledger, journal):
     p = good(ledger, journal)  # age 30 s: fresh
     late = AS_OF + timedelta(seconds=LIMITS.max_plan_age_s + 1)
-    out = approve(p, ledger, journal=journal, ask=yes, clock=clock_at(late))
+    out = approve(p, ledger, journal=journal, ask=yes, clock=clock_at(late), quotes=quotes_at(late))
     assert out.status == "refused_after_approval"
     assert "re-check failed at size" in out.reason and "old" in out.reason
     assert out.recheck.ok is False and out.recheck.stage == "size"
@@ -391,20 +416,22 @@ def test_clock_past_max_plan_age_between_propose_and_approve_refuses(ledger, jou
 def test_answer_slow_but_inside_the_age_limit_still_approves(ledger, journal):
     p = good(ledger, journal)
     edge = AS_OF + timedelta(seconds=LIMITS.max_plan_age_s)
-    out = approve(p, ledger, journal=journal, ask=yes, clock=clock_at(edge))
+    out = approve(p, ledger, journal=journal, ask=yes, clock=clock_at(edge), quotes=quotes_at(edge))
     assert out.status == APPROVED and out.plan_age_s == LIMITS.max_plan_age_s
 
 
 def test_session_day_rolls_over_during_the_prompt(ledger, journal):
     p = good(ledger, journal)
-    out = approve(p, ledger, journal=journal, ask=yes, clock=clock_at(AS_OF + timedelta(days=1)))
+    out = approve(p, ledger, journal=journal, ask=yes, clock=clock_at(AS_OF + timedelta(days=1)),
+            quotes=quotes_at(AS_OF + timedelta(days=1)))
     assert out.status == "refused_after_approval" and "another session day" in out.reason
 
 
 def test_re_check_naive_clock_refuses(ledger, journal):
     p = good(ledger, journal)
     out = approve(p, ledger, journal=journal, ask=yes,
-                  clock=clock_at(T0.replace(tzinfo=None)))
+                  clock=clock_at(T0.replace(tzinfo=None)),
+                          quotes=quotes_at(T0.replace(tzinfo=None)))
     assert out.status == "refused_after_approval"
     assert APPROVED not in [e["status"] for e in raw_lines(journal)]
 
@@ -417,7 +444,8 @@ def test_re_check_block_when_max_trades_reached_while_waiting(ledger, journal):
             journal.append(approved_entry(T0 + timedelta(seconds=i), "1.00"))
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=ask_and_race, clock=clock_at(T0))
+    out = approve(p, ledger, journal=journal, ask=ask_and_race, clock=clock_at(T0),
+            quotes=quotes_at(T0))
     assert out.status == "refused_after_approval" and out.recheck.stage == "risk"
     assert "already 3 trades today" in out.reason
     statuses = [e["status"] for e in raw_lines(journal)]
@@ -432,7 +460,8 @@ def test_re_check_block_when_daily_loss_reached_while_waiting(ledger, journal):
         journal.append(approved_entry(T0, "110.00"))  # 110 + 46.88 > 150
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=ask_and_race, clock=clock_at(T0))
+    out = approve(p, ledger, journal=journal, ask=ask_and_race, clock=clock_at(T0),
+            quotes=quotes_at(T0))
     assert out.status == "refused_after_approval" and "daily limit" in out.reason
     assert journal.day_state(T0).trades_today == 1
 
@@ -444,7 +473,8 @@ def test_re_check_corrupt_journal_refuses(ledger, journal):
         journal.path.write_text("garbage\n", encoding="utf-8")
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=ask_and_corrupt, clock=clock_at(T0))
+    out = approve(p, ledger, journal=journal, ask=ask_and_corrupt, clock=clock_at(T0),
+            quotes=quotes_at(T0))
     assert out.status == "refused_after_approval" and out.recheck.stage == "journal"
     assert journal.path.read_text(encoding="utf-8").splitlines()[0] == "garbage"
     with pytest.raises(JournalError):  # the journal stays unreadable; nothing counted as approved
@@ -460,7 +490,8 @@ def test_re_check_invalid_limits_refuses(ledger, journal, monkeypatch):
         monkeypatch.setattr(of, "load_checked_limits", boom)
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=ask_and_break, clock=clock_at(T0))
+    out = approve(p, ledger, journal=journal, ask=ask_and_break, clock=clock_at(T0),
+            quotes=quotes_at(T0))
     assert out.status == "refused_after_approval" and out.recheck.stage == "limits"
 
 
@@ -475,7 +506,7 @@ def test_order_changed_between_ticket_and_re_check(ledger, journal, monkeypatch)
         return tighter
 
     monkeypatch.setattr(of, "load_checked_limits", second_time_different)
-    out = approve(p, ledger, journal=journal, ask=yes, clock=clock_at(T0))
+    out = approve(p, ledger, journal=journal, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0))
     assert out.status == "changed_after_approval"
     assert out.reason == "the re-built order differs from the approved ticket"
     assert out.recheck.ok and out.recheck.order["qty"] == 4 and out.proposal.order["qty"] == 8
@@ -494,9 +525,9 @@ def test_order_changed_when_limits_differ_on_the_second_load_only(journal, monke
         return LIMITS if len(calls) == 1 else replace(LIMITS, max_position_value=D("1000.00"))
 
     monkeypatch.setattr(of, "load_checked_limits", flip)
-    p = propose(led, "plan-1", journal=journal, clock=clock_at(T0))
+    p = propose(led, "plan-1", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0))
     assert p.ok and p.order["qty"] == 8
-    out = approve(p, led, journal=journal, ask=yes, clock=clock_at(T0))
+    out = approve(p, led, journal=journal, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0))
     assert len(calls) == 2
     assert out.status == "changed_after_approval" and out.recheck.order["qty"] == 2
 
@@ -506,14 +537,15 @@ def test_plan_changed_between_ticket_and_re_check(ledger, journal):
     other = sealed_ledger([plan(entry="364.00", stop="358.14", risk_per_share="5.86",
                                 target="369.86", last_close="364.00")])
     # ^ a different plan under the same id
-    out = approve(p, other, journal=journal, ask=yes, clock=clock_at(T0))
+    out = approve(p, other, journal=journal, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0))
     assert out.status == "changed_after_approval"
     assert APPROVED not in [e["status"] for e in raw_lines(journal)]
 
 
 def test_re_check_against_a_ledger_without_the_plan_refuses(ledger, journal):
     p = good(ledger, journal)
-    out = approve(p, sealed_ledger([]), journal=journal, ask=yes, clock=clock_at(T0))
+    out = approve(p, sealed_ledger([]), journal=journal, ask=yes, clock=clock_at(T0),
+            quotes=quotes_at(T0))
     assert out.status == "refused_after_approval" and out.recheck.stage == "plan"
 
 
@@ -526,7 +558,7 @@ def test_ask_cannot_alter_the_order_it_approves(ledger, journal):
         p.order["qty"] = 8000  # the dict is shared; the re-check must not trust it
         return "yes"
 
-    out = approve(p, ledger, journal=journal, ask=tamper, clock=clock_at(T0))
+    out = approve(p, ledger, journal=journal, ask=tamper, clock=clock_at(T0), quotes=quotes_at(T0))
     assert out.status == "changed_after_approval"  # re-built order differs from tampered ticket
     assert APPROVED not in [e["status"] for e in raw_lines(journal)]
     p.order["qty"] = 8
@@ -536,7 +568,8 @@ def test_ask_cannot_alter_the_order_it_approves(ledger, journal):
 # ===================== the approved journal entry =====================
 
 def approved(ledger, journal, t=T0 + timedelta(seconds=20)):
-    out = approve(good(ledger, journal), ledger, journal=journal, ask=yes, clock=clock_at(t))
+    out = approve(good(ledger, journal), ledger, journal=journal, ask=yes, clock=clock_at(t),
+            quotes=quotes_at(t))
     assert out.status == APPROVED
     (entry,) = raw_lines(journal)
     return out, entry
@@ -546,7 +579,7 @@ def test_approved_entry_holds_order_max_loss_age_and_run_id(ledger, journal):
     out, e = approved(ledger, journal)
     assert e["status"] == "approved_not_sent" and e["reason"] is None
     assert e["order"] == out.recheck.order and e["order"]["qty"] == 8
-    assert e["max_loss"] == "46.88" and e["plan_age_s"] == 50
+    assert e["max_loss"] == "49.84" and e["plan_age_s"] == 50
     assert e["run_id"] == ledger.run_id and e["plan_id"] == "plan-1" and e["symbol"] == "TSLA"
     assert e["decided_by"] == "max_loss_per_trade"
     assert e["verdict"] == {"verdict": "PASS", "reasons": []}
@@ -556,14 +589,17 @@ def test_approved_entry_holds_order_max_loss_age_and_run_id(ledger, journal):
 def test_approved_entry_has_exactly_these_keys(ledger, journal):
     _, e = approved(ledger, journal)
     assert set(e) == {"status", "reason", "run_id", "plan_id", "symbol", "order", "max_loss",
-                      "decided_by", "verdict", "checked_at", "approved_at", "plan_age_s"}
+                      "decided_by", "quote", "verdict", "checked_at", "approved_at",
+                      "plan_age_s"}
 
 
 def test_no_journal_entry_ever_holds_confidence_reasoning_or_evidence(ledger, journal):
     approved(ledger, journal)
-    approve(good(ledger, journal), ledger, journal=journal, ask=lambda _: "no", clock=clock_at(T0))
+    approve(good(ledger, journal), ledger, journal=journal, ask=lambda _: "no", clock=clock_at(T0),
+            quotes=quotes_at(T0))
     approve(good(ledger, journal), ledger, journal=journal, ask=yes,
-            clock=clock_at(AS_OF + timedelta(days=1)))  # refused_after_approval
+            clock=clock_at(AS_OF + timedelta(days=1)),
+                    quotes=quotes_at(AS_OF + timedelta(days=1)))  # refused_after_approval
 
     def keys(o):
         if isinstance(o, dict):
@@ -585,7 +621,7 @@ def test_no_journal_entry_ever_holds_confidence_reasoning_or_evidence(ledger, jo
 def test_approved_entry_counts_toward_the_day(ledger, journal):
     approved(ledger, journal)
     s = journal.day_state(T0)
-    assert s.trades_today == 1 and s.risk_used_today == D("46.88")
+    assert s.trades_today == 1 and s.risk_used_today == D("49.84")
 
 
 def test_journal_write_failure_after_approval_raises_and_counts_nothing(ledger, tmp_path):
@@ -598,7 +634,7 @@ def test_journal_write_failure_after_approval_raises_and_counts_nothing(ledger, 
     j = Failing(tmp_path / "f.jsonl")
     p = good(ledger, j)
     with pytest.raises(JournalError):
-        approve(p, ledger, journal=j, ask=yes, clock=clock_at(T0))
+        approve(p, ledger, journal=j, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0))
     assert j.day_state(T0).trades_today == 0
 
 
@@ -606,10 +642,12 @@ def test_third_approval_of_the_day_blocks_the_fourth(ledger, journal):
     """End to end through the journal: approvals consume the day's trade budget."""
     for i in range(LIMITS.max_trades_per_day):  # 3 x 46.88 = 140.64, inside the 150 limit
         t = T0 + timedelta(seconds=i)
-        p = propose(ledger, "plan-1", journal=journal, clock=clock_at(t))
+        p = propose(ledger, "plan-1", journal=journal, clock=clock_at(t), quotes=quotes_at(t))
         assert p.ok
-        assert approve(p, ledger, journal=journal, ask=yes, clock=clock_at(t)).status == APPROVED
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0 + timedelta(seconds=9)))
+        assert approve(p, ledger, journal=journal, ask=yes, clock=clock_at(t),
+                quotes=quotes_at(t)).status == APPROVED
+    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0 + timedelta(seconds=9)),
+            quotes=quotes_at(T0 + timedelta(seconds=9)))
     assert p.ok is False and p.stage == "risk"
 
 
@@ -628,17 +666,17 @@ def params(fn):
 
 
 def test_propose_signature_pinned():
-    assert params(propose) == ["ledger", "plan_id", "journal", "clock"]
+    assert params(propose) == ["ledger", "plan_id", "journal", "clock", "quotes"]
     kw_only = [n for n, p in inspect.signature(propose).parameters.items()
                if p.kind is inspect.Parameter.KEYWORD_ONLY]
-    assert kw_only == ["journal", "clock"]
+    assert kw_only == ["journal", "clock", "quotes"]
 
 
 def test_approve_signature_pinned():
-    assert params(approve) == ["p", "ledger", "journal", "ask", "clock"]
+    assert params(approve) == ["p", "ledger", "journal", "ask", "clock", "quotes"]
     kw_only = [n for n, p in inspect.signature(approve).parameters.items()
                if p.kind is inspect.Parameter.KEYWORD_ONLY]
-    assert kw_only == ["journal", "ask", "clock"]
+    assert kw_only == ["journal", "ask", "clock", "quotes"]
 
 
 def test_ticket_functions_take_only_a_proposal():
@@ -654,10 +692,12 @@ def test_no_parameter_can_carry_model_output_or_money(fn):
 @pytest.mark.parametrize("extra", ["packet", "decision", "confidence", "debate", "reasoning"])
 def test_extra_arguments_are_a_type_error(ledger, journal, extra):
     with pytest.raises(TypeError):
-        propose(ledger, "plan-1", journal=journal, clock=clock_at(T0), **{extra: 0.9})
+        propose(ledger, "plan-1", journal=journal, clock=clock_at(T0),
+                quotes=quotes_at(T0), **{extra: 0.9})
     p = good(ledger, journal)
     with pytest.raises(TypeError):
-        approve(p, ledger, journal=journal, ask=yes, clock=clock_at(T0), **{extra: 0.9})
+        approve(p, ledger, journal=journal, ask=yes, clock=clock_at(T0),
+                quotes=quotes_at(T0), **{extra: 0.9})
     assert not journal.path.exists()
 
 
@@ -671,7 +711,8 @@ def test_proposal_and_outcome_fields_pinned():
 
 def test_a_packet_passed_as_the_ledger_yields_no_order(journal):
     from tests.debate_helpers import make_packet
-    p = propose(make_packet(), "p1", journal=journal, clock=clock_at(T0))  # type: ignore[arg-type]
+    p = propose(make_packet(), "p1", journal=journal, clock=clock_at(T0),
+            quotes=quotes_at(T0))  # type: ignore[arg-type]
     assert p.ok is False and p.stage == "plan"
 
 
@@ -685,6 +726,7 @@ def test_plan_age_uses_the_ledger_plan_date_in_new_york_time(journal):
     """The plan's as_of can carry any UTC offset; age is computed on instants."""
     utc_made = AS_OF.astimezone(ZoneInfo("UTC"))
     led = sealed_ledger([plan(as_of=utc_made.isoformat())])
-    out = approve(propose(led, "plan-1", journal=journal, clock=clock_at(T0)), led,
-                  journal=journal, ask=yes, clock=clock_at(T0))
+    out = approve(propose(led, "plan-1", journal=journal, clock=clock_at(T0),
+            quotes=quotes_at(T0)), led,
+                  journal=journal, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0))
     assert out.status == APPROVED and out.plan_age_s == 30
