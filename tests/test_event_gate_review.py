@@ -17,6 +17,7 @@ from tests.order_helpers import (
     filings_ok,
     fmp_row,
     gate_for,
+    halts_ok,
     news_item,
     news_ok,
     submissions_202,
@@ -120,7 +121,7 @@ def test_blocked_a_halt_headline_repeated_from_yesterday_is_still_today():
     same = "Trading halted in TSLA pending news"
     items = [news_item("TSLA", same, NOW - timedelta(days=1)),
              news_item("TSLA", same, NOW - timedelta(hours=1))]
-    h = halt_status("TSLA", NOW, news_ok(items))
+    h = halt_status("TSLA", NOW, news_ok(items), halts_ok(NOW))
     assert h["status"] == "EVENT"
     assert h["findings"][0]["reason"] == f"trading halt today: {same!r}"
 
@@ -131,7 +132,7 @@ def test_blocked_a_halt_headline_repeated_from_yesterday_is_still_today():
     "not an object",
 ], ids=["no-symbols", "symbols-not-a-list", "not-a-dict"])
 def test_blocked_an_unreadable_item_cannot_read_as_no_halt(bad):
-    h = halt_status("TSLA", NOW, news_ok([bad]))
+    h = halt_status("TSLA", NOW, news_ok([bad]), halts_ok(NOW))
     assert h["status"] == "UNKNOWN"
     assert "1 news item(s) unreadable: cannot rule out a halt today" in h["findings"][0]["reason"]
 
@@ -143,7 +144,8 @@ def test_blocked_an_unreadable_item_cannot_read_as_no_halt(bad):
     "TSLA trading pause lifted after five minutes",
 ])
 def test_blocked_pause_and_suspension_wording_is_a_halt(headline):
-    h = halt_status("TSLA", NOW, news_ok([news_item("TSLA", headline, NOW - timedelta(hours=1))]))
+    item = news_item("TSLA", headline, NOW - timedelta(hours=1))
+    h = halt_status("TSLA", NOW, news_ok([item]), halts_ok(NOW))
     assert h["status"] == "EVENT", headline
 
 
@@ -152,19 +154,19 @@ def test_blocked_pause_and_suspension_wording_is_a_halt(headline):
 def test_blocked_an_item_that_does_not_list_this_symbol_is_unknown(symbols):
     item = news_item("TSLA", "Trading halted", NOW - timedelta(hours=1))
     item["symbols"] = symbols
-    assert halt_status("TSLA", NOW, news_ok([item]))["status"] == "UNKNOWN"
+    assert halt_status("TSLA", NOW, news_ok([item]), halts_ok(NOW))["status"] == "UNKNOWN"
 
 
 @pytest.mark.parametrize("listed", ["BRKB", "BRK B", "brk-b", "BRK/B"])
 def test_blocked_a_halt_listed_under_another_spelling_of_the_symbol_is_found(listed):
     item = news_item("BRK.B", "Trading halted in Berkshire B", NOW - timedelta(hours=1))
     item["symbols"] = [listed]
-    assert halt_status("BRK.B", NOW, news_ok([item]))["status"] == "EVENT"
+    assert halt_status("BRK.B", NOW, news_ok([item]), halts_ok(NOW))["status"] == "EVENT"
 
 
 def test_production_pause_is_not_a_trading_halt():
     item = news_item("TSLA", "Tesla paused Cybertruck production", NOW - timedelta(hours=1))
-    assert halt_status("TSLA", NOW, news_ok([item]))["status"] == "CLEAR"
+    assert halt_status("TSLA", NOW, news_ok([item]), halts_ok(NOW))["status"] == "CLEAR"
 
 
 # ============================ S2: item 2.02 today, whatever its time ============================

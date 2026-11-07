@@ -22,7 +22,7 @@ from pipeline.events import FmpCalendarCache, events_from
 from pipeline.order_flow import approve, propose, render_ticket
 from pipeline.scenarios import ScenarioData, load_scenario
 from tests.debate_helpers import reply
-from tests.fakes import NOON, FakeAllData, FakeClient, background_rows
+from tests.fakes import NOON, FakeAllData, FakeClient, background_rows, fresh_halt_feed
 from tests.order_helpers import (
     NY,
     T0,
@@ -516,7 +516,8 @@ def data_for(now, **over):
                                         "from": s.isoformat(), "to": e.isoformat(),
                                         "reply": background_rows(s, e)},
         submissions=lambda sym: filings_ok(now, symbol=sym)["submissions"],
-        news=lambda syms, a, b: {"news": [], "next_page_token": None})
+        news=lambda syms, a, b: {"news": [], "next_page_token": None},
+        halt_feed=lambda: fresh_halt_feed(now))
     d.update(over)
     return SimpleNamespace(**d)
 

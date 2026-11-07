@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -131,7 +132,59 @@ def background_rows(start: date, end: date) -> list[dict]:
     return rows
 
 
-class FakeFilingsData:
+def halt_item_xml(symbol: str, code: str = "LUDP", *, halt_date: str = "11/03/2026",
+                  halt_time: str = "10:05:00.214", resumed: tuple[str, str] | None = None,
+                  market: str = "NASDAQ") -> str:
+    """One synthetic <item> in the Nasdaq trade-halt feed's shape (NOT a copy of real data).
+    `resumed` is (MM/DD/YYYY, HH:MM:SS) for the resumption date and trade time."""
+    rd, rt = resumed or ("", "")
+    return (
+        f"<item><title>{symbol}</title><ndaq:HaltDate>{halt_date}</ndaq:HaltDate>"
+        f"<ndaq:HaltTime>{halt_time}</ndaq:HaltTime><ndaq:IssueSymbol>{symbol}</ndaq:IssueSymbol>"
+        f"<ndaq:IssueName>Synthetic {symbol} Inc</ndaq:IssueName>"
+        f"<ndaq:Market>{market}</ndaq:Market>"
+        f"<ndaq:ReasonCode>{code}</ndaq:ReasonCode><ndaq:PauseThresholdPrice />"
+        f"<ndaq:ResumptionDate>{rd}</ndaq:ResumptionDate><ndaq:ResumptionQuoteTime />"
+        f"<ndaq:ResumptionTradeTime>{rt}</ndaq:ResumptionTradeTime></item>")
+
+
+def halt_feed_xml(pub: datetime, items: tuple | list = (), *, num_items: int | str | None = None,
+                  ) -> bytes:
+    """A synthetic trade-halt RSS document published at `pub`. `items` are item XML strings
+    (halt_item_xml). `num_items` overrides ndaq:numItems (default: the item count)."""
+    n = len(items) if num_items is None else num_items
+    pub_s = format_datetime(pub.astimezone(UTC), usegmt=True)
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<rss version="2.0" xmlns:ndaq="http://www.nasdaqtrader.com/"><channel>'
+        "<title>Synthetic Trade Halts</title>"
+        f"<pubDate>{pub_s}</pubDate><ttl>1</ttl><ndaq:numItems>{n}</ndaq:numItems>"
+        + "".join(items) + "</channel></rss>").encode("utf-8")
+
+
+def fresh_halt_feed(now: datetime, items: tuple | list = ()) -> dict:
+    """What LiveData.halt_feed() returns: fetched 5 s before `now`, feed published 60 s before."""
+    return {"fetched_at": (now - timedelta(seconds=5)).astimezone(NY).isoformat(),
+            "body": halt_feed_xml(now - timedelta(seconds=60), items)}
+
+
+class HaltFeedFake:
+    """Mixin giving a fake data object a clean, fresh synthetic halt feed (#144). It is fresh
+    relative to the latest `end` of a news() read, which the event gate makes at its `now`
+    just before it reads the feed (pipeline.events.gate_inputs)."""
+
+    halt_items: tuple = ()
+    _halt_now: datetime | None = None
+
+    def _note_now(self, end: Any) -> None:
+        if isinstance(end, datetime) and end.tzinfo is not None:
+            self._halt_now = end
+
+    def halt_feed(self) -> dict:
+        return fresh_halt_feed(self._halt_now or NOW, self.halt_items)
+
+
+class FakeFilingsData(HaltFeedFake):
     """NewsData + FilingsData over saved fixtures (ABCD, CIK 12345). Records every call."""
 
     def __init__(
@@ -156,6 +209,7 @@ class FakeFilingsData:
 
     def news(self, symbols: list[str], start: datetime, end: datetime) -> dict:
         self.calls.append(("news", list(symbols), start, end))
+        self._note_now(end)
         if self.news_raises:
             raise self.news_raises
         return merged_news()
