@@ -13,6 +13,7 @@ from tools.config import CONFIG_DIR, limits_from_dict, load_limits
 from tools.exit_plan import exit_plan, to_plan
 from tools.risk_check import DayState, check_order
 from tools.size import Plan, size_position
+from tools.slippage import minimum_allowance
 
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
 FIX = Path(__file__).parent / "fixtures"
@@ -226,7 +227,7 @@ def chain(now):
                   atr=D(summary["atr"]))
     assert r["ok"], r
     plan = to_plan(r, "AAPL")
-    sized = size_position(plan, LIMITS)
+    sized = size_position(plan, LIMITS, slippage=minimum_allowance(plan.entry, LIMITS))
     assert sized["ok"], sized
     return summary, r, sized, check_order(sized["order"], LIMITS, DayState(), now)
 

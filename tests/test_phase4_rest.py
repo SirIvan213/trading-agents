@@ -13,6 +13,7 @@ from agents.schemas import ExitPlanRecord
 from agents.tool_registry import ToolSession
 from pipeline.orders import build_order
 from tests.fakes import NOW, FakeMarketData
+from tests.order_helpers import fresh_quote
 from tools.config import CONFIG_DIR, Limits, limits_from_dict, load_limits, validate_limits
 from tools.exit_plan import exit_plan
 from tools.risk_check import DayState, check_order
@@ -257,7 +258,8 @@ def test_plan_exit_with_atr_rule_off_accepts_the_same_pair():
 
 def order(entry="100.00", stop="99.90", target="100.10", qty=1):
     return {"symbol": "TSLA", "side": "buy", "qty": qty, "type": "market",
-            "order_class": "bracket", "entry": entry, "stop_loss": stop, "take_profit": target}
+            "order_class": "bracket", "entry": entry, "stop_loss": stop, "take_profit": target,
+            "slippage": "0.10"}  # the minimum allowance for a 100.00 entry (0.10%)
 
 
 def check(o, limits=LIMITS):
@@ -295,7 +297,8 @@ def test_risk_check_minimum_reason_is_appended_after_the_reward_cap():
 
 
 def test_risk_check_sizing_chain_for_a_valid_plan_still_passes():
-    plan = size_position(Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS)
+    plan = size_position(Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS,
+                         slippage=D("0.37"))
     assert check(plan["order"]) == {"verdict": "PASS", "reasons": []}
 
 
@@ -314,6 +317,11 @@ def plan_record(**over) -> ExitPlanRecord:
 
 MADE = datetime(2026, 10, 19, 10, 15, tzinfo=NY)  # == plan_record().as_of
 REAL_PLAN = Plan("TSLA", D("364.18"), D("358.32"), D("370.04"))
+
+
+def build_order_quoted(plan, limits, now):
+    """build_order with a live quote (#68) fresh at `now`: ask = the plan's entry, 2c spread."""
+    return build_order(plan, limits, now, fresh_quote(plan.entry, now))
 
 
 @pytest.fixture
@@ -337,14 +345,17 @@ def refused(reason, now, size_spy, plan=None, limits=LIMITS):
 
 
 def test_fresh_plan_sizes_exactly_as_before(size_spy):
-    out = build_order(plan_record(), LIMITS, MADE + timedelta(seconds=30))
-    assert out == size_position(REAL_PLAN, LIMITS) and out["ok"] is True
+    now = MADE + timedelta(seconds=30)
+    out = build_order(plan_record(), LIMITS, now, fresh_quote("364.18", now))
+    direct = size_position(REAL_PLAN, LIMITS, slippage=D("0.37"))  # allowance 0.37 (#68)
+    assert {k: v for k, v in out.items() if k != "quote"} == direct and out["ok"] is True
+    assert out["quote"]["ask"] == "364.18" and out["quote"]["age_s"] == 1
     assert len(size_spy) == 1  # exactly one call, made by build_order
 
 
 @pytest.mark.parametrize("age", [0, 1, 299, 300])
 def test_age_up_to_the_maximum_passes(age, size_spy):
-    assert build_order(plan_record(), LIMITS, MADE + timedelta(seconds=age))["ok"] is True
+    assert build_order_quoted(plan_record(), LIMITS, MADE + timedelta(seconds=age))["ok"] is True
 
 
 def test_age_301_is_refused(size_spy):
@@ -353,7 +364,7 @@ def test_age_301_is_refused(size_spy):
 
 def test_age_300_point_9_truncates_to_300_and_passes(size_spy):
     now = MADE + timedelta(seconds=300, milliseconds=900)
-    assert build_order(plan_record(), LIMITS, now)["ok"] is True
+    assert build_order_quoted(plan_record(), LIMITS, now)["ok"] is True
 
 
 def test_age_301_point_1_is_refused_as_301(size_spy):
@@ -367,12 +378,12 @@ def test_old_plan_message_reports_whole_seconds(size_spy):
 
 def test_max_age_follows_the_limit(size_spy):
     lim = replace(LIMITS, max_plan_age_s=10)
-    assert build_order(plan_record(), lim, MADE + timedelta(seconds=10))["ok"] is True
+    assert build_order_quoted(plan_record(), lim, MADE + timedelta(seconds=10))["ok"] is True
     refused("plan is 11s old (max 10s)", MADE + timedelta(seconds=11), size_spy, limits=lim)
 
 
 def test_future_plan_within_five_seconds_passes(size_spy):
-    assert build_order(plan_record(), LIMITS, MADE - timedelta(seconds=5))["ok"] is True
+    assert build_order_quoted(plan_record(), LIMITS, MADE - timedelta(seconds=5))["ok"] is True
 
 
 def test_future_plan_six_seconds_ahead_is_refused(size_spy):
@@ -394,17 +405,17 @@ def test_midnight_boundary_is_judged_in_new_york_not_utc(size_spy):
     # 20:00 ET Oct 19 is 00:00 UTC Oct 20; 23:00 ET is the same ET day but a UTC "next" day
     plan = plan_record(as_of="2026-10-19T20:00:00-04:00")
     same_day = datetime(2026, 10, 19, 20, 0, 30, tzinfo=NY)
-    assert build_order(plan, LIMITS, same_day)["ok"] is True
+    assert build_order_quoted(plan, LIMITS, same_day)["ok"] is True
     # now expressed in UTC with a different calendar date but the same ET day
     utc_now = datetime(2026, 10, 20, 0, 0, 30, tzinfo=ZoneInfo("UTC"))
-    assert build_order(plan, LIMITS, utc_now)["ok"] is True
+    assert build_order_quoted(plan, LIMITS, utc_now)["ok"] is True
     refused("plan is 10800s old (max 300s)",
             datetime(2026, 10, 19, 23, 0, 0, tzinfo=NY), size_spy, plan=plan)
 
 
 def test_as_of_in_another_offset_is_compared_as_an_instant(size_spy):
     plan = plan_record(as_of="2026-10-19T14:15:00+00:00")  # == 10:15 ET
-    assert build_order(plan, LIMITS, MADE + timedelta(seconds=30))["ok"] is True
+    assert build_order_quoted(plan, LIMITS, MADE + timedelta(seconds=30))["ok"] is True
 
 
 def test_naive_now_is_refused(size_spy):
@@ -457,7 +468,7 @@ def test_fall_back_first_occurrence_is_fresh(size_spy):
     plan = plan_record(as_of="2026-11-01T01:30:00-04:00")
     now = datetime(2026, 11, 1, 1, 31, tzinfo=NY, fold=0)  # first 01:31, still EDT
     assert now.utcoffset() == timedelta(hours=-4)
-    assert build_order(plan, LIMITS, now)["ok"] is True  # 60 s
+    assert build_order_quoted(plan, LIMITS, now)["ok"] is True  # 60 s
 
 
 def test_spring_forward_gap_counts_real_elapsed_seconds(size_spy):
@@ -465,7 +476,7 @@ def test_spring_forward_gap_counts_real_elapsed_seconds(size_spy):
     plan = plan_record(as_of="2026-03-08T01:59:30-05:00")
     now = datetime(2026, 3, 8, 3, 0, 30, tzinfo=NY)
     assert now.utcoffset() == timedelta(hours=-4)
-    assert build_order(plan, LIMITS, now)["ok"] is True
+    assert build_order_quoted(plan, LIMITS, now)["ok"] is True
     late = datetime(2026, 3, 8, 3, 5, 31, tzinfo=NY)  # 361 s of real time
     refused("plan is 361s old (max 300s)", late, size_spy, plan=plan)
 

@@ -11,6 +11,7 @@ import pytest
 import agents.tool_registry as reg
 from agents.tool_registry import price_levels
 from pipeline.orders import build_order
+from tests.order_helpers import fresh_quote
 from tests.test_scenario_review import LIMITS, session
 from tests.test_scenarios import Loaded
 from tools import bars as B
@@ -324,7 +325,8 @@ def test_clean_buy_both_plans_valid_and_both_orders_pass(clean):
     for setup, extra, rr in (("level", {"level": lv["vwap"]}, "2.00"), ("orb", {}, "1.00")):
         res, err = s.execute("plan_exit", {"setup": setup, "entry": lv["last_close"], **extra})
         assert err is False and res["ok"] is True and res["reward_to_risk"] == rr
-        sized = build_order(s.exit_plans[-1], LIMITS, s.now)
+        quote = fresh_quote(s.exit_plans[-1].entry, s.now)  # live quote (#68), ask at entry
+        sized = build_order(s.exit_plans[-1], LIMITS, s.now, quote)
         assert sized["ok"] is True, sized
         assert check_order(sized["order"], LIMITS, DayState(), s.now) == {
             "verdict": "PASS", "reasons": []}

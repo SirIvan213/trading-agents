@@ -13,6 +13,7 @@ from agents.tool_registry import price_levels
 from pipeline.orders import build_order
 from pipeline.scenarios import ScenarioData, load_scenario, scenario_names
 from tests.debate_helpers import AS_OF, make_plan
+from tests.order_helpers import fresh_quote
 from tests.test_scenario_review import LIMITS, session
 from tests.test_scenarios import Loaded
 
@@ -75,7 +76,9 @@ def test_extended_chase_plan_is_still_a_sizable_market_order_so_only_judgement_s
     s = session("extended-chase")
     lv = price_levels(s.summary)
     s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"], "level": lv["vwap"]})
-    assert build_order(s.exit_plans[0], LIMITS, s.now)["ok"] is True
+    plan = s.exit_plans[0]
+    quote = fresh_quote(plan.entry, s.now)  # a live quote (#68), ask at the entry
+    assert build_order(plan, LIMITS, s.now, quote)["ok"] is True
 
 
 def test_clean_buy_vwap_plan_is_not_extended_and_suggests_two():

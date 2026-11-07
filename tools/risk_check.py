@@ -12,12 +12,14 @@ from zoneinfo import ZoneInfo
 
 from tools.config import MARKET_CLOSE, Limits, validate_limits
 from tools.market_calendar import CalendarError, closed_reason, day_times, session_hours
+from tools.slippage import minimum_allowance
 
 NY = ZoneInfo("America/New_York")
 
 # Exactly the keys of tools.size.size_position's "order" dict.
 ORDER_FIELDS = frozenset(
-    {"symbol", "side", "qty", "type", "order_class", "entry", "stop_loss", "take_profit"}
+    {"symbol", "side", "qty", "type", "order_class", "entry", "stop_loss", "take_profit",
+     "slippage"}
 )
 
 
@@ -56,8 +58,8 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
     Minimum stop distance: entry - stop below limits.min_risk_per_share is blocked,
     because a stop a few cents from entry is a noise stop that sizing pushes to the
     position cap. No ATR is available here, so only the absolute minimum is enforced.
-    Only the 8 fields in ORDER_FIELDS are accepted (symbol, side, qty, type,
-    order_class, entry, stop_loss, take_profit). Any other key adds a BLOCK reason, and a
+    Only the 9 fields in ORDER_FIELDS are accepted (symbol, side, qty, type,
+    order_class, entry, stop_loss, take_profit, slippage). Any other key adds a BLOCK reason, and a
     non-dict order is blocked outright. Analyst confidence and other analyst output must
     never reach the gate or influence money decisions (CLAUDE.md rule 2).
     An early BLOCK (invalid limits, non-dict order, or bad prices) returns without
@@ -135,8 +137,24 @@ def check_order(order: dict, limits: Limits, state: DayState, now: datetime) -> 
         reasons.append("entry and stop must be positive")
         return {"verdict": "BLOCK", "reasons": reasons}
 
+    # Slippage allowance (#68): required, and at least the no-quote floor
+    # max(slippage_pct% of entry, 0.01), so an order sized without a live quote cannot pass.
+    raw_slip = order.get("slippage")
     try:
-        _numeric_rules(entry, stop, target, qty, limits, state, reasons)
+        if raw_slip is None or isinstance(raw_slip, bool):
+            raise TypeError("no slippage")
+        slippage = Decimal(raw_slip)
+        if not slippage.is_finite() or slippage < 0:
+            raise ValueError("bad slippage")
+    except (TypeError, ValueError, ArithmeticError):
+        reasons.append("order needs a finite, non-negative slippage allowance")
+        return {"verdict": "BLOCK", "reasons": reasons}
+    floor = minimum_allowance(entry, limits)
+    if slippage < floor:
+        reasons.append(f"slippage allowance {slippage} below minimum {floor}")
+
+    try:
+        _numeric_rules(entry, stop, target, qty, limits, state, reasons, slippage)
     except ArithmeticError:
         reasons.append("order arithmetic failed")
         return {"verdict": "BLOCK", "reasons": reasons}
@@ -175,8 +193,13 @@ def _numeric_rules(
     limits: Limits,
     state: DayState,
     reasons: list[str],
+    slippage: Decimal = Decimal("0"),
 ) -> None:
-    """Price/size rules, in their original order. May raise ArithmeticError."""
+    """Price/size rules, in their original order. May raise ArithmeticError.
+
+    Loss at stop, today's risk and position value assume the worst allowed fill, entry +
+    slippage (#68). Reward:risk (minimum and cap) and the minimum stop distance are judged on
+    the PLANNED entry, stop and target: slippage there would fail every 1R plan."""
     if stop >= entry:
         reasons.append("stop must be below entry")
     if target <= entry:
@@ -184,7 +207,7 @@ def _numeric_rules(
 
     risk_per_share = entry - stop
     if risk_per_share > 0 and qty:
-        loss_at_stop = risk_per_share * qty
+        loss_at_stop = (risk_per_share + slippage) * qty
         if loss_at_stop > limits.max_loss_per_trade:
             reasons.append(
                 f"loss at stop {loss_at_stop:.2f} exceeds max loss per trade "
@@ -200,8 +223,10 @@ def _numeric_rules(
             reasons.append(
                 f"reward:risk {reward_to_risk:.2f} below minimum {limits.min_reward_to_risk}"
             )
-        if entry * qty > limits.max_position_value:
-            reasons.append(f"position value {entry * qty:.2f} over cap {limits.max_position_value}")
+        worst_value = (entry + slippage) * qty
+        if worst_value > limits.max_position_value:
+            reasons.append(
+                f"position value {worst_value:.2f} over cap {limits.max_position_value}")
 
     if risk_per_share > 0:
         reward = target - entry

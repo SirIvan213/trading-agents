@@ -31,6 +31,17 @@ from tools.risk_check import check_order
 
 Clock = Callable[[], datetime]
 Ask = Callable[[str], str]
+# Live quote source (#68): symbol -> Alpaca latestQuote {"ap", "bp", "t"} or None. Injected like
+# the clock, read in propose() and again in the approval re-check.
+Quotes = Callable[[str], object]
+
+
+def quotes_from(data: object) -> Quotes:
+    """A Quotes source reading `data.snapshots([symbol])[symbol]["latestQuote"]`."""
+    def read(symbol: str) -> object:
+        snap = data.snapshots([symbol]).get(symbol)  # type: ignore[attr-defined]
+        return snap.get("latestQuote") if isinstance(snap, dict) else None
+    return read
 
 
 def wall_clock() -> datetime:
@@ -42,7 +53,8 @@ def wall_clock() -> datetime:
 class Proposal:
     """A sized and risk-checked order for one plan, or why there is none.
 
-    `stage` names the step that refused it: "limits", "plan", "size", "journal" or "risk";
+    `stage` names the step that refused it: "limits", "plan", "quote", "size", "journal" or
+    "risk";
     None when ok.
     """
 
@@ -87,9 +99,14 @@ def _expires_at(plan: ExitPlanRecord, max_age_s: int) -> str | None:
 
 
 def propose(
-    ledger: PlanLedger, plan_id: str | None, *, journal: Journal, clock: Clock = wall_clock
+    ledger: PlanLedger, plan_id: str | None, *, journal: Journal, clock: Clock = wall_clock,
+    quotes: Quotes | None = None,
 ) -> Proposal:
-    """Size and risk-check the ledger plan `plan_id` at `clock()`. Never raises."""
+    """Size and risk-check the ledger plan `plan_id` at `clock()`. Never raises.
+
+    The symbol's live quote is read from `quotes` after the clock (#68); without a quote source
+    or a usable quote there is no order (stage "quote" when the source fails, "size" when the
+    quote is missing, stale, crossed or the price moved past the slippage allowance)."""
     now = clock()
     run_id = ledger.run_id if isinstance(ledger, PlanLedger) else ""
 
@@ -109,7 +126,13 @@ def propose(
         plan = select_plan(ledger, plan_id)  # type: ignore[arg-type]
     except KeyError:
         return refuse("plan", "unknown plan_id")
-    sized = build_order(plan, limits, now)
+    if quotes is None:
+        return refuse("quote", "no live quote source", plan)
+    try:
+        quote = quotes(plan.symbol)
+    except Exception as exc:  # noqa: BLE001 - a data error must never raise out of propose
+        return refuse("quote", f"live quote unavailable ({type(exc).__name__})", plan)
+    sized = build_order(plan, limits, now, quote)
     if sized.get("ok") is not True:
         return refuse("size", str(sized.get("reason", "order could not be built")), plan, sized)
     try:
@@ -138,7 +161,10 @@ def render_ticket(p: Proposal) -> str:
         f"  Stop-loss: sell all {qty} if the price falls to {o['stop_loss']}.",
         f"  Take-profit: sell all {qty} if the price reaches {o['take_profit']}.",
         f"  Planned entry {o['entry']}; planned risk per share {sized['risk_per_share']}; "
-        f"planned loss at the stop {sized['max_loss']} (a gap through the stop can lose more).",
+        f"slippage allowance {sized.get('slippage', 'n/a')} per share "
+        f"(live ask {(sized.get('quote') or {}).get('ask', 'n/a')}).",
+        f"  Worst-case loss at the stop {sized['max_loss']}, for a fill up to entry + allowance "
+        "(a gap through the stop can lose more).",
         f"  Size decided by the limit: {sized['decided_by']}.",
         f"  Plan {plan.plan_id} ({plan.setup} setup), made {plan.as_of}; "
         f"flat by {plan.time_exit} ET.",
@@ -164,8 +190,16 @@ def _entry(p: Proposal, status: str, reason: str | None, **extra: object) -> dic
         "symbol": (p.plan.symbol if p.plan else None), "order": o,
         "max_loss": (p.sized or {}).get("max_loss") if p.ok else None,
         "decided_by": (p.sized or {}).get("decided_by") if p.ok else None,
+        "quote": (p.sized or {}).get("quote") if p.ok else None,
         "verdict": p.verdict, "checked_at": p.checked_at, **extra,
     }
+
+
+def _order_part(sized: dict | None) -> dict | None:
+    """The sized result without its live-quote details (time, age, bid/ask), which always
+    differ between the ticket and the re-check. Shares, allowance, max loss and the order
+    itself must match exactly."""
+    return None if sized is None else {k: v for k, v in sized.items() if k != "quote"}
 
 
 def _plan_age_s(plan: ExitPlanRecord, now: datetime) -> int | None:
@@ -178,7 +212,7 @@ def _plan_age_s(plan: ExitPlanRecord, now: datetime) -> int | None:
 
 def approve(
     p: Proposal, ledger: PlanLedger, *, journal: Journal, ask: Ask = input,
-    clock: Clock = wall_clock,
+    clock: Clock = wall_clock, quotes: Quotes | None = None,
 ) -> Outcome:
     """Ask a human to approve `p`, re-check it, and journal the result. Never sends an order.
 
@@ -211,13 +245,13 @@ def approve(
     # append happen under the journal's cross-process lock, so two concurrent approvers can
     # never both fit into the last trade or the last of the daily loss budget.
     with journal.exclusive():
-        again = propose(ledger, p.plan_id, journal=journal, clock=clock)
+        again = propose(ledger, p.plan_id, journal=journal, clock=clock, quotes=quotes)
         if not again.ok:
             reason = f"re-check failed at {again.stage}: {again.reason}"
             journal.append(
                 _entry(p, "refused_after_approval", reason, recheck_at=again.checked_at))
             return Outcome("refused_after_approval", reason, p, again)
-        if again.sized != p.sized or again.plan != p.plan:
+        if _order_part(again.sized) != _order_part(p.sized) or again.plan != p.plan:
             reason = "the re-built order differs from the approved ticket"
             journal.append(
                 _entry(p, "changed_after_approval", reason, recheck_at=again.checked_at))

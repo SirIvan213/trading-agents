@@ -93,7 +93,7 @@ def test_buy_prints_trader_section_and_ticket_and_never_writes_the_real_journal(
     assert "-- Order ticket (smoke: NO approval step, nothing journaled or sent) --" in out
     assert "the fixture's as_of" in out
     ticket = out.split("-- Order ticket")[1]
-    for part in ("ORDER TICKET", "Buy 8 shares of TSLA", "358.32", "370.04", "46.88",
+    for part in ("ORDER TICKET", "Buy 8 shares of TSLA", "358.32", "370.04", "49.84",
                  "NOT sent to a broker", "plan-1"):
         assert part in ticket, part
     assert "Type yes" not in out  # no approval step

@@ -19,6 +19,7 @@ from tools.exit_plan import exit_plan
 from tools.risk_check import DayState, check_order
 from tools.scan import ScanCriteria, criteria_from_dict, scan
 from tools.size import Plan, size_position
+from tools.slippage import minimum_allowance
 
 NY = ZoneInfo("America/New_York")
 EXAMPLE_PATH = CONFIG_DIR / "limits.example.json"
@@ -31,7 +32,8 @@ def at(y, m, d, hh, mm, s=0):
 
 
 def order(limits=LIMITS):
-    sized = size_position(Plan("AAPL", D("20.00"), D("19.00"), D("21.00")), limits)
+    plan = Plan("AAPL", D("20.00"), D("19.00"), D("21.00"))
+    sized = size_position(plan, limits, slippage=minimum_allowance(plan.entry, limits))
     assert sized["ok"], sized
     return sized["order"]
 

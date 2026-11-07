@@ -11,6 +11,7 @@ import pytest
 from tools.config import CONFIG_DIR, limits_from_dict, load_limits
 from tools.risk_check import DayState, check_order
 from tools.size import Plan, size_position
+from tools.slippage import minimum_allowance
 
 EXAMPLE = json.loads((CONFIG_DIR / "limits.example.json").read_text())
 NY = ZoneInfo("America/New_York")
@@ -261,7 +262,7 @@ def test_blocked_symbols_non_string_entry_rejected(bad):
 
 def order_for(symbol, limits):
     plan = Plan(symbol, D("20.00"), D("19.00"), D("21.00"))
-    sized = size_position(plan, limits)
+    sized = size_position(plan, limits, slippage=minimum_allowance(plan.entry, limits))
     assert sized["ok"], sized
     return sized["order"]
 

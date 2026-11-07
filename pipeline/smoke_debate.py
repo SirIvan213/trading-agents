@@ -62,7 +62,7 @@ from agents.schemas import CallRecord, DebateRecord, DecisionPacket, RetryRecord
 from agents.trader import TraderRun, run_trader
 from journal.log import Journal
 from pipeline.ledger import PlanLedger
-from pipeline.order_flow import Proposal, propose, render_ticket
+from pipeline.order_flow import Proposal, propose, quotes_from, render_ticket
 from pipeline.scenarios import DEFAULT as DEFAULT_SCENARIO
 from pipeline.scenarios import ScenarioData, compare, load_scenario, scenario_names
 from pipeline.smoke_common import ROOT, add_safety_flags, key_hint, load_env, refuse_unbilled
@@ -141,6 +141,18 @@ def print_money_debug(rejections: list[Rejection]) -> None:
             print(f"  {field_name}: token {d.number!r} in {d.mention!r}{note}")
             print(f"    pattern: {d.pattern}")
             print(f"    excerpt: {d.excerpt}")
+
+
+def fixture_quotes(data: Any, now: Any) -> Any:
+    """The scenario's saved latestQuote, re-stamped at the run clock (#68). Fixture quotes are
+    minutes older than the fixture clock, and this smoke ticket is never sent anywhere; the
+    real order path (pipeline.decide) reads a live quote and enforces its age."""
+    live = quotes_from(data)
+
+    def read(symbol: str) -> object:
+        q = live(symbol)
+        return {**q, "t": now.isoformat()} if isinstance(q, dict) else q
+    return read
 
 
 def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, AgentConfig]) -> None:
@@ -330,7 +342,8 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         # 2026-11-03). A throwaway journal: the smoke run never writes the real one.
         with tempfile.TemporaryDirectory() as tmp:
             proposal = propose(ledger, trader.decision.plan_id,
-                               journal=Journal(Path(tmp) / "smoke.jsonl"), clock=lambda: now)
+                               journal=Journal(Path(tmp) / "smoke.jsonl"), clock=lambda: now,
+                               quotes=fixture_quotes(data, now))
 
     report(packet, debate, configs)
     print_trader(trader, proposal)

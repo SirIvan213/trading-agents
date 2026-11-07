@@ -7,7 +7,7 @@ import inspect
 import re
 import threading
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal as D
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -42,6 +42,7 @@ from tests.fakes import (
     tool_use,
 )
 from tests.fakes import NOW as NOW_AAPL
+from tests.order_helpers import fresh_quote
 from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (autouse fixtures)
 from tools.config import CONFIG_DIR, Limits, load_limits
 from tools.exit_plan import exit_plan as real_exit_plan
@@ -54,6 +55,12 @@ NY = ZoneInfo("America/New_York")
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
 MON_1015 = datetime(2026, 10, 19, 10, 15, tzinfo=NY)
 FRESH = datetime(2026, 10, 19, 10, 15, 30, tzinfo=NY)  # 30 s after plan_record()'s as_of
+# A live TSLA quote at FRESH (#68): ask = entry, 2-cent spread, so the allowance is 0.37
+# (0.10% of 364.18 rounded up to the cent beats the spread) and the order is 8 shares.
+QUOTE = fresh_quote("364.18", FRESH)
+SLIPPAGE = D("0.37")
+QUOTE_DETAILS = {"bid": "364.16", "ask": "364.18", "spread": "0.02",
+                 "quote_t": (FRESH - timedelta(seconds=1)).isoformat(), "age_s": 1}
 
 AAPL_LEVELS = {
     "session_low": "99.70", "session_high": "103.20", "last_close": "103.10",
@@ -624,8 +631,8 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
         reasoning="; ".join(FAKE_TEXT))
     assert decision.symbol == dirty.symbol and decision.action == "BUY"
     led = ledger_with([rec])  # both packets carry the same plan; the order reads the ledger
-    o_clean = build_order(select_plan(led, "plan-1"), LIMITS, FRESH)
-    o_dirty = build_order(select_plan(led, "plan-1"), LIMITS, FRESH)
+    o_clean = build_order(select_plan(led, "plan-1"), LIMITS, FRESH, QUOTE)
+    o_dirty = build_order(select_plan(led, "plan-1"), LIMITS, FRESH, QUOTE)
     assert o_clean == o_dirty
     assert o_clean["ok"] is True
     assert o_clean["order"]["entry"] == "364.18" and o_clean["order"]["stop_loss"] == "358.32"
@@ -638,8 +645,9 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
 
 def test_build_order_is_sized_by_size_position_unchanged():
     rec = plan_record()
-    direct = size_position(Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS)
-    assert build_order(rec, LIMITS, FRESH) == direct
+    direct = size_position(Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS,
+                           slippage=SLIPPAGE)
+    assert build_order(rec, LIMITS, FRESH, QUOTE) == {**direct, "quote": QUOTE_DETAILS}
 
 
 # ---- AST guard ----
@@ -763,18 +771,20 @@ def test_orders_module_does_not_import_analyst_report():
 
 # ===================== #50: signatures =====================
 
-def _params(fn):
+def _params(fn, defaults_ok=frozenset()):
     sig = inspect.signature(fn)
     kinds = {p.kind for p in sig.parameters.values()}
     assert inspect.Parameter.VAR_KEYWORD not in kinds, f"{fn.__name__} takes **kwargs"
     assert inspect.Parameter.VAR_POSITIONAL not in kinds, f"{fn.__name__} takes *args"
     assert kinds <= {inspect.Parameter.POSITIONAL_OR_KEYWORD}
-    assert all(p.default is inspect.Parameter.empty for p in sig.parameters.values())
+    assert all(p.default is inspect.Parameter.empty for p in sig.parameters.values()
+               if p.name not in defaults_ok)
     return list(sig.parameters)
 
 
 def test_size_position_signature_pinned():
-    assert _params(size_position) == ["plan", "limits"]
+    # #68: the only addition is `slippage`, a tool-computed allowance (tools.slippage).
+    assert _params(size_position, defaults_ok={"slippage"}) == ["plan", "limits", "slippage"]
 
 
 def test_plan_fields_pinned():
@@ -787,8 +797,9 @@ def test_check_order_signature_pinned():
 
 
 def test_build_order_signature_pinned():
-    # Deliberately changed in issue #67: the order path now takes the clock.
-    assert _params(build_order) == ["plan", "limits", "now"]
+    # Deliberately changed in issue #67 (the clock) and #68 (the live quote): still no way to
+    # pass a price, size or score.
+    assert _params(build_order, defaults_ok={"quote"}) == ["plan", "limits", "now", "quote"]
 
 
 def test_select_plan_signature_pinned():
@@ -812,7 +823,7 @@ def test_signature_pin_detects_added_parameter():
 # ===================== #50: ORDER_FIELDS and check_order rejections =====================
 
 REAL_PLAN = Plan("TSLA", D("364.18"), D("358.32"), D("370.04"))
-ORDER = size_position(REAL_PLAN, LIMITS)["order"]
+ORDER = size_position(REAL_PLAN, LIMITS, slippage=SLIPPAGE)["order"]
 
 
 def check(order, limits=LIMITS, now=MON_1015):
@@ -898,7 +909,8 @@ def test_two_confidences_same_plan_same_order():
 
     def order_for(decision, packet):
         assert decision.symbol == packet.symbol
-        return build_order(select_plan(ledger_with(packet.exit_plans), "plan-1"), LIMITS, FRESH)
+        return build_order(select_plan(ledger_with(packet.exit_plans), "plan-1"), LIMITS, FRESH,
+                           QUOTE)
 
     o_lo = order_for(d_lo, lo)
     o_hi = order_for(d_hi, hi)
@@ -913,10 +925,12 @@ def test_two_confidences_same_plan_same_order():
 def test_size_position_has_no_way_to_receive_confidence():
     with pytest.raises(TypeError):
         size_position(REAL_PLAN, LIMITS, confidence=0.99)  # type: ignore[call-arg]
+    # the third positional is the slippage allowance (#68): a confidence-like float there is
+    # not a Decimal, so it is refused, never used as a size or a price
+    refused = size_position(REAL_PLAN, LIMITS, 0.99)  # type: ignore[arg-type]
+    assert refused == {"ok": False, "reason": "slippage must be a finite, non-negative Decimal"}
     with pytest.raises(TypeError):
-        size_position(REAL_PLAN, LIMITS, 0.99)  # type: ignore[call-arg]
-    with pytest.raises(TypeError):
-        build_order(plan_record(), LIMITS, FRESH, confidence=0.99)  # type: ignore[call-arg]
+        build_order(plan_record(), LIMITS, FRESH, QUOTE, confidence=0.99)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         Plan("TSLA", D("1"), D("1"), D("2"), confidence=0.9)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
@@ -929,14 +943,15 @@ def test_build_order_passes_size_position_exactly_plan_and_limits(monkeypatch):
 
     def strict(*args, **kwargs):
         seen.append((args, kwargs))
-        if kwargs or len(args) != 2 or not isinstance(args[0], Plan) \
-                or not isinstance(args[1], Limits):
+        # exactly (Plan, Limits) plus the tool-computed slippage allowance (#68), nothing else
+        if set(kwargs) != {"slippage"} or len(args) != 2 or not isinstance(args[0], Plan) \
+                or not isinstance(args[1], Limits) or not isinstance(kwargs["slippage"], D):
             raise AssertionError(f"size_position got extra input: {args!r} {kwargs!r}")
         assert tuple(dataclasses.asdict(args[0])) == ("symbol", "entry", "stop", "target")
-        return real(*args)
+        return real(*args, **kwargs)
 
     monkeypatch.setattr(orders, "size_position", strict)
-    out = build_order(plan_record(), LIMITS, FRESH)
+    out = build_order(plan_record(), LIMITS, FRESH, QUOTE)
     assert out["ok"] is True and len(seen) == 1
 
 
@@ -1042,15 +1057,16 @@ def test_build_order_refuses_invalid_plan_without_sizing(size_spy, over, reason)
 
 
 def test_build_order_valid_record_still_sizes_exactly_as_before(size_spy):
-    out = build_order(plan_record(), LIMITS, FRESH)
-    direct = size_position(REAL_PLAN, LIMITS)
-    assert out == direct and out["ok"] is True
+    out = build_order(plan_record(), LIMITS, FRESH, QUOTE)
+    direct = size_position(REAL_PLAN, LIMITS, slippage=SLIPPAGE)
+    assert out == {**direct, "quote": QUOTE_DETAILS} and out["ok"] is True
     assert len(size_spy) == 1
     assert check(out["order"]) == {"verdict": "PASS", "reasons": []}
 
 
 def test_build_order_model_construct_valid_record_also_sizes(size_spy):
-    assert build_order(raw_plan(), LIMITS, FRESH) == size_position(REAL_PLAN, LIMITS)
+    assert build_order(raw_plan(), LIMITS, FRESH, QUOTE) == {
+        **size_position(REAL_PLAN, LIMITS, slippage=SLIPPAGE), "quote": QUOTE_DETAILS}
     assert len(size_spy) == 1
 
 
@@ -1213,15 +1229,17 @@ def test_decide_passes_only_plan_id_to_propose_and_approve():
     assert len(proposes) == 1 and len(approves) == 1
     (pr,), (ap,) = proposes, approves
 
-    # propose(ledger, plan_id, journal=..., clock=...)
+    # propose(ledger, plan_id, journal=..., clock=..., quotes=...): `quotes` is the live market
+    # quote source (#68), never anything the model produced
     assert [getattr(a, "id", None) for a in pr.args] == ["ledger", "plan_id"]
-    assert sorted(k.arg for k in pr.keywords) == ["clock", "journal"]
-    assert _names_in(pr) <= {"propose", "ledger", "plan_id", "journal", "clock"}
+    assert sorted(k.arg for k in pr.keywords) == ["clock", "journal", "quotes"]
+    assert _names_in(pr) <= {"propose", "ledger", "plan_id", "journal", "clock", "quotes"}
 
     # approve(<the Proposal>, ledger, journal=..., ask=..., clock=...)
     assert len(ap.args) == 2 and getattr(ap.args[1], "id", None) == "ledger"
-    assert sorted(k.arg for k in ap.keywords) == ["ask", "clock", "journal"]
-    assert _names_in(ap) <= {"approve", "result", "proposal", "ledger", "journal", "ask", "clock"}
+    assert sorted(k.arg for k in ap.keywords) == ["ask", "clock", "journal", "quotes"]
+    assert _names_in(ap) <= {"approve", "result", "proposal", "ledger", "journal", "ask", "clock",
+                             "quotes"}
 
     # plan_id is assigned exactly once, from the decision's plan_id and nothing else
     assigns = [n for n in ast.walk(ast.parse(src))
@@ -1248,8 +1266,8 @@ def test_decide_scanner_would_catch_a_leaked_argument():
            "    propose(ledger, plan_id, journal=journal, clock=clock,"
            " size=decision.size)\n")
     (call,) = _calls_named(bad, "propose")
-    assert sorted(k.arg for k in call.keywords) != ["clock", "journal"]
-    assert not _names_in(call) <= {"propose", "ledger", "plan_id", "journal", "clock"}
+    assert sorted(k.arg for k in call.keywords) != ["clock", "journal", "quotes"]
+    assert not _names_in(call) <= {"propose", "ledger", "plan_id", "journal", "clock", "quotes"}
 
 
 
