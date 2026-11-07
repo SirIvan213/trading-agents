@@ -94,7 +94,7 @@ async def _one(
         record = AgentRunRecord(
             agent=agent, requested_model=config.model, effort=config.effort, ok=run.ok,
             reason=run.reason, reason_code=run.reason_code, duration_ms=run.duration_ms,
-            calls=run.calls,
+            calls=run.calls, retries=run.retries,
         )
         return run.report, record, (list(run.exit_plans) if run.ok else [])
     except asyncio.CancelledError:

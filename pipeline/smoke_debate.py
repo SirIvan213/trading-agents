@@ -10,13 +10,16 @@ tests/fixtures/ (synthetic data in the real API shapes, for a run "as of" 2026-1
     sec_companyfacts_tsla.json                         XBRL quarterly facts (fundamentals)
 
 Nothing is sent unless --billed is given (CLAUDE.md rule 6); without it the script prints
-what it would run and exits 3. The API key is read from ANTHROPIC_API_KEY, loaded from .env
-in the repo root (or --env-file PATH; --no-dotenv skips it) if present (a non-empty exported
-variable wins). The key is never printed. Without flags each agent uses
-its own configured model and effort (config_for: TRADING_AGENTS_<AGENT>_MODEL / _EFFORT,
-then TRADING_AGENTS_MODEL / _EFFORT, then the defaults); --model / --effort override all five
-agents (technical, sentiment, fundamentals, bull, bear). Debate rounds come from
-TRADING_AGENTS_DEBATE_ROUNDS (default 2). Risk limits are loaded and validated as in a real run.
+what it would run and exits 3. Every retried attempt's rejection reason is printed under its
+agent's API calls (a debate money-check reason is count-only and never quotes the rejected
+value; an analyst reason may name the field or catalyst the model got wrong). The API key
+is read from ANTHROPIC_API_KEY, loaded from .env in the repo root (or --env-file PATH;
+--no-dotenv skips it) if present (a non-empty exported variable wins). The key is never
+printed. Without flags each agent uses its own configured model and effort (config_for:
+TRADING_AGENTS_<AGENT>_MODEL / _EFFORT, then TRADING_AGENTS_MODEL / _EFFORT, then the
+defaults); --model / --effort override all five agents (technical, sentiment, fundamentals,
+bull, bear). Debate rounds come from TRADING_AGENTS_DEBATE_ROUNDS (default 2). Risk limits
+are loaded and validated as in a real run.
 
 Exit codes: 0 = all three analysts and every debate turn produced validated output (a
 server-side MODEL fallback, where another model answered, still counts as success and is
@@ -42,9 +45,10 @@ from datetime import datetime
 from typing import Any
 
 from agents.debate import resolve_rounds, run_debate
+from agents.debate_common import MONEY_REASON
 from agents.llm import EFFORTS, AgentConfig, config_for, make_client
 from agents.orchestrator import AGENTS, run_analysts
-from agents.schemas import CallRecord, DebateRecord, DecisionPacket
+from agents.schemas import CallRecord, DebateRecord, DecisionPacket, RetryRecord
 from pipeline.smoke_common import ROOT, add_safety_flags, key_hint, load_env, refuse_unbilled
 from pipeline.smoke_technical import (
     FIXTURES,
@@ -108,6 +112,13 @@ def _print_calls(label: str, calls: list[CallRecord]) -> None:
                   f"in={it.usage.input_tokens} out={it.usage.output_tokens}")
 
 
+def _print_retries(label: str, retries: list[RetryRecord]) -> None:
+    # Money-check reasons are count-only (never the rejected value); analyst reasons may
+    # name a source or catalyst, as the final `reason` already does.
+    for r in retries:
+        print(f"  {label} RETRY after attempt {r.attempt}: {r.reason_code}: {r.reason}")
+
+
 def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, AgentConfig]) -> None:
     """Print the analysts, the debate, every call's serving model and the token totals."""
     print(f"== Analysts + debate smoke run: {packet.symbol} as of {packet.as_of} ==")
@@ -145,16 +156,24 @@ def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, Agen
 
     print("\n-- API calls (serving model per call) --")
     all_calls: list[CallRecord] = []
+    all_retries: list[RetryRecord] = []
     for agent in AGENTS:
-        calls = packet.runs[agent].calls
-        all_calls += calls
-        _print_calls(agent, calls)
+        run = packet.runs[agent]
+        all_calls += run.calls
+        all_retries += run.retries
+        _print_calls(agent, run.calls)
+        _print_retries(agent, run.retries)
     for turn in debate.turns:
+        label = f"r{turn.round} {turn.side}"
         all_calls += turn.run.calls
-        _print_calls(f"r{turn.round} {turn.side}", turn.run.calls)
+        all_retries += turn.run.retries
+        _print_calls(label, turn.run.calls)
+        _print_retries(label, turn.run.retries)
     served = sorted({c.serving_model for c in all_calls})
     print(f"serving model(s): {', '.join(served) or 'none (no API response)'}")
     print(f"fallback ran: {'yes' if any(c.fallback_ran for c in all_calls) else 'no'}")
+    print(f"retries: {len(all_retries)} "
+          f"({sum(MONEY_REASON in r.reason for r in all_retries)} from the money check)")
 
     t = token_totals(all_calls)
     print(f"\n-- Tokens (sum over all {len(all_calls)} API calls) --")

@@ -210,6 +210,8 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         for it in c.iterations:
             print(f"   iteration {it.type} model={it.model} "
                   f"in={it.usage.input_tokens} out={it.usage.output_tokens}")
+    for r in run.retries:
+        print(f"RETRY after attempt {r.attempt}: {r.reason_code}: {r.reason}")
     served = sorted({c.serving_model for c in run.calls})
     print(f"serving model(s): {', '.join(served) or 'none (no API response)'}")
     print(f"fallback ran: {'yes' if any(c.fallback_ran for c in run.calls) else 'no'}")

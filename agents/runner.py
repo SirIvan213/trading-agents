@@ -26,6 +26,7 @@ from agents.schemas import (
     ExitPlanRecord,
     IterationRecord,
     ReasonCode,
+    RetryRecord,
     UsageRecord,
 )
 from pipeline.market import NY, ny_today
@@ -66,6 +67,7 @@ class AnalystRun:
     # ok is False run_analyst sets this to [] (the report did not validate).
     exit_plans: list[ExitPlanRecord] = field(default_factory=list)
     reason_code: ReasonCode | None = None  # None when ok (issue #52)
+    retries: list[RetryRecord] = field(default_factory=list)  # rejected attempts (#87)
 
 
 # --------------------------------------------------------------------------
@@ -134,26 +136,54 @@ def _usage_record(obj: Any) -> UsageRecord:
     )
 
 
+def _iteration_models(
+    raw_iters: list[Any], resp_model: str, declined: list[str]
+) -> list[str | None]:
+    """The model of each usage iteration, filling in the ones the API leaves blank (#87).
+
+    `fallback_message` entries always carry `model`. A plain `message` entry often has none:
+      - no fallback ran: only one model ran, so it is the response's `model`;
+      - a fallback ran: each declined hop left one `message` entry and one `fallback` content
+        block, in the same order, so the i-th blank entry is the i-th block's `from` model.
+        If the counts differ (e.g. server-tool loop iterations) the blanks stay None rather
+        than guess.
+    """
+    models = [str(m) if (m := getattr(it, "model", None)) else None for it in raw_iters]
+    types = [str(getattr(it, "type", "")) for it in raw_iters]
+    if "fallback_message" not in types:
+        return [
+            (m or resp_model or None) if t == "message" else m
+            for m, t in zip(models, types, strict=True)
+        ]
+    message_idx = [i for i, t in enumerate(types) if t == "message"]
+    if len(message_idx) == len(declined):
+        for i, name in zip(message_idx, declined, strict=True):
+            models[i] = models[i] or name or None
+    return models
+
+
 def call_record(response: Any, requested_model: str) -> CallRecord:
     """Build the CallRecord for one API response. Every field is read defensively."""
     usage = getattr(response, "usage", None)
-    raw_iters = getattr(usage, "iterations", None) or []
-    iterations = []
-    for it in raw_iters:
-        model = getattr(it, "model", None)
-        iterations.append(IterationRecord(
-            type=str(getattr(it, "type", "")),
-            model=str(model) if model else None,
-            usage=_usage_record(it),
-        ))
-    fallback_models = [i.model for i in iterations if i.type == "fallback_message" and i.model]
+    raw_iters = list(getattr(usage, "iterations", None) or [])
     resp_model = getattr(response, "model", None)
-    serving = fallback_models[-1] if fallback_models else (str(resp_model) if resp_model else "")
-    stop = getattr(response, "stop_reason", None)
+    resp_model_s = str(resp_model) if resp_model else ""
     blocks = [
         b for b in (getattr(response, "content", None) or [])
         if getattr(b, "type", "") == "fallback"
     ]
+    declined_all = [
+        str(getattr(getattr(b, "from_", None), "model", None) or "") for b in blocks
+    ]
+    iterations = [
+        IterationRecord(type=str(getattr(it, "type", "")), model=model, usage=_usage_record(it))
+        for it, model in zip(
+            raw_iters, _iteration_models(raw_iters, resp_model_s, declined_all), strict=True
+        )
+    ]
+    fallback_models = [i.model for i in iterations if i.type == "fallback_message" and i.model]
+    serving = fallback_models[-1] if fallback_models else resp_model_s
+    stop = getattr(response, "stop_reason", None)
     last_fb = blocks[-1] if blocks else None
     if stop == "refusal":
         category = getattr(getattr(response, "stop_details", None), "category", None)
@@ -401,6 +431,7 @@ def run_analyst(
         raise ValueError("symbol must be a valid ticker") from None
     sym = symbol.strip().upper()
     calls: list[CallRecord] = calls_sink if calls_sink is not None else []
+    retries: list[RetryRecord] = []
     started = time.monotonic()
 
     def finish(
@@ -410,7 +441,7 @@ def run_analyst(
         plans = list(getattr(session, "exit_plans", [])) if ok else []
         return AnalystRun(
             report=report, ok=ok, reason=reason, calls=list(calls), duration_ms=ms,
-            exit_plans=plans, reason_code=None if ok else code,
+            exit_plans=plans, reason_code=None if ok else code, retries=list(retries),
         )
 
     try:
@@ -421,6 +452,7 @@ def run_analyst(
         }]
         outcome = _loop(client, spec, config, messages, tracked, sym, calls)
         if outcome.report is None:
+            retries.append(RetryRecord(attempt=1, reason=outcome.error, reason_code=outcome.code))
             retry_text = (
                 f"Your previous attempt failed: {outcome.error}. "
                 "Use the tools if needed and return only the JSON object."
@@ -458,6 +490,7 @@ class StructuredRun:
     reason_code: ReasonCode | None
     calls: list[CallRecord]
     duration_ms: int
+    retries: list[RetryRecord] = field(default_factory=list)  # rejected attempts (#87)
 
 
 def model_output_schema(model: type[BaseModel]) -> dict[str, Any]:
@@ -506,12 +539,14 @@ def run_structured(
     The JSON text is parsed into `output_model`, then `validate(value)` returns None when fine
     an error string, or a tuple (stored_reason, model_hint). Only `stored_reason` is ever kept
     in the result; `model_hint` (which may quote offending values) goes only to the model in the
-    retry message. Invalid output, a refusal or max_tokens triggers one retry with a short
+    retry message; each retried attempt's stored reason is kept in `retries`. Invalid
+    output, a refusal or max_tokens triggers one retry with a short
     error message appended (history is append-only). `cancel` is checked before each request.
     A CallRecord is kept for every response. API errors give reason_code "api_error" and
     reason = exception type name only.
     """
     calls: list[CallRecord] = []
+    retries: list[RetryRecord] = []
     started = time.monotonic()
 
     def done(
@@ -521,6 +556,7 @@ def run_structured(
         return StructuredRun(
             value=value, ok=value is not None, reason=reason,
             reason_code=None if value is not None else code, calls=list(calls), duration_ms=ms,
+            retries=list(retries),
         )
 
     try:
@@ -561,6 +597,8 @@ def run_structured(
                     else "max_tokens" if stop == "max_tokens" else "invalid_output"
                 )
             if attempt == 0:
+                # stored reason only (count-only for money); the hint goes to the model
+                retries.append(RetryRecord(attempt=1, reason=error, reason_code=code))
                 if content:
                     messages.append({"role": "assistant", "content": response.content})
                 messages.append({

@@ -7,8 +7,11 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field, field_validator
 
-from agents.money_guard import allowed_values, money_violations
+from agents.money_guard import allowed_values, money_violations, quoted_values
 from agents.schemas import BearCase, BullCase, DecisionPacket
+
+# Stored reason prefix for a money-guard rejection (the count follows); smoke_debate counts on it.
+MONEY_REASON = "money value(s) not in the decision packet"
 
 _PLAN_ID_DOC = (
     "the plan_id from packet.exit_plans this case is about; empty string means no plan"
@@ -89,6 +92,7 @@ def make_validator(
     """
     plan_ids = {p.plan_id for p in packet.exit_plans}
     allowed: set[Decimal] = allowed_values(packet)
+    quoted: frozenset[str] = quoted_values(packet)
 
     def validate(value: BaseModel) -> str | tuple[str, str] | None:
         if not isinstance(value, case_type):
@@ -101,11 +105,12 @@ def make_validator(
             return "at least 3 non-empty objections are required"
         bad: list[str] = []
         for text in case_texts(value):
-            bad.extend(money_violations(text, allowed))
+            bad.extend(money_violations(text, allowed, quoted))
         if bad:
             return (
-                f"case states {len(bad)} money value(s) not in a plan record",
-                "case states money values not in a plan record: " + "; ".join(bad[:5]),
+                f"case states {len(bad)} {MONEY_REASON}",
+                "case states money values that are neither a plan record value nor quoted "
+                "verbatim from analyst evidence: " + "; ".join(bad[:5]),
             )
         return None
 
