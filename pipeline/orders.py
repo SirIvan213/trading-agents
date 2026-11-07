@@ -3,14 +3,16 @@
 Order prices come only from tool-produced ExitPlanRecords. Analyst text and analyst scores
 never feed sizing or risk_check (CLAUDE.md rule 2; issues #40, #50).
 Nothing but the plan, the risk limits and the clock is an input here; a stale plan is refused
-(issue #67).
+(issue #67). Plans are looked up in the pipeline's PlanLedger, never in a DecisionPacket
+(issue #64).
 """
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from agents.schemas import DecisionPacket, ExitPlanRecord
+from agents.schemas import ExitPlanRecord
+from pipeline.ledger import PlanLedger
 from pipeline.market import NY
 from tools.config import Limits
 from tools.scan import validate_symbols
@@ -20,18 +22,17 @@ _CENT = Decimal("0.01")
 _SKEW = timedelta(seconds=5)  # tolerated clock skew for a plan dated slightly ahead of now
 
 
-def select_plan(packet: DecisionPacket, plan_id: str) -> ExitPlanRecord:
-    """Return the packet's plan with this id.
+def select_plan(ledger: PlanLedger, plan_id: str) -> ExitPlanRecord:
+    """Return the plan the pipeline recorded under this id (issue #64).
 
-    Raises KeyError("unknown plan_id") if absent, and
-    KeyError("plan symbol does not match packet") if its symbol is not the packet's.
+    Reads ONLY the pipeline's PlanLedger, never DecisionPacket.exit_plans: a plan carried in a
+    packet (appended, model_copy'd, model_construct'ed or rebuilt from JSON) is never sized.
+    Raises KeyError("unknown plan_id") if the ledger has no such plan, or is not sealed and
+    accepted.
     """
-    for plan in packet.exit_plans:
-        if plan.plan_id == plan_id:
-            if plan.symbol != packet.symbol:
-                raise KeyError("plan symbol does not match packet")
-            return plan
-    raise KeyError("unknown plan_id")
+    if not isinstance(ledger, PlanLedger):
+        raise KeyError("unknown plan_id")
+    return ledger.get(plan_id)
 
 
 def _cents(text: object) -> Decimal | None:

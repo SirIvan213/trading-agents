@@ -14,3 +14,6 @@ config/*.json
 journal/*.db
 journal/*.sqlite
 trader/
+
+# decision journal (runtime data)
+journal/*.jsonl

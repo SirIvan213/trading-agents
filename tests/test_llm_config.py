@@ -57,7 +57,8 @@ def test_model_and_effort_resolve_independently(monkeypatch):
     assert (cfg.model, cfg.effort) == ("f-model", "xhigh")
 
 
-@pytest.mark.parametrize("agent", ["", "Technical", "Bull", "trader", None, "technical ", "bull "])
+@pytest.mark.parametrize(
+    "agent", ["", "Technical", "Bull", "Trader", None, "technical ", "bull ", "trader "])
 def test_unknown_agent_raises(agent):
     with pytest.raises(ValueError, match="unknown agent"):
         config_for(agent)

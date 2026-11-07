@@ -11,6 +11,7 @@ DEFAULT_MODELS: dict[str, str] = {
     "fundamentals": "claude-sonnet-5-5",
     "bull": "claude-sonnet-5-5",
     "bear": "claude-sonnet-5-5",
+    "trader": "claude-opus-5-5",
 }
 
 
@@ -58,7 +59,8 @@ def config_from_env() -> AgentConfig:
 
 
 def config_for(agent: str) -> AgentConfig:
-    """AgentConfig for one agent ("technical", "sentiment", "fundamentals", "bull" or "bear").
+    """AgentConfig for one agent ("technical", "sentiment", "fundamentals", "bull", "bear" or
+    "trader").
 
     Priority: TRADING_AGENTS_<AGENT>_MODEL / _EFFORT, then TRADING_AGENTS_MODEL / _EFFORT,
     then DEFAULT_MODELS / the AgentConfig default effort. Raises ValueError for an unknown

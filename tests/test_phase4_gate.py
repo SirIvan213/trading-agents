@@ -29,6 +29,7 @@ from agents.schemas import (
     TraderDecision,
 )
 from agents.tool_registry import ToolSession, price_levels
+from pipeline.ledger import LedgerError, PlanLedger
 from pipeline.orders import build_order, select_plan
 from tests.fakes import (
     NOON,
@@ -555,22 +556,37 @@ def packet_with(plans, *, fake: bool, confidence=0.7, stance="bullish") -> Decis
         all_ok=True, exit_plans=plans)
 
 
+def ledger_with(plans, symbol="TSLA", accept=True) -> PlanLedger:
+    """A sealed ledger holding these plans, as the pipeline would record them (#64)."""
+    led = PlanLedger(symbol)
+    for p in plans:
+        led.record(p)
+    led.seal(accept=accept)
+    return led
+
+
 def test_select_plan_returns_record_by_id():
     a, b = plan_record("plan-1"), plan_record("plan-2", entry="365.00")
-    packet = packet_with([a, b], fake=False)
-    assert select_plan(packet, "plan-1") is a
-    assert select_plan(packet, "plan-2") is b
+    led = ledger_with([a, b])
+    assert select_plan(led, "plan-1") == a
+    assert select_plan(led, "plan-2") == b
+    assert select_plan(led, "plan-1") is not a  # a fresh validated copy, never the original
 
 
 @pytest.mark.parametrize("bad", ["plan-3", "", "PLAN-1", "plan-1 ", "999", "0"])
 def test_select_plan_unknown_id_raises_keyerror(bad):
     with pytest.raises(KeyError):
-        select_plan(packet_with([plan_record("plan-1")], fake=False), bad)
+        select_plan(ledger_with([plan_record("plan-1")]), bad)
 
 
-def test_select_plan_on_empty_packet_raises_keyerror():
+def test_select_plan_on_empty_ledger_raises_keyerror():
     with pytest.raises(KeyError):
-        select_plan(packet_with([], fake=False), "plan-1")
+        select_plan(ledger_with([]), "plan-1")
+
+
+def test_select_plan_never_reads_a_packet():
+    with pytest.raises(KeyError):
+        select_plan(packet_with([plan_record("plan-1")], fake=False), "plan-1")  # type: ignore[arg-type]
 
 
 def test_fake_price_text_has_no_effect_on_order_or_verdict():
@@ -582,14 +598,15 @@ def test_fake_price_text_has_no_effect_on_order_or_verdict():
     assert all(t in dumped for t in FAKE_TEXT)
     assert not any(t in clean.model_dump_json() for t in FAKE_TEXT)
 
-    # A TraderDecision whose free text carries the fake prices is also in play. The Trader
-    # agent does not exist yet; the end-to-end Trader proof is a Phase 4 follow-up.
+    # A TraderDecision whose free text carries the fake prices is also in play (the end-to-end
+    # Trader proof through run_decision is in tests/test_phase4b_proofs.py).
     decision = TraderDecision(
-        symbol="TSLA", action="BUY", confidence=0.99, setup=rec.setup,
+        symbol="TSLA", action="BUY", confidence=0.99, plan_id=rec.plan_id,
         reasoning="; ".join(FAKE_TEXT))
     assert decision.symbol == dirty.symbol and decision.action == "BUY"
-    o_clean = build_order(select_plan(clean, "plan-1"), LIMITS, FRESH)
-    o_dirty = build_order(select_plan(dirty, "plan-1"), LIMITS, FRESH)
+    led = ledger_with([rec])  # both packets carry the same plan; the order reads the ledger
+    o_clean = build_order(select_plan(led, "plan-1"), LIMITS, FRESH)
+    o_dirty = build_order(select_plan(led, "plan-1"), LIMITS, FRESH)
     assert o_clean == o_dirty
     assert o_clean["ok"] is True
     assert o_clean["order"]["entry"] == "364.18" and o_clean["order"]["stop_loss"] == "358.32"
@@ -722,7 +739,7 @@ def test_money_path_modules_never_touch_analyst_output(rel):
 def test_orders_module_does_not_import_analyst_report():
     src = (ROOT / "pipeline" / "orders.py").read_text(encoding="utf-8")
     assert not imports_analyst_report(src)
-    assert "DecisionPacket" in src  # sanity: the checker is looking at the right file
+    assert "def select_plan" in src  # sanity: the checker is looking at the right file
 
 
 # ===================== #50: signatures =====================
@@ -756,7 +773,8 @@ def test_build_order_signature_pinned():
 
 
 def test_select_plan_signature_pinned():
-    assert _params(select_plan) == ["packet", "plan_id"]
+    # Deliberately changed in issue #64: plans come from the pipeline's ledger, not the packet.
+    assert _params(select_plan) == ["ledger", "plan_id"]
 
 
 def test_signature_pin_detects_added_parameter():
@@ -844,25 +862,24 @@ def test_non_dict_order_with_invalid_limits_reports_limits_first():
 # ===================== #50: confidence cannot change the order =====================
 
 def test_two_confidences_same_plan_same_order():
-    # NOTE: the Trader agent does not exist yet. The end-to-end proof (a real Trader run feeding
-    # select_plan -> build_order) is a Phase 4 follow-up; here each decision is carried
-    # alongside its packet and the order is built in that decision's context.
+    # Unit-level check; the end-to-end Trader proof through run_decision is in
+    # tests/test_phase4b_proofs.py. Here each decision is carried alongside its packet.
     rec = plan_record()
     lo = packet_with([rec], fake=False, confidence=0.1, stance="bearish")
     hi = packet_with([rec], fake=False, confidence=0.99, stance="bullish")
     assert lo.reports["technical"].confidence == 0.1
     assert hi.reports["technical"].confidence == 0.99
     d_lo = TraderDecision(
-        symbol="TSLA", action="BUY", confidence=0.1, reasoning="r", setup=rec.setup)
+        symbol="TSLA", action="BUY", confidence=0.1, reasoning="r", plan_id=rec.plan_id)
     d_hi = TraderDecision(
-        symbol="TSLA", action="BUY", confidence=0.99, reasoning="r", setup=rec.setup)
+        symbol="TSLA", action="BUY", confidence=0.99, reasoning="r", plan_id=rec.plan_id)
     assert d_lo.confidence != d_hi.confidence
     for d in (d_lo, d_hi):  # the decision matches the plan it will be executed with
-        assert d.action == "BUY" and d.symbol == rec.symbol and d.setup == rec.setup
+        assert d.action == "BUY" and d.symbol == rec.symbol and d.plan_id == rec.plan_id
 
     def order_for(decision, packet):
         assert decision.symbol == packet.symbol
-        return build_order(select_plan(packet, "plan-1"), LIMITS, FRESH)
+        return build_order(select_plan(ledger_with(packet.exit_plans), "plan-1"), LIMITS, FRESH)
 
     o_lo = order_for(d_lo, lo)
     o_hi = order_for(d_hi, hi)
@@ -1019,13 +1036,209 @@ def test_build_order_model_construct_valid_record_also_sizes(size_spy):
 
 # ===================== select_plan symbol check =====================
 
-def test_select_plan_symbol_mismatch_raises_keyerror():
-    aapl_packet = packet_with([plan_record(symbol="TSLA")], fake=False)
-    aapl_packet = aapl_packet.model_copy(update={"symbol": "AAPL"})
-    with pytest.raises(KeyError, match="plan symbol does not match packet"):
-        select_plan(aapl_packet, "plan-1")
+def test_ledger_refuses_a_plan_for_another_symbol():
+    with pytest.raises(LedgerError, match="plan symbol does not match the ledger"):
+        PlanLedger("AAPL").record(plan_record(symbol="TSLA"))
 
 
 def test_select_plan_matching_symbol_still_returned():
-    packet = packet_with([plan_record(symbol="TSLA")], fake=False)
-    assert select_plan(packet, "plan-1").symbol == "TSLA"
+    assert select_plan(ledger_with([plan_record(symbol="TSLA")]), "plan-1").symbol == "TSLA"
+
+# ===================== #65: only pipeline/order_flow.py touches build_order / check_order =====
+
+MONEY_FNS = frozenset({"build_order", "check_order"})
+ORDER_PACKAGES = ("agents", "pipeline", "tools", "journal")
+ORDER_FLOW = "pipeline/order_flow.py"
+BANNED_TYPES = frozenset({"AnalystReport", "DecisionPacket", "DebateRecord", "TraderDecision"})
+
+
+def money_fn_references(source: str) -> list[str]:
+    """Calls to, or any other reference to (import, alias, attribute, bare name), build_order or
+    check_order. A `def` of either name is a definition, not a reference."""
+    out: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name) and node.id in MONEY_FNS:
+            out.append(f"name {node.id}")
+        elif isinstance(node, ast.Attribute) and node.attr in MONEY_FNS:
+            out.append(f"attribute {node.attr}")
+        elif isinstance(node, ast.alias) and node.name.split(".")[-1] in MONEY_FNS:
+            out.append(f"import {node.name}")
+    return out
+
+
+def referenced_types(source: str) -> set[str]:
+    """Imported or referenced names from BANNED_TYPES (AST only; docstrings do not count)."""
+    found: set[str] = set()
+    tree = ast.parse(source)
+    docs = _docstring_nodes(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.alias):
+            found |= {node.name.split(".")[-1]} & BANNED_TYPES
+        elif isinstance(node, ast.Name) and node.id in BANNED_TYPES:
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in BANNED_TYPES:
+            found.add(node.attr)
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and id(node) not in docs):
+            found |= {t for t in BANNED_TYPES if node.value.strip() == t}  # a string annotation
+    return found
+
+
+def project_sources() -> dict[str, str]:
+    out = {}
+    for pkg in ORDER_PACKAGES:
+        for path in sorted((ROOT / pkg).rglob("*.py")):
+            out[path.relative_to(ROOT).as_posix()] = path.read_text(encoding="utf-8")
+    return out
+
+
+def call_names(source: str) -> list[str]:
+    names = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            names.append(getattr(node.func, "id", getattr(node.func, "attr", None)))
+    return names
+
+
+def test_money_reference_scanner_has_teeth():
+    assert money_fn_references("build_order(p, l, n)")
+    assert money_fn_references("orders.build_order(p, l, n)")
+    assert money_fn_references("x.check_order(o, l, s, n)")
+    assert money_fn_references("from pipeline.orders import build_order as bo\nbo(1)")
+    assert money_fn_references("import tools.risk_check.check_order")
+    assert money_fn_references("f = check_order\nf(1)")
+    assert money_fn_references("def build_order(p):\n    return 1") == []  # a definition only
+    assert money_fn_references("def f():\n    '''build_order'''\n    return 'check_order'") == []
+    assert "build_order" in call_names("a.b(); build_order(1)")
+
+
+def test_banned_type_scanner_has_teeth():
+    assert referenced_types("from agents.schemas import DecisionPacket") == {"DecisionPacket"}
+    assert referenced_types("import agents.schemas as s\nx: s.DebateRecord") == {"DebateRecord"}
+    assert referenced_types("from agents.schemas import TraderDecision as T") == {"TraderDecision"}
+    assert referenced_types("def f(p: 'AnalystReport'): pass") == {"AnalystReport"}
+    assert referenced_types("from agents.schemas import ExitPlanRecord") == set()
+    assert referenced_types('"""DecisionPacket"""\nx = 1') == set()
+
+
+def test_only_order_flow_references_build_order_or_check_order():
+    sources = project_sources()
+    assert ORDER_FLOW in sources and "tools/risk_check.py" in sources
+    assert "pipeline/orders.py" in sources  # sanity: the scan sees the defining modules
+    users = {rel for rel, src in sources.items() if money_fn_references(src)}
+    assert users == {ORDER_FLOW}, users
+    # the two definitions live where expected, as defs (not references)
+    defs = {rel for rel, src in sources.items()
+            for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.FunctionDef) and n.name in MONEY_FNS}
+    assert defs == {"pipeline/orders.py", "tools/risk_check.py"}
+
+
+def test_order_flow_is_the_only_caller_and_calls_both():
+    callers = {rel: {n for n in call_names(src) if n in MONEY_FNS}
+               for rel, src in project_sources().items()}
+    assert {rel: names for rel, names in callers.items() if names} == {
+        ORDER_FLOW: {"build_order", "check_order"}}
+
+
+def test_order_flow_never_touches_model_output():
+    src = (ROOT / ORDER_FLOW).read_text(encoding="utf-8")
+    assert forbidden_uses(src) == []
+    assert not imports_analyst_report(src)
+    assert referenced_types(src) == set()
+
+
+def test_every_module_that_references_the_money_functions_is_clean():
+    checked = 0
+    for rel, src in project_sources().items():
+        if money_fn_references(src):
+            checked += 1
+            assert forbidden_uses(src) == [], rel
+            assert not imports_analyst_report(src), rel
+            assert referenced_types(src) == set(), rel
+    assert checked == 1  # exactly order_flow; a second module would fail the test above
+
+
+def test_order_flow_imports_only_what_the_order_path_needs():
+    tree = ast.parse((ROOT / ORDER_FLOW).read_text(encoding="utf-8"))
+    from_imports = {n.module: {a.name for a in n.names}
+                    for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Import)]
+    assert from_imports["agents.schemas"] == {"ExitPlanRecord"}
+    assert from_imports["agents.orchestrator"] == {"load_checked_limits"}
+    for banned in ("agents.trader", "agents.debate", "agents.debate_common", "agents.bull",
+                   "agents.bear", "agents.technical", "agents.sentiment", "agents.fundamentals",
+                   "agents.runner", "agents.llm", "pipeline.decide"):
+        assert banned not in from_imports, banned
+
+
+def _calls_named(source: str, name: str) -> list[ast.Call]:
+    return [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call)
+            and getattr(n.func, "id", getattr(n.func, "attr", None)) == name]
+
+
+def _names_in(node: ast.AST) -> set[str]:
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out.add(n.id)
+        elif isinstance(n, ast.Attribute):
+            out.add(n.attr)
+    return out
+
+
+def test_decide_passes_only_plan_id_to_propose_and_approve():
+    src = (ROOT / "pipeline" / "decide.py").read_text(encoding="utf-8")
+    proposes, approves = _calls_named(src, "propose"), _calls_named(src, "approve")
+    assert len(proposes) == 1 and len(approves) == 1
+    (pr,), (ap,) = proposes, approves
+
+    # propose(ledger, plan_id, journal=..., clock=...)
+    assert [getattr(a, "id", None) for a in pr.args] == ["ledger", "plan_id"]
+    assert sorted(k.arg for k in pr.keywords) == ["clock", "journal"]
+    assert _names_in(pr) <= {"propose", "ledger", "plan_id", "journal", "clock"}
+
+    # approve(<the Proposal>, ledger, journal=..., ask=..., clock=...)
+    assert len(ap.args) == 2 and getattr(ap.args[1], "id", None) == "ledger"
+    assert sorted(k.arg for k in ap.keywords) == ["ask", "clock", "journal"]
+    assert _names_in(ap) <= {"approve", "result", "proposal", "ledger", "journal", "ask", "clock"}
+
+    # plan_id is assigned exactly once, from the decision's plan_id and nothing else
+    assigns = [n for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.AnnAssign | ast.Assign)
+               and "plan_id" in _names_in(
+                   n.target if isinstance(n, ast.AnnAssign) else n.targets[0])]
+    assert len(assigns) == 1
+    value = assigns[0].value
+    assert isinstance(value, ast.Attribute) and value.attr == "plan_id"
+    assert isinstance(value.value, ast.Name) and value.value.id == "decision"
+
+
+def test_decide_never_reads_model_scores_or_text():
+    src = (ROOT / "pipeline" / "decide.py").read_text(encoding="utf-8")
+    assert forbidden_uses(src) == []
+    attrs = {n.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Attribute)}
+    assert not attrs & {"confidence", "reasoning", "evidence", "argument", "objections",
+                        "key_points", "exit_plans", "entry", "stop", "target"}
+
+
+def test_decide_scanner_would_catch_a_leaked_argument():
+    """Teeth: a decide() that also passes the Trader's confidence must fail the same checks."""
+    bad = ("def f(ledger, plan_id, journal, clock, decision):\n"
+           "    propose(ledger, plan_id, journal=journal, clock=clock,"
+           " size=decision.size)\n")
+    (call,) = _calls_named(bad, "propose")
+    assert sorted(k.arg for k in call.keywords) != ["clock", "journal"]
+    assert not _names_in(call) <= {"propose", "ledger", "plan_id", "journal", "clock"}
+
+
+
+# Modules that feed plans, sizing, the risk gate or DayState never reference model output.
+@pytest.mark.parametrize("rel", [
+    "pipeline/orders.py", "tools/size.py", "tools/risk_check.py", "pipeline/ledger.py",
+    "journal/log.py", "pipeline/order_flow.py",
+])
+def test_money_feeding_modules_reference_no_model_output_types(rel):
+    src = (ROOT / rel).read_text(encoding="utf-8")
+    assert referenced_types(src) == set(), rel
+    assert forbidden_uses(src) == [], rel

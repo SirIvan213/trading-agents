@@ -24,6 +24,7 @@ from agents.schemas import (
 )
 from agents.sentiment import run_sentiment
 from agents.technical import run_technical
+from pipeline.ledger import PlanLedger
 from pipeline.market import NY, ny_today
 from tools.config import Limits, load_limits, validate_limits
 from tools.scan import validate_symbols
@@ -59,9 +60,11 @@ def load_checked_limits(limits: Limits | None = None) -> Limits:
 
 
 # Extra keyword arguments per analyst. Only the technical analyst's tools (plan_exit, scan)
-# read risk limits; sentiment and fundamentals take none.
-def _extra_kwargs(agent: str, limits: Limits) -> dict[str, Any]:
-    return {"limits": limits} if agent == "technical" else {}
+# read risk limits and record plans in the ledger; sentiment and fundamentals take none.
+def _extra_kwargs(agent: str, limits: Limits, ledger: PlanLedger | None) -> dict[str, Any]:
+    if agent != "technical":
+        return {}
+    return {"limits": limits} if ledger is None else {"limits": limits, "ledger": ledger}
 
 
 async def _one(
@@ -125,6 +128,7 @@ async def run_analysts(
     configs: dict[str, AgentConfig] | None = None,
     timeout_s: float = 300,
     limits: Limits | None = None,
+    ledger: PlanLedger | None = None,
 ) -> DecisionPacket:
     """Run the technical, sentiment and fundamentals analysts concurrently.
 
@@ -143,6 +147,11 @@ async def run_analysts(
     background with its result discarded. AgentConfig.request_timeout_s (per API request) should
     be below `timeout_s` to bound that. Raises ValueError for a naive `now`, an invalid
     symbol, a bad agent config, or an invalid limits config - all before any analyst starts.
+
+    `ledger` (issue #64), if given, must be an unsealed PlanLedger for this symbol. plan_exit
+    records every plan into it; once all analysts are done it is sealed, accepted only if the
+    technical run is ok (otherwise emptied), which is the same rule as the packet's
+    exit_plans. The order path reads plans only from the ledger.
     """
     ny_today(now)  # ValueError for naive now
     try:
@@ -152,21 +161,29 @@ async def run_analysts(
     sym = symbol.strip().upper()
     cfgs = {a: (configs or {}).get(a) or config_for(a) for a in AGENTS}
     checked = load_checked_limits(limits)  # raises before the worker pool exists
+    if ledger is not None and (ledger.symbol != sym or ledger.sealed):
+        raise ValueError("ledger must be an unsealed PlanLedger for this symbol")
 
     cancels = {a: threading.Event() for a in AGENTS}
     executor = ThreadPoolExecutor(max_workers=len(AGENTS), thread_name_prefix="analyst")
     try:
         results = await asyncio.gather(*(
             _one(a, sym, now, data, _client_for(clients, a), cfgs[a], timeout_s, executor,
-                 cancels[a], _extra_kwargs(a, checked))
+                 cancels[a], _extra_kwargs(a, checked, ledger))
             for a in AGENTS
         ))
+    except BaseException:
+        if ledger is not None:  # nothing from an aborted run may ever be ordered
+            ledger.seal(accept=False)
+        raise
     finally:
         for ev in cancels.values():  # also covers cancellation of run_analysts itself
             ev.set()
         executor.shutdown(wait=False)  # never block on a timed-out worker
     reports = {a: r for a, (r, _, _) in zip(AGENTS, results, strict=True)}
     runs = {a: rec for a, (_, rec, _) in zip(AGENTS, results, strict=True)}
+    if ledger is not None:  # a late write from a timed-out worker is refused after this
+        ledger.seal(accept=runs["technical"].ok)
     plans = {a: p for a, (_, _, p) in zip(AGENTS, results, strict=True)}
     return DecisionPacket(
         symbol=sym,
