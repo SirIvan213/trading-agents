@@ -24,10 +24,12 @@ def run_scan(
     now: datetime,
     avg_volume: dict[str, int] | None = None,
 ) -> dict:
-    """Run tools.scan.scan with today=ny_today(now) so stale daily bars are rejected.
+    """Run tools.scan.scan with today=ny_today(now) and `now`, so stale daily bars and stale
+    trades or quotes (criteria.max_quote_age_s, #12) are rejected.
 
     This is the ONLY sanctioned way for the pipeline and agents to scan. Never call
     tools.scan.scan directly elsewhere: without `today`, a pre-market scan ranks
     gaps against yesterday's daily bar.
     """
-    return scan(snapshots, criteria, limits, avg_volume=avg_volume, today=ny_today(now))
+    return scan(snapshots, criteria, limits, avg_volume=avg_volume, today=ny_today(now),
+                now=now)

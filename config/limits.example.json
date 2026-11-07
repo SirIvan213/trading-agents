@@ -15,6 +15,7 @@
   "max_extension_atr_5m": "2.0",
   "max_stop_atr_5m": "2.5",
   "good_setup_multiple": "2",
+  "max_or_missing_minutes": 3,
   "entry_window": ["09:45", "15:30"],
   "flat_by": "15:55",
   "blocked_symbols": []

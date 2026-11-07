@@ -36,19 +36,22 @@ def test_ny_today_naive_raises():
 def test_run_scan_passes_ny_date(monkeypatch):
     seen = {}
 
-    def spy(snapshots, criteria, limits, avg_volume=None, today=None):
-        seen.update(today=today, avg=avg_volume)
+    def spy(snapshots, criteria, limits, avg_volume=None, today=None, now=None):
+        seen.update(today=today, avg=avg_volume, now=now)
         return {"candidates": [], "rejected": [], "criteria": {}}
 
     monkeypatch.setattr(market, "scan", spy)
     now = datetime(2026, 11, 5, 2, 30, tzinfo=UTC)
     market.run_scan({}, ScanCriteria(), load_limits(), now, avg_volume={"A": 1})
-    assert seen == {"today": date(2026, 11, 4), "avg": {"A": 1}}
+    assert seen == {"today": date(2026, 11, 4), "avg": {"A": 1}, "now": now}
 
 
 def _snap(day_t: str) -> dict:
     snap = load_fixture("alpaca_snapshots.json")["GAPA"]
     snap["dailyBar"]["t"] = day_t
+    # fresh trade/quote relative to PREMARKET (13:00Z) so only the daily-bar rule is in play
+    snap["latestTrade"]["t"] = "2026-11-04T12:59:00Z"
+    snap["latestQuote"]["t"] = "2026-11-04T12:59:00Z"
     return snap
 
 

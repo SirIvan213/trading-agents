@@ -235,7 +235,10 @@ def test_scan_real_pipeline_rejects_stale_bars_premarket():
 
 
 def test_scan_fresh_bar_passes():
-    res, err = make().execute("scan", {"symbols": ["GAPA"]})
+    s = make()
+    # 1 minute after the fixture trade/quote time, so the staleness rule is satisfied
+    s.now = datetime(2026, 11, 3, 9, 41, tzinfo=ZoneInfo("America/New_York"))
+    res, err = s.execute("scan", {"symbols": ["GAPA"]})
     assert err is False
     assert [c["symbol"] for c in res["candidates"]] == ["GAPA"]
 

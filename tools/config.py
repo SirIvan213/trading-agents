@@ -51,6 +51,9 @@ class Limits:
     # Kill switch (#32): false blocks every order in risk_check, including the approval
     # re-check. A missing key means true, so existing configs keep working.
     trading_enabled: bool = True
+    # Gappy opening ranges (#14): exit_plan refuses an orb setup whose 15-minute opening
+    # range is missing more than this many minutes of bars (thin names on IEX data).
+    max_or_missing_minutes: int = 3
 
 
 def _hhmm(s: str) -> time:
@@ -127,6 +130,9 @@ def validate_limits(limits: Limits) -> None:
         problems.append(f"min_risk_atr_multiple must be a finite number, got {atr_mult!r}")
     elif atr_mult < 0:
         problems.append(f"min_risk_atr_multiple must be at least 0, got {atr_mult}")
+    gap = limits.max_or_missing_minutes
+    if isinstance(gap, bool) or not isinstance(gap, int) or gap < 0:
+        problems.append(f"max_or_missing_minutes must be an integer of at least 0, got {gap!r}")
     age = limits.max_plan_age_s
     if isinstance(age, bool) or not isinstance(age, int) or age < 1:
         problems.append(f"max_plan_age_s must be an integer of at least 1, got {age!r}")
@@ -170,6 +176,19 @@ def validate_limits(limits: Limits) -> None:
         problems.append("entry_window and flat_by must be times")
     if problems:
         raise ValueError("invalid limits: " + "; ".join(problems))
+
+
+def _whole(value: object, name: str) -> int:
+    """A JSON whole number (int, integral float or digit string); bool rejected."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name}: not an integer: {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        return int(value.strip())
+    raise ValueError(f"{name}: not an integer: {value!r}")
 
 
 def _json_bool(value: object, name: str) -> bool:
@@ -235,6 +254,7 @@ def limits_from_dict(d: dict) -> Limits:
         max_stop_atr_5m=_dec(d, "max_stop_atr_5m", "2.5"),
         good_setup_multiple=_dec(d, "good_setup_multiple", "2"),
         trading_enabled=_json_bool(d.get("trading_enabled", True), "trading_enabled"),
+        max_or_missing_minutes=_whole(d.get("max_or_missing_minutes", 3), "max_or_missing_minutes"),
     )
     validate_limits(limits)
     return limits

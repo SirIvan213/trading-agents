@@ -6,10 +6,11 @@ this function is the source of truth. Stops round down, targets round up.
 """
 from __future__ import annotations
 
-from datetime import time
+from datetime import date, time
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from tools.config import Limits
+from tools.market_calendar import CalendarError, day_times, session_hours
 from tools.size import Plan
 
 CENT = Decimal("0.01")
@@ -19,6 +20,21 @@ SETUPS = ("orb", "level")
 
 def _refuse(reason: str) -> dict:
     return {"ok": False, "reason": reason}
+
+
+def opening_range_gap_error(opening_range: object, limits: Limits) -> str | None:
+    """Why an opening range is too gappy to plan from (issue #14), or None.
+
+    Its "missing_minutes" must be a non-negative int no greater than
+    limits.max_or_missing_minutes. Used by exit_plan's orb setup and by plan_exit for a level
+    setup whose stop structure is or_low or or_high, so the gate cannot be bypassed."""
+    missing = opening_range.get("missing_minutes") if isinstance(opening_range, dict) else None
+    if isinstance(missing, bool) or not isinstance(missing, int) or missing < 0:
+        return "opening range has no valid missing_minutes count"
+    if missing > limits.max_or_missing_minutes:
+        return (f"opening range is missing {missing} minutes of bars "
+                f"(max {limits.max_or_missing_minutes})")
+    return None
 
 
 def _dec(value: object, name: str) -> tuple[Decimal | None, str | None]:
@@ -44,12 +60,18 @@ def exit_plan(
     atr: Decimal | None = None,
     reward_multiple: Decimal | None = None,
     buffer_atr: Decimal = Decimal("0.10"),
+    session_day: date | None = None,
 ) -> dict:
     """Return {"ok", "setup", "entry", "stop", "target", "risk_per_share",
     "reward_to_risk", "time_exit", "notes"} or {"ok": False, "reason"}.
 
     Long only. "orb": structure is opening_range["low"] and the range must be
-    complete (opening_range["complete"] is True); "level": structure is `level`.
+    complete (opening_range["complete"] is True) and missing at most
+    limits.max_or_missing_minutes minutes of bars (opening_range["missing_minutes"], which
+    must be present; issue #14); "level": structure is `level`.
+    time_exit: limits.flat_by, or with `session_day` (ET date) the NYSE calendar's flat-by for
+    that day (12:55 on an early close, issue #11). With `session_day`, a holiday, weekend or
+    a year the calendar does not cover is refused.
     Entry must be a whole number of cents. The ATR timeframe should match the
     setup (e.g. 1-minute ATR for an opening-range breakout).
     Stop = floor_cent(structure - buffer_atr * atr). Target = ceil_cent(entry + R * risk),
@@ -72,6 +94,9 @@ def exit_plan(
         structure, err = _dec(opening_range["low"], "opening_range low")
         if err:
             return _refuse(err)
+        gap = opening_range_gap_error(opening_range, limits)
+        if gap:
+            return _refuse(gap)
     else:
         if level is None:
             return _refuse("level setup needs a level")
@@ -159,6 +184,13 @@ def exit_plan(
     )
 
     flat_by: time = limits.flat_by
+    if session_day is not None:
+        try:
+            if session_hours(session_day) is None:
+                return _refuse(f"market is closed on {session_day}")
+            flat_by = day_times(session_day, limits)[2]
+        except CalendarError:
+            return _refuse("market calendar does not cover this date")
     return {
         "ok": True,
         "setup": setup,

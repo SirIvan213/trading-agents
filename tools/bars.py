@@ -9,12 +9,13 @@ import os
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from tools.config import MARKET_CLOSE, MARKET_OPEN
 from tools.http import get_json
+from tools.market_calendar import CalendarError, session_hours
 
 NY = ZoneInfo("America/New_York")
 BASE_URL = "https://data.alpaca.markets/v2/stocks"
@@ -103,26 +104,51 @@ def parse_bars(raw: dict) -> list[Bar]:
     return out
 
 
+def _session_close(day: date) -> time | None:
+    """The NYSE close for `day` (13:00 on an early close), None for a holiday or weekend.
+    A year the calendar does not cover uses the standard 16:00 close here: this only shapes
+    data; risk_check BLOCKs every order on an uncovered date. Weekends never have a session."""
+    if day.weekday() >= 5:
+        return None
+    try:
+        hours = session_hours(day)
+    except CalendarError:
+        return MARKET_CLOSE
+    return None if hours is None else hours[1]
+
+
 def regular_session(bars: list[Bar], day: date | None = None) -> list[Bar]:
-    """Keep bars with 09:30 <= time < 16:00 ET (only on `day` if given)."""
+    """Keep bars with 09:30 <= time < close ET (only on `day` if given), where close comes
+    from the NYSE calendar (tools.market_calendar): 16:00, 13:00 on an early close, and no
+    bars at all on a full holiday or weekend (issue #11)."""
     out = []
+    closes: dict[date, time | None] = {}
     for b in bars:
         ny = b.ts.astimezone(NY)
-        if day is not None and ny.date() != day:
+        d = ny.date()
+        if day is not None and d != day:
             continue
-        if MARKET_OPEN <= ny.time() < MARKET_CLOSE:
+        if d not in closes:
+            closes[d] = _session_close(d)
+        close = closes[d]
+        if close is not None and MARKET_OPEN <= ny.time() < close:
             out.append(b)
     return out
 
 
-def opening_range(bars: list[Bar], minutes: int = 15) -> dict | None:
+def opening_range(bars: list[Bar], minutes: int = 15, bar_minutes: int = 1) -> dict | None:
     """High/low of the first `minutes` of the first regular session day, or None.
 
     Also returns "complete" (True only if at least one regular-session bar on that
     day has ts >= the window end, i.e. the window has fully elapsed) and
-    "missing_minutes" (whole minutes in [09:30, end) with no bar; informational,
-    assumes 1-minute bars).
+    "missing_minutes": minutes in [09:30, end) covered by no bar, for bars of
+    `bar_minutes` minutes (each slot [09:30 + k*bar_minutes, +bar_minutes) without a bar
+    starting in it counts bar_minutes). `minutes` must be a positive multiple of
+    `bar_minutes`. exit_plan refuses an orb setup whose missing_minutes exceeds
+    limits.max_or_missing_minutes (issue #14).
     """
+    if bar_minutes < 1 or minutes < 1 or minutes % bar_minutes:
+        raise ValueError("minutes must be a positive multiple of bar_minutes")
     session = regular_session(bars)
     if not session:
         return None
@@ -132,10 +158,8 @@ def opening_range(bars: list[Bar], minutes: int = 15) -> dict | None:
     window = [b for b in session if b.ts.astimezone(NY).date() == first_day and b.ts < end]
     if not window:
         return None
-    present = {b.ts.astimezone(NY).replace(second=0, microsecond=0) for b in window}
-    missing = sum(
-        1 for i in range(minutes) if (start + timedelta(minutes=i)) not in present
-    )
+    slots = {int((b.ts - start).total_seconds() // 60) // bar_minutes for b in window}
+    missing = bar_minutes * sum(1 for k in range(minutes // bar_minutes) if k not in slots)
     complete = any(
         b.ts >= end and b.ts.astimezone(NY).date() == first_day for b in session
     )
