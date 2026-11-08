@@ -20,10 +20,13 @@ Earnings (`earnings_status`):
   blocks on its own and never clears. Add one (e.g. a block-only Alpha Vantage cross-check) by
   appending (name, fn) where fn(symbol, now, window_end, sources) -> list of EVENT reasons.
 
-Halts (`halt_status`): a headline flagged "halt" dated today is EVENT. A failed or malformed
-news fetch, or a reply with any item the digest cannot read (no valid time or headline), is
-UNKNOWN ("cannot rule out a halt"), never "no halts". News that loads cleanly with no halt
-today is CLEAR.
+Halts (`halt_status`), from two REQUIRED sources (#112, #144):
+  - the Nasdaq Trader trade-halt feed (tools.halt_feed): any halt or pause for the symbol
+    dated today (incl. LULD LUDP / LUDS), any older halt still listed without a resumption,
+    or a future-dated one, is EVENT. A failed, malformed, cut-short or stale feed is UNKNOWN.
+  - news headlines: a headline flagged "halt" dated today is EVENT; a failed or malformed news
+    fetch, or any item that cannot be read, is UNKNOWN ("cannot rule out a halt").
+  CLEAR only when BOTH load cleanly and neither shows a halt.
 
 `event_gate` combines both: EVENT if any EVENT, CLEAR only if both are CLEAR, else UNKNOWN.
 Each finding keeps its own status and source, so EVENT and UNKNOWN reasons stay distinct in
@@ -40,6 +43,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from tools.halt_feed import HALT_CODES, resumed_before
 from tools.market_calendar import CalendarError, session_hours
 from tools.news import digest, headline_flags, parse_8k_filings
 
@@ -53,6 +57,8 @@ CALENDAR_HORIZON_DAYS = 7     # callers fetch [today, today + 7 days]: covers th
                               # trading day after a long weekend, stays far under FMP's row cap
 FUTURE_SKEW = timedelta(minutes=5)
 NEWS_LOOKBACK_HOURS = 24
+MAX_HALT_FEED_AGE = timedelta(minutes=3)   # our fetch of the feed (cached for 60 s)
+MAX_HALT_FEED_LAG = timedelta(minutes=10)  # the feed's own pubDate vs our fetch
 
 Finding = dict  # {"check": "earnings"|"halt", "source", "status": EVENT|UNKNOWN, "reason"}
 
@@ -89,6 +95,11 @@ def _compact(text: object) -> str:
     """A ticker with every separator removed ("BRK.B", "BRK B", "BRKB" -> "BRKB"): used where
     matching more items only ever over-blocks (the halt scan)."""
     return "".join(ch for ch in norm_ticker(text) if ch.isalnum())
+
+
+def compact_ticker(text: object) -> str:
+    """Public name for the separator-free ticker form used by the halt checks."""
+    return _compact(text)
 
 
 def norm_ticker(text: object) -> str:
@@ -306,27 +317,22 @@ def earnings_status(
             "last_item_202": last_202}
 
 
-def halt_status(symbol: str, now: datetime, news: object) -> dict:
-    """{"status": CLEAR|EVENT|UNKNOWN, "findings": [...]}. Never raises.
-
-    Scans EVERY raw news item (not the de-duplicated digest, which keeps a repeated headline's
-    earliest copy, so a halt that also ran yesterday would hide today's): an item for this
-    symbol flagged "halt" (halt, paused, LULD, trading suspended ...) dated today in New York
-    is EVENT. A failed or malformed fetch, or ANY item that cannot be read (not an object, no
-    symbols list, a symbols list without this symbol in any spelling, no headline, no valid
-    time), is UNKNOWN: the fetch was for this symbol, so such an item might be today's halt.
-    Clean news with no halt today is CLEAR."""
+def _news_halt_findings(symbol: str, now: datetime, news: object) -> list[Finding]:
+    """Halt findings from news. Scans EVERY raw news item (not the de-duplicated digest,
+    which keeps a repeated headline's earliest copy, so a halt that also ran yesterday would
+    hide today's): an item for this symbol flagged "halt" (halt, trading paused, LULD, trading
+    suspended ...) dated today in New York is EVENT. A failed or malformed fetch, or ANY item
+    that cannot be read (not an object, no symbols list, a symbols list without this symbol in
+    any spelling, no headline, no valid time), is UNKNOWN: the fetch was for this symbol, so
+    such an item might be today's halt. Clean news with no halt today adds nothing."""
     sym = _compact(symbol)
-    if not sym or not _aware(now):
-        return {"status": UNKNOWN, "findings": [_finding(
-            "halt", "gate", UNKNOWN, "event gate called without a symbol or now")]}
     ok = isinstance(news, dict) and news.get("ok") is True
     reply = news.get("news") if ok else None
     items = reply.get("news") if isinstance(reply, dict) else None
     if not isinstance(items, list):
         why = news.get("reason") if isinstance(news, dict) and not ok else "malformed news reply"
-        return {"status": UNKNOWN, "findings": [_finding(
-            "halt", "news", UNKNOWN, f"news unavailable ({why}): cannot rule out a halt today")]}
+        return [_finding("halt", "news", UNKNOWN,
+                         f"news unavailable ({why}): cannot rule out a halt today")]
     today = now.astimezone(NY).date()
     findings: list[Finding] = []
     unreadable = 0
@@ -350,6 +356,71 @@ def halt_status(symbol: str, now: datetime, news: object) -> dict:
         findings.append(_finding(
             "halt", "news", UNKNOWN,
             f"{unreadable} news item(s) unreadable: cannot rule out a halt today"))
+    return findings
+
+
+def _feed_halt_findings(symbol: str, now: datetime, halts: object) -> list[Finding]:
+    """Halt findings from the Nasdaq Trader halt feed (#144). `halts` is
+    {"ok": True, "fetched_at", "feed": tools.halt_feed.parse_halt_feed(...)} or a failure."""
+    def unknown(reason: str) -> list[Finding]:
+        return [_finding("halt", "nasdaq", UNKNOWN, reason)]
+
+    if not isinstance(halts, dict) or halts.get("ok") is not True:
+        why = halts.get("reason") if isinstance(halts, dict) else None
+        return unknown(f"Nasdaq halt feed unavailable: {why or 'no halt feed result'}")
+    feed = halts.get("feed")
+    if not isinstance(feed, dict) or feed.get("ok") is not True:
+        why = feed.get("reason") if isinstance(feed, dict) else None
+        return unknown(f"Nasdaq halt feed unusable: {why or 'malformed'}")
+    fetched, pub = _parse_time(halts.get("fetched_at")), _parse_time(feed.get("pub_date"))
+    items = feed.get("items")
+    if fetched is None or pub is None or not isinstance(items, list):
+        return unknown("Nasdaq halt feed result is malformed")
+    now_utc = now.astimezone(UTC)
+    if fetched.astimezone(UTC) > now_utc + FUTURE_SKEW:
+        return unknown("Nasdaq halt feed fetch is dated in the future")
+    if now_utc - fetched.astimezone(UTC) > MAX_HALT_FEED_AGE:
+        return unknown(f"Nasdaq halt feed is stale (fetched {fetched.astimezone(NY):%H:%M:%S} ET)")
+    if pub.astimezone(UTC) > fetched.astimezone(UTC) + FUTURE_SKEW:
+        # a clock off by more than a few minutes would switch the lag check off
+        return unknown(f"Nasdaq halt feed pubDate {pub.astimezone(NY):%Y-%m-%d %H:%M} ET is "
+                       "in the future")
+    if fetched.astimezone(UTC) - pub.astimezone(UTC) > MAX_HALT_FEED_LAG:
+        return unknown(f"Nasdaq halt feed not updated since {pub.astimezone(NY):%H:%M:%S} ET")
+    sym, today = _compact(symbol), now.astimezone(NY).date()
+    findings: list[Finding] = []
+    for it in items:
+        if not isinstance(it, dict) or _compact(it.get("symbol")) != sym:
+            continue
+        try:
+            day = date.fromisoformat(str(it.get("halt_date")))
+        except ValueError:
+            return unknown("Nasdaq halt feed result is malformed")
+        code = str(it.get("reason") or "").strip() or "no code"
+        what = f"{code} ({HALT_CODES.get(code, 'halt')})"
+        at = f"{it.get('halt_time', '?')} ET"
+        if day == today:
+            findings.append(_finding("halt", "nasdaq", EVENT,
+                                     f"Nasdaq trade halt today: {what} at {at}"))
+        elif day > today:
+            findings.append(_finding("halt", "nasdaq", EVENT,
+                                     f"Nasdaq trade halt dated {day}: {what} at {at}"))
+        elif not resumed_before(it, today):
+            findings.append(_finding("halt", "nasdaq", EVENT,
+                                     f"halted since {day} with no resumption listed: {what}"))
+    return findings
+
+
+def halt_status(symbol: str, now: datetime, news: object, halts: object = None) -> dict:
+    """{"status": CLEAR|EVENT|UNKNOWN, "findings": [...]}. Never raises.
+
+    Two required sources: the Nasdaq halt feed (`halts`, #144) and news headlines (`news`).
+    EVENT if either shows a halt; CLEAR only when both load cleanly with none; otherwise
+    UNKNOWN. A missing feed result (None) is UNKNOWN, never "no halts"."""
+    if not _compact(symbol) or not _aware(now):
+        return {"status": UNKNOWN, "findings": [_finding(
+            "halt", "gate", UNKNOWN, "event gate called without a symbol or now")]}
+    findings = _feed_halt_findings(symbol, now, halts) + _news_halt_findings(symbol, now, news)
     if any(f["status"] == EVENT for f in findings):
         status = EVENT
     elif findings:
@@ -361,7 +432,7 @@ def halt_status(symbol: str, now: datetime, news: object) -> dict:
 
 def event_gate(
     symbol: str, now: datetime, window_end: datetime, *, calendar: object, filings: object,
-    news: object,
+    news: object, halts: object = None,
     secondary: tuple[tuple[str, SecondarySignal], ...] = SECONDARY_EARNINGS_SIGNALS,
 ) -> dict:
     """The combined gate result risk_check requires: {"status", "symbol", "checked_at",
@@ -369,7 +440,7 @@ def event_gate(
     CLEAR only when earnings and halt are both CLEAR, else UNKNOWN. Never raises."""
     earn = earnings_status(symbol, now, window_end, calendar=calendar, filings=filings,
                            news=news, secondary=secondary)
-    halt = halt_status(symbol, now, news)
+    halt = halt_status(symbol, now, news, halts)
     findings = earn["findings"] + halt["findings"]
     if any(f["status"] == EVENT for f in findings):
         status = EVENT

@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from agents.schemas import ExitPlanRecord
 from journal.log import APPROVED, Journal
 from pipeline.ledger import PlanLedger
+from tests.fakes import HaltFeedFake
 
 NY = ZoneInfo("America/New_York")
 AS_OF = datetime(2026, 10, 19, 10, 15, tzinfo=NY)  # a Monday
@@ -204,19 +205,34 @@ def news_ok(items=()) -> dict:
     return {"ok": True, "news": {"news": list(items), "next_page_token": None}}
 
 
+def halts_ok(now: datetime, items=(), *, fetched_ago_s: float = 5, pub_ago_s: float = 60,
+             num_items: int | str | None = None) -> dict:
+    """A clean, fresh halts input for the gate: parse_halt_feed over a synthetic feed fetched
+    `fetched_ago_s` before `now`, published `pub_ago_s` before. `items` are halt_item_xml
+    strings (#144)."""
+    from tests.fakes import halt_feed_xml
+    from tools.halt_feed import parse_halt_feed
+    body = halt_feed_xml(now - timedelta(seconds=pub_ago_s), items, num_items=num_items)
+    feed = parse_halt_feed(body)
+    assert feed["ok"], feed
+    return {"ok": True, "fetched_at": (now - timedelta(seconds=fetched_ago_s)).isoformat(),
+            "feed": feed}
+
+
 def window_end_for(now: datetime) -> datetime:
     return now.astimezone(NY).replace(hour=15, minute=55, second=0, microsecond=0)
 
 
 def gate_for(symbol: str, now: datetime, *, calendar=None, filings=None, news=None,
-             window_end: datetime | None = None, **kw) -> dict:
+             halts=None, window_end: datetime | None = None, **kw) -> dict:
     """A real event_gate result; every input defaults to its clear form."""
     from tools.event_gate import event_gate
     return event_gate(
         symbol, now, window_end or window_end_for(now),
         calendar=calendar if calendar is not None else calendar_ok(now),
         filings=filings if filings is not None else filings_ok(now, symbol=symbol),
-        news=news if news is not None else news_ok(), **kw)
+        news=news if news is not None else news_ok(),
+        halts=halts if halts is not None else halts_ok(now), **kw)
 
 
 def clear_gate(symbol: str, now: datetime) -> dict:
@@ -246,7 +262,7 @@ def events_of(**inputs):
     return source
 
 
-class QuietGateData:
+class QuietGateData(HaltFeedFake):
     """Wraps a fake data object so the event gate reads CLEAR from it: an FMP calendar with
     only other companies' rows, an item 2.02 filing 30 days ago, and the news without halt or
     earnings
@@ -255,6 +271,7 @@ class QuietGateData:
 
     def __init__(self, inner) -> None:
         self._inner = inner
+        self.halt_items = getattr(inner, "halt_items", ())  # listed halts the inner fake carries
 
     def __getattr__(self, name: str):
         return getattr(self._inner, name)
@@ -271,6 +288,7 @@ class QuietGateData:
 
     def news(self, symbols, start, end):
         out = self._inner.news(symbols, start, end)
+        self._note_now(end)  # the halt feed is fresh as of the gate's clock (#144)
         words = ("halt", "earnings", "quarterly results")
         # Quiet = no halt or earnings headline AND nothing unreadable: the gate treats an
         # item it cannot read (no valid time or headline) as a possible halt (UNKNOWN).

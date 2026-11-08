@@ -8,7 +8,8 @@
   "news": "news.json",
   "submissions": "submissions.json",
   "companyfacts": "companyfacts.json",
-  "earnings_calendar": "earnings_calendar.json"
+  "earnings_calendar": "earnings_calendar.json",
+  "halts": "halts.xml"
  },
  "expected": {
   "action": "BUY",

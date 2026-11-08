@@ -1,12 +1,13 @@
 """Event-gate inputs for the order path (issues #13, #112).
 
 `events_from(data)` builds the EventSource that propose() and the approval re-check call:
-(symbol, now, window_end) -> tools.event_gate.event_gate(...) result. It reads three sources
+(symbol, now, window_end) -> tools.event_gate.event_gate(...) result. It reads four sources
 from `data` and turns every failure into a {"ok": False, "reason"} input, so the gate says
 UNKNOWN instead of anything raising or reading as empty:
   data.earnings_calendar(start, end) -> {"fetched_at", "from", "to", "reply"}  (FMP, primary)
   data.submissions(symbol)                                                    (SEC coverage)
   data.news([symbol], start, end)                                             (halts, signal)
+  data.halt_feed() -> {"fetched_at", "body"}         (Nasdaq trade-halt feed, halts, #144)
 
 `FmpCalendarCache` fetches the FMP calendar once per New York day for [today, today + 7
 days] and keeps it on disk (journal/cache/, git-ignored). A failed fetch is not cached, so the
@@ -25,6 +26,7 @@ from typing import Any
 from pipeline.market import NY
 from tools.earnings_calendar import fetch_fmp_earnings_calendar, parse_fmp_calendar
 from tools.event_gate import CALENDAR_HORIZON_DAYS, NEWS_LOOKBACK_HOURS, event_gate
+from tools.halt_feed import parse_halt_feed
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "journal" / "cache"
 
@@ -102,19 +104,45 @@ def calendar_input(data: Any, today: date) -> dict:
         return {"ok": False, "reason": _failure(exc)}
 
 
+def halts_input(data: Any) -> dict:
+    """The gate's halt-feed input: {"ok": True, "fetched_at", "feed": parse_halt_feed(...)} or
+    {"ok": False, "reason"} (no source, a fetch error, a malformed feed)."""
+    if not callable(getattr(data, "halt_feed", None)):
+        return {"ok": False, "reason": "no halt feed source"}
+    try:
+        raw = data.halt_feed()
+        feed = parse_halt_feed(raw["body"])
+        if feed.get("ok") is not True:
+            return {"ok": False, "reason": str(feed.get("reason"))}
+        return {"ok": True, "fetched_at": str(raw["fetched_at"]), "feed": feed}
+    except Exception as exc:  # noqa: BLE001 - every failure is an UNKNOWN input
+        return {"ok": False, "reason": _failure(exc)}
+
+
+def gate_inputs(data: Any, symbol: str, now: datetime, *, calendar: dict | None = None,
+                halts: dict | None = None) -> dict:
+    """The four gate inputs for `symbol` at `now`, each {"ok": True, ...} or {"ok": False,
+    "reason"}: calendar (FMP), filings (SEC), news (Alpaca, 24 h) and halts (Nasdaq feed).
+    `calendar` and `halts` may be passed in when shared across symbols (smoke_events)."""
+    today = now.astimezone(NY).date()
+    try:
+        filings: dict = {"ok": True, "submissions": data.submissions(symbol)}
+    except Exception as exc:  # noqa: BLE001
+        filings = {"ok": False, "reason": _failure(exc)}
+    try:
+        start = now - timedelta(hours=NEWS_LOOKBACK_HOURS)
+        news: dict = {"ok": True, "news": data.news([symbol], start, now)}
+    except Exception as exc:  # noqa: BLE001
+        news = {"ok": False, "reason": _failure(exc)}
+    return {
+        "calendar": calendar if calendar is not None else calendar_input(data, today),
+        "filings": filings, "news": news,
+        "halts": halts if halts is not None else halts_input(data),
+    }
+
+
 def events_from(data: Any) -> EventSource:
     """An EventSource reading `data` (LiveData in production, ScenarioData in the smoke run)."""
     def gate(symbol: str, now: datetime, window_end: datetime) -> dict:
-        today = now.astimezone(NY).date()
-        calendar = calendar_input(data, today)
-        try:
-            filings: dict = {"ok": True, "submissions": data.submissions(symbol)}
-        except Exception as exc:  # noqa: BLE001
-            filings = {"ok": False, "reason": _failure(exc)}
-        try:
-            start = now - timedelta(hours=NEWS_LOOKBACK_HOURS)
-            news: dict = {"ok": True, "news": data.news([symbol], start, now)}
-        except Exception as exc:  # noqa: BLE001
-            news = {"ok": False, "reason": _failure(exc)}
-        return event_gate(symbol, now, window_end, calendar=calendar, filings=filings, news=news)
+        return event_gate(symbol, now, window_end, **gate_inputs(data, symbol, now))
     return gate
