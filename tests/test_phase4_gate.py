@@ -67,7 +67,8 @@ AAPL_LEVELS = {
     "or_low": "99.70", "or_high": "102.00", "vwap": "101.60",
 }
 NAMES = "session_low, session_high, last_close, or_low, or_high, vwap"
-ENTRY_MSG = f"entry must be one of get_bars price_levels: {NAMES}"
+ENTRY_MSG = ("entry must be the last_close value from get_bars price_levels "
+             "(orders are market orders)")
 LEVEL_MSG = f"level must be one of get_bars price_levels: {NAMES}"
 
 
@@ -264,8 +265,7 @@ def test_valid_entry_does_not_excuse_invalid_level(spy):
 
 def test_refusal_lists_available_level_names():
     res, _ = loaded().execute("plan_exit", {"setup": "orb", "entry": "102.50"})
-    for name in AAPL_LEVELS:
-        assert name in res["error"]
+    assert res == {"error": ENTRY_MSG}
     res, _ = loaded().execute(
         "plan_exit", {"setup": "level", "entry": "103.10", "level": "102.50"})
     for name in AAPL_LEVELS:
@@ -279,8 +279,7 @@ def test_refusal_names_exclude_or_levels_without_opening_range(spy):
     s = make(summary)
     res, err = s.execute("plan_exit", {"setup": "orb", "entry": "10.75"})
     assert err is True
-    assert res == {"error": "entry must be one of get_bars price_levels: "
-                            "session_low, session_high, last_close, vwap"}
+    assert res == {"error": ENTRY_MSG}
     assert "or_low" not in res["error"] and "or_high" not in res["error"]
     assert spy == []
 
@@ -288,7 +287,7 @@ def test_refusal_names_exclude_or_levels_without_opening_range(spy):
 def test_plan_exit_without_price_levels_in_summary_refuses(spy):
     s = make({"session_low": "99.70", "session_high": "103.20", "opening_range": None})
     res, err = s.execute("plan_exit", {"setup": "orb", "entry": "100.00"})
-    assert err is True and res["error"].startswith("entry must be one of get_bars price_levels")
+    assert err is True and res["error"] == ENTRY_MSG
     assert spy == []
 
 
@@ -985,7 +984,7 @@ def test_exit_plan_record_fields_pinned():
     assert tuple(ExitPlanRecord.model_fields) == (
         "plan_id", "symbol", "setup", "entry", "stop", "target", "risk_per_share",
         "reward_to_risk", "time_exit", "entry_level", "structure_level", "as_of", "last_close",
-        "labels")
+        "labels", "context")
 
 
 def test_exit_plan_record_is_frozen():

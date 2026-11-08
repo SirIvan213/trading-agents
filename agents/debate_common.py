@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from agents.money_guard import (
     ViolationDetail,
     allowed_values,
+    context_ratios,
     money_violations,
     quoted_values,
     violation_details,
@@ -127,6 +128,7 @@ def make_validator(
     plan_ids = {p.plan_id for p in packet.exit_plans}
     allowed: set[Decimal] = allowed_values(packet)
     quoted: frozenset[str] = quoted_values(packet)
+    ratios: frozenset[str] = context_ratios(packet)
 
     def validate(value: BaseModel) -> str | tuple[str, str] | None:
         if not isinstance(value, case_type):
@@ -139,7 +141,7 @@ def make_validator(
             return "at least 3 non-empty objections are required"
         bad: list[str] = []
         for text in case_texts(value):
-            bad.extend(money_violations(text, allowed, quoted))
+            bad.extend(money_violations(text, allowed, quoted, ratios))
         if bad:
             listener = _money_debug.get()
             if listener is not None:
@@ -147,7 +149,7 @@ def make_validator(
                 try:
                     listener(side, [
                         (label, d) for label, text in _labelled_texts(value)
-                        for d in violation_details(text, allowed, quoted)
+                        for d in violation_details(text, allowed, quoted, ratios)
                     ])
                 except Exception:  # noqa: BLE001, S110 - debug output must never change a run
                     pass

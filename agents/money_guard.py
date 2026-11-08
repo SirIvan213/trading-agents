@@ -51,6 +51,10 @@ Allowed values (issue #87):
     included: "CEO sold 50,000 shares" passes when an analyst's evidence says "50,000".
     Repeating a number the analysts already reported adds no new money value; the guard's job
     is to stop the debaters inventing prices, sizes, stops or targets.
+  - Plan-context ratios (#113): each plan's risk_atr_5m, entry_vs_vwap_atr_5m and
+    session_high_vs_entry_atr_5m, verbatim and unsigned, accepted ONLY as a bare 2-decimal
+    number (d) or after a weak keyword (w). "risk_atr_5m 1.82" passes; "stop 1.82", "$1.82",
+    "buy 1.82" and "1.82 shares" do not. The ATR itself is not quotable.
 Any other number in a money pattern is a violation. Share counts NOT in the evidence (e.g. a
 model-invented "CEO sold 50,000 shares") are flagged; the model must rephrase without them.
 Evidence tokens that are labels, not values, are never quoted: 8-K item numbers, clock times,
@@ -248,22 +252,48 @@ def quoted_values(packet: DecisionPacket) -> frozenset[str]:
     return frozenset(out)
 
 
+# Kinds a context ratio may excuse: a bare 2-decimal number (d) or one after a weak keyword
+# (w: "risk of 1.82"). Never a $ amount, a strong keyword (stop/target/entry/price/limit), a
+# trade word, a per-share price or a size: a ratio must never stand in for money.
+RATIO_KINDS = frozenset({"d", "w"})
+
+
+def context_ratios(packet: DecisionPacket) -> frozenset[str]:
+    """#113: each plan's context ratios in 5-minute ATRs (risk_atr_5m, entry_vs_vwap_atr_5m,
+    session_high_vs_entry_atr_5m), verbatim and unsigned ("-0.35" is also "0.35": the scanner
+    never includes the sign). The ATR itself (a dollar value) is not included. Accepted ONLY as
+    RATIO_KINDS mentions by money_violations / violation_details."""
+    out: set[str] = set()
+    for plan in packet.exit_plans:
+        ctx = plan.context
+        if ctx is None:
+            continue
+        for raw in (ctx.risk_atr_5m, ctx.entry_vs_vwap_atr_5m, ctx.session_high_vs_entry_atr_5m):
+            if isinstance(raw, str) and raw.strip():
+                out.add(raw.strip().lstrip("-+"))
+    return frozenset(out)
+
+
 def money_mentions(text: str) -> list[str]:
     """Every substring that looks like a price, size or money value (patterns a-d above)."""
     return [mention for _, mention, _ in _scan(text)]
 
 
 def money_violations(
-    text: str, allowed: set[Decimal], quoted: Collection[str] = frozenset()
+    text: str, allowed: set[Decimal], quoted: Collection[str] = frozenset(),
+    ratios: Collection[str] = frozenset(),
 ) -> list[str]:
     """Mentions that are neither a verbatim quoted value nor Decimal-equal to a plan value.
 
     `allowed` are plan values (prices only: a (b) size is never allowed by them); `quoted`
-    are verbatim numbers from analyst evidence (allowed in any pattern, sizes included).
+    are verbatim numbers from analyst evidence (allowed in any pattern, sizes included);
+    `ratios` are plan-context ratios (context_ratios), allowed only as RATIO_KINDS mentions.
     """
     bad: list[str] = []
     for kind, mention, number in _scan(text):
         if _verbatim(number) in quoted:
+            continue
+        if kind in RATIO_KINDS and _verbatim(number) in ratios:
             continue
         value = _to_decimal(number)
         if kind == "b" or value is None or value not in allowed:
@@ -299,7 +329,7 @@ class ViolationDetail:
 
 def violation_details(
     text: str, allowed: set[Decimal], quoted: Collection[str] = frozenset(),
-    *, context: int = 40,
+    ratios: Collection[str] = frozenset(), *, context: int = 40,
 ) -> list[ViolationDetail]:
     """The same violations as money_violations(text, allowed, quoted), with the pattern that
     matched and an excerpt. Read-only: it does not change what the guard accepts."""
@@ -308,6 +338,8 @@ def violation_details(
     for start in sorted(found):
         kind, mention, number = found[start]
         if _verbatim(number) in quoted:
+            continue
+        if kind in RATIO_KINDS and _verbatim(number) in ratios:
             continue
         value = _to_decimal(number)
         if kind == "b" or value is None or value not in allowed:

@@ -55,11 +55,11 @@ def test_entry_below_vwap_is_not_extended():
 
 def test_stop_exactly_at_the_threshold_is_tight():
     # 2.5 x 0.2000 = 0.50
-    assert labels(risk_per_share=D("0.50"))["tight_stop"] is True
+    assert labels(risk_per_share=D("0.50"))["stop_within_max_width"] is True
 
 
 def test_stop_one_cent_past_the_threshold_is_not_tight():
-    assert labels(risk_per_share=D("0.51"))["tight_stop"] is False
+    assert labels(risk_per_share=D("0.51"))["stop_within_max_width"] is False
 
 
 # ---------------- structural stop ----------------
@@ -67,15 +67,13 @@ def test_stop_one_cent_past_the_threshold_is_not_tight():
 @pytest.mark.parametrize("name", sorted(STRUCTURAL_LEVELS))
 def test_structural_levels_earn_the_good_multiple(name):
     out = labels(structure_level=name)
-    assert out["structural_stop"] is True
-    assert out["extended"] is False and out["tight_stop"] is True
+    assert out["extended"] is False and out["stop_within_max_width"] is True
     assert out["suggested_multiple"] == "2"
 
 
 @pytest.mark.parametrize("name", ["last_close", "session_high", "", "bogus", None])
 def test_non_structural_levels_get_the_minimum(name):
     out = labels(structure_level=name)
-    assert out["structural_stop"] is False
     assert out["suggested_multiple"] == "1"
 
 
@@ -95,7 +93,7 @@ def test_each_failed_condition_alone_drops_the_suggestion_to_the_minimum():
 def test_labels_are_json_serializable_with_the_documented_keys():
     out = labels()
     assert json.loads(json.dumps(out)) == out
-    assert set(out) == {"extended", "tight_stop", "structural_stop", "suggested_multiple",
+    assert set(out) == {"extended", "stop_within_max_width", "suggested_multiple",
                         "atr_5m_provisional"}
 
 
@@ -104,14 +102,14 @@ def test_labels_are_json_serializable_with_the_documented_keys():
 @pytest.mark.parametrize("bad_atr", [None, D("0"), D("0.0000"), D("-0.2")])
 def test_unusable_atr_makes_extended_and_tight_unknown_and_suggests_the_minimum(bad_atr):
     out = labels(atr_5m=bad_atr, atr_5m_provisional=True)
-    assert out["extended"] is None and out["tight_stop"] is None
+    assert out["extended"] is None and out["stop_within_max_width"] is None
     assert out["suggested_multiple"] == "1"
     assert out["atr_5m_provisional"] is False  # nothing to be provisional about
 
 
 def test_missing_vwap_makes_only_extended_unknown():
     out = labels(vwap=None)
-    assert out["extended"] is None and out["tight_stop"] is True
+    assert out["extended"] is None and out["stop_within_max_width"] is True
     assert out["suggested_multiple"] == "1"  # an unknown label never earns the higher multiple
 
 
@@ -121,8 +119,8 @@ def test_provisional_atr_never_earns_more_than_the_minimum():
     good = labels(atr_5m_provisional=False)
     early = labels(atr_5m_provisional=True)
     assert good["suggested_multiple"] == "2"
-    assert (early["extended"], early["tight_stop"], early["structural_stop"]) == (
-        good["extended"], good["tight_stop"], good["structural_stop"])
+    assert (early["extended"], early["stop_within_max_width"]) == (
+        good["extended"], good["stop_within_max_width"])
     assert early["suggested_multiple"] == "1"
 
 
@@ -137,8 +135,9 @@ def test_custom_thresholds_move_the_boundaries():
     lim = replace(LIMITS, max_extension_atr_5m=D("1"), max_stop_atr_5m=D("1.5"))
     assert labels(entry=D("100.20"), limits=lim)["extended"] is False   # exactly 1.0 ATR
     assert labels(entry=D("100.21"), limits=lim)["extended"] is True
-    assert labels(risk_per_share=D("0.30"), limits=lim)["tight_stop"] is True   # 1.5 x 0.2
-    assert labels(risk_per_share=D("0.31"), limits=lim)["tight_stop"] is False
+    # 1.5 x 0.2 = 0.30 is the boundary
+    assert labels(risk_per_share=D("0.30"), limits=lim)["stop_within_max_width"] is True
+    assert labels(risk_per_share=D("0.31"), limits=lim)["stop_within_max_width"] is False
 
 
 def test_min_reward_to_risk_above_one_raises_the_minimum_multiple():

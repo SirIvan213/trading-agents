@@ -5,17 +5,20 @@ reward multiple. These labels replace that judgement. They are computed in Decim
 plan, the session VWAP and the 5-minute ATR, against thresholds in Limits:
 
   extended          entry - vwap > max_extension_atr_5m * atr_5m   (None if unknown)
-  tight_stop        risk_per_share <= max_stop_atr_5m * atr_5m     (None if unknown)
-  structural_stop   the stop sits under real structure: or_low, or_high, vwap or session_low.
-                    With entry = last_close (issue #118) the other levels (last_close,
-                    session_high) are at or above entry and exit_plan refuses them, so this is
-                    a backstop that is True on every plan plan_exit returns today.
+  stop_within_max_width  risk_per_share <= max_stop_atr_5m * atr_5m (None if unknown). Named
+                    so it cannot be read as "too tight" (#125): true is good.
+  The stop's anchor is ExitPlanRecord.structure_level (or_low, or_high, vwap, session_low).
+  A structural anchor is still REQUIRED for the higher multiple below (a backstop that is
+  always met while entries are last_close, #118), but it is no longer a label (#123): a label
+  that is always true carries no information.
   suggested_multiple
-      good_setup_multiple when extended is False, tight_stop is True, structural_stop is True
+      good_setup_multiple when extended is False, stop_within_max_width is True, the stop
+      sits under one of STRUCTURAL_LEVELS
       and the 5-minute ATR is NOT provisional; otherwise the minimum multiple,
       max(min_reward_to_risk, 1). Unknown labels never earn the higher multiple, and neither
       does a provisional ATR: early opening bars are wide, so it tends to overstate the ATR,
-      which makes `extended` less likely and `tight_stop` more likely (fails closed).
+      which makes `extended` less likely and `stop_within_max_width` more likely (fails
+      closed).
 
 The suggested multiple is a CEILING: plan_exit refuses a reward multiple above it. Labels never
 change a stop, a size or a risk limit, and nothing here reads model text.
@@ -50,12 +53,12 @@ def plan_labels(
     structure_level: str | None,
     limits: Limits,
 ) -> dict:
-    """Return {"extended", "tight_stop", "structural_stop", "suggested_multiple",
+    """Return {"extended", "stop_within_max_width", "suggested_multiple",
     "atr_5m_provisional"} for a long plan. JSON-serializable (bools, None and a string).
 
-    `atr_5m` None or not positive makes extended and tight_stop None; `vwap` None makes
-    extended None. A boundary value is not extended (strictly greater than the threshold) and
-    is tight (at or below the threshold).
+    `atr_5m` None or not positive makes extended and stop_within_max_width None; `vwap` None
+    makes extended None. A boundary value is not extended (strictly greater than the
+    threshold) and is within the maximum width (at or below the threshold).
     """
     usable = atr_5m is not None and atr_5m > 0
     extended: bool | None = None
@@ -74,8 +77,7 @@ def plan_labels(
         suggested = floor
     return {
         "extended": extended,
-        "tight_stop": tight,
-        "structural_stop": structural,
+        "stop_within_max_width": tight,
         "suggested_multiple": _multiple_text(suggested),
         "atr_5m_provisional": provisional,
     }

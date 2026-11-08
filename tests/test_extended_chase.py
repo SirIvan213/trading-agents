@@ -86,7 +86,7 @@ def test_clean_buy_vwap_plan_is_not_extended_and_suggests_two():
     lv = price_levels(s.summary)
     res, _ = s.execute("plan_exit", {"setup": "level", "entry": lv["last_close"],
                                      "level": lv["vwap"]})
-    assert res["labels"] == {"extended": False, "tight_stop": True, "structural_stop": True,
+    assert res["labels"] == {"extended": False, "stop_within_max_width": True,
                              "suggested_multiple": "2", "atr_5m_provisional": False}
     assert res["target"] == "81.40" and res["reward_to_risk"] == "2.00"
 
@@ -95,7 +95,7 @@ def test_clean_buy_orb_plan_is_not_tight_so_suggests_one():
     s = session("clean-buy")
     lv = price_levels(s.summary)
     res, _ = s.execute("plan_exit", {"setup": "orb", "entry": lv["last_close"]})
-    assert res["labels"]["extended"] is False and res["labels"]["tight_stop"] is False
+    assert res["labels"]["extended"] is False and res["labels"]["stop_within_max_width"] is False
     assert res["labels"]["suggested_multiple"] == "1" and res["risk_atr_5m"] == "4.55"
 
 
@@ -170,8 +170,8 @@ def test_quoted_values_unchanged_dates_clocks_and_item_numbers_are_skipped():
 
 def test_technical_prompt_uses_labels_and_last_close_and_does_not_judge_extension():
     t = prompt("technical")
-    for word in ("labels", "suggested_multiple", "last_close", "extended", "tight_stop",
-                 "structural_stop", "atr_5m_provisional"):
+    for word in ("labels", "suggested_multiple", "last_close", "extended", "stop_within_max_width",
+                 "atr_5m_provisional"):
         assert word in t, word
     assert "do NOT judge extension or stop tightness yourself" in t
     assert "any other entry is refused" in t
