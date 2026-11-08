@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from zoneinfo import ZoneInfo
 
 from tools.config import MARKET_CLOSE, Limits, validate_limits
 from tools.market_calendar import CalendarError, closed_reason, day_times, session_hours
 from tools.slippage import minimum_allowance
+from tools.symbols import normalize_symbol
 
 NY = ZoneInfo("America/New_York")
 
@@ -156,6 +157,9 @@ def check_order(
     symbol = raw_symbol.strip().upper() if isinstance(raw_symbol, str) else ""
     if not symbol:
         reasons.append("order has no symbol")
+    elif normalize_symbol(raw_symbol) is None:
+        # #34: a malformed or lookalike symbol could dodge the blocked list
+        reasons.append(f"order symbol {symbol!r} is not a valid ticker")
     if symbol in limits.blocked_symbols:
         reasons.append(f"{symbol} is on the blocked list")
     if order.get("side") != "buy":
@@ -277,14 +281,25 @@ def _numeric_rules(
 
     if risk_per_share > 0:
         reward = target - entry
-        if reward > limits.max_reward_multiple * risk_per_share + Decimal("0.01"):
+        # #33: the exact cap, the most exit_plan can produce at R = cap (its target rounds
+        # up to the cent); no flat tolerance, which let tiny risks pass well over the cap
+        allowed = (limits.max_reward_multiple * risk_per_share).quantize(
+            Decimal("0.01"), rounding=ROUND_CEILING)
+        if reward > allowed:
             rr = reward / risk_per_share
             reasons.append(
                 f"reward:risk {rr:.2f} over cap {limits.max_reward_multiple} "
-                f"(beyond one-cent rounding tolerance)"
+                f"(reward {reward} > {allowed})"
             )
 
     if 0 < risk_per_share < limits.min_risk_per_share:
         reasons.append(
             f"risk per share {risk_per_share} below minimum {limits.min_risk_per_share}"
+        )
+    pct_floor = entry * limits.min_risk_pct / 100
+    if 0 < risk_per_share < pct_floor:
+        # #77: relative to price; risk_check has no ATR, so this is its only relative floor
+        reasons.append(
+            f"risk per share {risk_per_share} below {limits.min_risk_pct}% of entry "
+            f"({pct_floor.quantize(Decimal('0.0001'))})"
         )

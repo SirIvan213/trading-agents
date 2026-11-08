@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import math
 import os
-import re
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass, fields
@@ -17,11 +16,13 @@ from zoneinfo import ZoneInfo
 
 from tools.config import Limits
 from tools.http import get_json
+from tools.symbols import SYMBOL_RE as _SHARED_SYMBOL_RE
+from tools.symbols import normalize_symbol
 
 NY = ZoneInfo("America/New_York")
 SNAPSHOTS_URL = "https://data.alpaca.markets/v2/stocks/snapshots"
 MAX_SYMBOLS_PER_REQUEST = 100
-SYMBOL_RE = re.compile(r"^[A-Z][A-Z.]{0,9}$")
+SYMBOL_RE = _SHARED_SYMBOL_RE  # tools.symbols: 1-5 letters, optional ".X"/".XY" (#34)
 CENT = Decimal("0.01")
 RVOL_NOTE = "rvol vs previous day"
 
@@ -100,14 +101,15 @@ def _criteria_dict(c: ScanCriteria) -> dict:
 
 
 def validate_symbols(symbols: list[str]) -> list[str]:
-    """Upper-case, validate against ^[A-Z][A-Z.]{0,9}$ and de-duplicate (order kept)."""
+    """Normalise with tools.symbols (1-5 ASCII letters, optional one share-class suffix
+    like ".B") and de-duplicate (order kept). Raises ValueError for an invalid symbol."""
     out: list[str] = []
     seen: set[str] = set()
     for s in symbols:
         if not isinstance(s, str):
             raise ValueError(f"symbol must be a string, got {s!r}")
-        up = s.strip().upper()
-        if not SYMBOL_RE.match(up):
+        up = normalize_symbol(s)
+        if up is None:
             raise ValueError(f"invalid symbol {s!r}")
         if up not in seen:
             seen.add(up)
@@ -300,7 +302,7 @@ def scan(
     for raw_sym, snap in items:
         sym = str(raw_sym).strip().upper()
         reasons: list[str] = []
-        if not SYMBOL_RE.match(sym):
+        if normalize_symbol(sym) is None:
             rejected.append({"symbol": str(raw_sym), "reasons": ["invalid symbol"]})
             continue
         if sym in seen:

@@ -103,6 +103,14 @@ def build_order(
         matches = False
     if not matches:
         return {"ok": False, "reason": "plan risk_per_share does not match entry - stop"}
+    # #78: the minimum stop distance before sizing, so a self-consistent forged record with a
+    # noise stop is never sized (risk_check would block it later; refuse it here first)
+    if risk < limits.min_risk_per_share:
+        return {"ok": False, "reason": (
+            f"risk per share {risk} is below min_risk_per_share {limits.min_risk_per_share}")}
+    if risk < entry * limits.min_risk_pct / 100:
+        return {"ok": False, "reason": (
+            f"risk per share {risk} is below {limits.min_risk_pct}% of entry")}
     # Issue #118: the order is a MARKET order, so it fills near the last close. A plan whose
     # entry is any other price would be sized on a risk it does not carry.
     if plan.entry_level != "last_close" or _cents(plan.last_close) != entry:

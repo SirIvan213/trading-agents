@@ -11,6 +11,7 @@
   "max_reward_multiple": "5",
   "min_risk_per_share": "0.10",
   "min_risk_atr_multiple": "1.0",
+  "min_risk_pct": "0.25",
   "max_plan_age_s": 300,
   "max_extension_atr_5m": "2.0",
   "max_stop_atr_5m": "2.5",
