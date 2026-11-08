@@ -30,6 +30,29 @@ checks it against hard risk limits, and asks a human before anything reaches a
    Ivan's explicit approval in this session.** Tests and checks use fakes with
    the network blocked.
 
+   **The one standing exception (Phase 5, #156):** the Claude and FMP calls made by
+   `pipeline.run_day` are pre-approved, but only when all of these hold:
+   - Windows Task Scheduler launched it, from the task Ivan set up;
+   - `paper` is `true`;
+   - `run_day` enforces all three daily caps in code, and refuses to start if any cap
+     is missing or invalid (fail closed):
+     - at most 10 decisions per New York day. A decision is one symbol going
+       through analysts → debate → Trader, however it ends (early stop, forced PASS,
+       failure); retries inside it count toward that same decision;
+     - at most 600,000 tokens per New York day, counting all tokens across all
+       agents: input, output, cache reads and cache writes. Retries count too.
+       Ivan set this value (#157); changing it counts as raising a cap;
+     - FMP fetched at most once per New York day.
+
+   When the decision or token cap is reached, the run stops making decisions for the
+   day. After the day's one FMP fetch it reuses that data and calls FMP no more.
+   Nothing carries over between days, and the run never raises a cap.
+
+   Nothing else is covered: smoke scripts, ad hoc or manual runs, new paid sources
+   and raising a cap still need Ivan's explicit approval each time. A Claude Code
+   session must never start `run_day`, or create or change its scheduled task, under
+   this exception.
+
 ## Layout
 
 ```
