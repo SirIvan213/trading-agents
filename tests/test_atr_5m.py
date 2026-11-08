@@ -160,7 +160,7 @@ def test_clean_buy_plan_exit_context_exact_values():
     assert lvl["session_high_vs_entry_atr_5m"] == "0.26"  # 0.05 / 0.1868 = 0.267, floored
     # the orb stop is not tight (risk 4.55 x atr_5m), so its suggestion, and ceiling, is 1
     orb, _ = s.execute("plan_exit", {"setup": "orb", "entry": lv["last_close"]})
-    assert orb["labels"]["tight_stop"] is False and orb["reward_to_risk"] == "1.00"
+    assert orb["labels"]["stop_within_max_width"] is False and orb["reward_to_risk"] == "1.00"
     assert orb["risk_per_share"] == "0.85" and orb["risk_atr_5m"] == "4.55"
     assert orb["entry_vs_vwap_atr_5m"] == "1.71" and orb["target_vs_session_high"] == "at_or_above"
 
@@ -426,7 +426,7 @@ def test_very_early_session_has_no_5m_context_and_null_fields():
     assert res["atr_5m"] is None
     assert res["risk_atr_5m"] is None and res["entry_vs_vwap_atr_5m"] is None
     assert res["session_high_vs_entry_atr_5m"] is None
-    assert res["labels"]["extended"] is None and res["labels"]["tight_stop"] is None
+    assert res["labels"]["extended"] is None and res["labels"]["stop_within_max_width"] is None
     assert res["labels"]["suggested_multiple"] == "1"  # unknown never earns the higher multiple
 
 
@@ -439,7 +439,8 @@ def test_early_session_uses_the_provisional_5m_atr_and_non_null_labels():
     assert err is False, res
     assert res["atr_5m"] == summ["atr_5m"]
     assert res["labels"]["atr_5m_provisional"] is True
-    assert res["labels"]["extended"] is not None and res["labels"]["tight_stop"] is not None
+    lab = res["labels"]
+    assert lab["extended"] is not None and lab["stop_within_max_width"] is not None
 
 
 def test_prompt_says_null_means_unknown_and_labels_decide_the_multiple():

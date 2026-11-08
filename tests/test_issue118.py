@@ -60,7 +60,7 @@ def test_multiple_above_the_suggestion_is_refused_with_labels_and_nothing_record
     assert res["ok"] is False
     assert res["reason"] == (f"reward_multiple {m} is above this plan's suggested_multiple 2; "
                              "choose it or lower")
-    assert res["labels"] == {"extended": False, "tight_stop": True, "structural_stop": True,
+    assert res["labels"] == {"extended": False, "stop_within_max_width": True,
                              "suggested_multiple": "2", "atr_5m_provisional": False}
     assert "plan_id" not in res
     assert s.exit_plans == []
@@ -81,7 +81,8 @@ def test_orb_plan_with_a_loose_stop_is_capped_at_the_minimum():
     res, err = s.execute("plan_exit", {"setup": "orb", "entry": lv["last_close"],
                                        "reward_multiple": "2"})
     assert err is False and res["ok"] is False
-    assert res["labels"]["tight_stop"] is False and res["labels"]["suggested_multiple"] == "1"
+    lab = res["labels"]
+    assert lab["stop_within_max_width"] is False and lab["suggested_multiple"] == "1"
     ok, _ = s.execute("plan_exit", {"setup": "orb", "entry": lv["last_close"]})
     assert ok["ok"] is True and ok["reward_to_risk"] == "1.00"
 
@@ -115,7 +116,8 @@ def test_any_other_price_level_as_entry_is_refused_not_an_error_and_not_recorded
 def test_a_price_that_is_not_a_level_is_still_a_tool_error():
     s = session("clean-buy")
     res, err = s.execute("plan_exit", {"setup": "orb", "entry": "80.50"})
-    assert err is True and "entry must be one of get_bars price_levels" in res["error"]
+    assert err is True and res["error"] == (
+        "entry must be the last_close value from get_bars price_levels (orders are market orders)")
 
 
 def test_record_carries_last_close_labels_and_the_last_close_entry_level():
@@ -154,7 +156,8 @@ def test_early_session_plan_has_non_null_labels_and_a_provisional_atr():
                                        "level": lv["or_low"]})
     assert err is False and res["ok"] is True
     assert res["labels"]["atr_5m_provisional"] is True
-    assert res["labels"]["extended"] is not None and res["labels"]["tight_stop"] is not None
+    lab = res["labels"]
+    assert lab["extended"] is not None and lab["stop_within_max_width"] is not None
     assert s.exit_plans[0].labels.atr_5m_provisional is True
 
 
@@ -163,7 +166,7 @@ def test_missing_5m_atr_gives_unknown_labels_and_the_minimum_ceiling():
     s.summary = {**s.summary, "atr_5m": None, "atr_5m_provisional": False}
     res, err = s.execute("plan_exit", level_inp(s, reward_multiple="2"))
     assert err is False and res["ok"] is False
-    assert res["labels"]["extended"] is None and res["labels"]["tight_stop"] is None
+    assert res["labels"]["extended"] is None and res["labels"]["stop_within_max_width"] is None
     assert res["labels"]["suggested_multiple"] == "1"
     ok, _ = s.execute("plan_exit", level_inp(s))
     assert ok["ok"] is True and ok["reward_to_risk"] == "1.00"
@@ -216,7 +219,7 @@ def test_plan_without_last_close_or_labels_still_validates_as_none():
 
 
 def test_plan_labels_model_forbids_extra_fields_and_is_frozen():
-    ok = dict(extended=False, tight_stop=True, structural_stop=True, suggested_multiple="2",
+    ok = dict(extended=False, stop_within_max_width=True, suggested_multiple="2",
               atr_5m_provisional=False)
     labels = PlanLabels(**ok)
     with pytest.raises(ValueError):

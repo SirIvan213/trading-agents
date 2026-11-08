@@ -215,8 +215,7 @@ def test_only_pipeline_market_reaches_scan():
 # ---- 6. entry within session range, symbol validation ----
 
 ENTRY_MSG = (
-    "entry must be one of get_bars price_levels: "
-    "session_low, session_high, last_close, or_low, or_high, vwap"
+    "entry must be the last_close value from get_bars price_levels (orders are market orders)"
 )
 
 SETUPS = [

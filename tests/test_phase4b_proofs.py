@@ -351,9 +351,12 @@ def test_technical_failure_empties_the_ledger_and_forces_pass(tmp_path):
     scr["trader"] = []
     result, router, journal = go(tmp_path, scr, ask=lambda _: pytest.fail("asked"))
     assert result.packet.runs["technical"].ok is False and result.packet.exit_plans == []
-    assert result.trader.forced_pass in ("fatal_bear", "no_plans")
+    assert result.trader.forced_pass == "analyst_failed"
     assert result.proposal is None and "trader" not in router.calls
     assert APPROVED not in [e["status"] for e in raw_lines(journal)]
+    # #108: no Trader call, and the journal records a forced pass
+    assert [(e["status"], e.get("forced_pass")) for e in raw_lines(journal)] == [
+        ("pass", "analyst_failed")]
 
 
 def test_a_decline_leaves_no_approved_entry_and_the_day_untouched(tmp_path):

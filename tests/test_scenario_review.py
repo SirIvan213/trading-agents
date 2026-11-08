@@ -62,7 +62,7 @@ def test_clean_buy_breakout_plan_at_or_high_stop_is_valid_but_loose_so_capped_at
     inp = {"setup": "level", "entry": lv["last_close"], "level": lv["or_high"]}
     refused, err = s.execute("plan_exit", {**inp, "reward_multiple": "2"})
     assert err is False and refused["ok"] is False and s.exit_plans == []
-    assert refused["labels"]["tight_stop"] is False
+    assert refused["labels"]["stop_within_max_width"] is False
     assert refused["labels"]["suggested_multiple"] == "1"
     res, err = s.execute("plan_exit", inp)
     assert err is False and res["ok"] is True and res["reward_to_risk"] == "1.00"
