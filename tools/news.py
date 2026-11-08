@@ -60,6 +60,11 @@ RED_FLAG_CATALYSTS = frozenset({"bankruptcy", "delisting_notice", "non_reliance_
 # approval", "board approval" and so on); FDA news is caught by "FDA" and "CRL".
 # Known limitation: "ATM" also matches an ATM machine; flags are hints for a human
 # or agent, not verdicts.
+# The same holds for "halt": every form of the word counts as a halt red flag, including
+# "halting", so "ABCD halting production" is flagged "halt" even though it is not a trading
+# halt (#26). That is deliberate: over-flagging only blocks or flags a symbol, while missing
+# a real halt could let an order through. The event gate treats a flagged halt headline
+# dated today as an EVENT (tools/event_gate.py).
 HEADLINE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "offering": ("offering", "offerings", "public offering", "public offerings",
                  "registered direct", "ATM"),

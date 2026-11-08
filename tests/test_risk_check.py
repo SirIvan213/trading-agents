@@ -263,12 +263,13 @@ def test_non_finite_order_price_blocks_without_raising(field, bad):
 def test_wrong_type_order_price_blocks_without_raising(field, bad):
     r = check(order=fc_order(**{field: bad}))
     assert r["verdict"] == "BLOCK"
-    assert r["reasons"] == ["order needs entry, stop_loss and take_profit"]
+    assert r["reasons"] == ["order prices missing or not numbers (entry, stop_loss, take_profit)"]
 
 
 def test_unparseable_string_price_blocks():
     r = check(order=fc_order(take_profit="abc"))
-    assert r == {"verdict": "BLOCK", "reasons": ["order needs entry, stop_loss and take_profit"]}
+    assert r == {"verdict": "BLOCK", "reasons": [
+        "order prices missing or not numbers (entry, stop_loss, take_profit)"]}
 
 
 def test_huge_exponent_target_blocks_as_arithmetic_failure():

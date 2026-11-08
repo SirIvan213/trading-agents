@@ -58,7 +58,13 @@ def get_bytes(
 
     Raises RuntimeError on: HTTP error status, a refused redirect, a response from another
     origin, and a URL/network error or timeout. Messages name the URL path only (never the
-    query string, which may hold a key). With `max_bytes`, at most max_bytes + 1 bytes are
+    query string, which may hold a key).
+
+    Proxies: the default opener comes from urllib.request.build_opener, which honours the
+    HTTPS_PROXY / HTTP_PROXY / NO_PROXY environment variables, as urlopen did. A proxy set
+    there sees every request: the full URL (so the query string, e.g. an FMP key) and the
+    request headers (the Alpaca key headers, the SEC user agent). Only set them to a proxy
+    you trust. An injected `opener` bypasses this. With `max_bytes`, at most max_bytes + 1 bytes are
     read, so a caller can refuse an oversized body without holding all of it in memory.
     """
     open_fn = opener or _default_open

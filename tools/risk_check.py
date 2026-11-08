@@ -179,7 +179,7 @@ def check_order(
             raise TypeError("bool price")
         entry, stop, target = (Decimal(v) for v in raw)
     except (KeyError, TypeError, ValueError, ArithmeticError):
-        reasons.append("order needs entry, stop_loss and take_profit")
+        reasons.append("order prices missing or not numbers (entry, stop_loss, take_profit)")
         return {"verdict": "BLOCK", "reasons": reasons}
     if not (entry.is_finite() and stop.is_finite() and target.is_finite()):
         reasons.append("order prices must be finite numbers")
