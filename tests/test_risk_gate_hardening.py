@@ -129,7 +129,7 @@ def test_33_exit_plan_size_risk_check_grid_at_the_cap_passes():
 # ============================== #34 one ticker rule ==============================
 
 def test_34_pattern_constants():
-    assert SYMBOL_PATTERN == r"[A-Z]{1,5}(?:\.[A-Z]{1,2})?"
+    assert SYMBOL_PATTERN == r"^[A-Z]{1,5}(?:\.[A-Z]{1,2})?\Z"
     assert SYMBOL_RE.fullmatch("BRK.B")
     assert not SYMBOL_RE.fullmatch("brk.b")
 
@@ -169,9 +169,22 @@ def test_34_validate_symbols_rejects(raw):
         validate_symbols([raw])
 
 
-@pytest.mark.parametrize("raw,want", GOOD_SYMBOLS, ids=repr)
+CANONICAL_SYMBOLS = [s for s in GOOD_SYMBOLS if s[0] == s[1]]
+NON_CANONICAL_SYMBOLS = [s for s in GOOD_SYMBOLS if s[0] != s[1]]
+
+
+@pytest.mark.parametrize("raw,want", CANONICAL_SYMBOLS, ids=repr)
 def test_34_check_order_passes_a_valid_symbol(raw, want):
     assert check(mk_order(symbol=raw)) == {"verdict": "PASS", "reasons": []}
+
+
+@pytest.mark.parametrize("raw,want", NON_CANONICAL_SYMBOLS, ids=repr)
+def test_34_check_order_blocks_a_valid_but_non_canonical_symbol(raw, want):
+    # validate_symbols / size_position accept these and canonicalise them; the final
+    # gate wants the canonical form already on the order.
+    assert check(mk_order(symbol=raw)) == {
+        "verdict": "BLOCK",
+        "reasons": [f"order symbol {raw!r} is not canonical (expected {want!r})"]}
 
 
 @pytest.mark.parametrize("raw", NON_EMPTY_BAD, ids=repr)
@@ -214,13 +227,20 @@ def test_34_lookalike_of_a_blocked_symbol_is_blocked_as_invalid_not_matched(look
     assert any("is not a valid ticker" in x for x in r["reasons"]), r
     assert not any("blocked list" in x for x in r["reasons"]), r  # invalid, not "matched"
     # the real symbol is still stopped by the list itself
-    real = check(mk_order(symbol="aapl ", limits=lim), lim)
+    real = check(mk_order(symbol="AAPL", limits=lim), lim)
     assert real == {"verdict": "BLOCK", "reasons": ["AAPL is on the blocked list"]}
+    padded = check(mk_order(symbol="aapl ", limits=lim), lim)
+    assert padded == {"verdict": "BLOCK", "reasons": [
+        "order symbol 'aapl ' is not canonical (expected 'AAPL')",
+        "AAPL is on the blocked list"]}
 
 
 def test_34_blocked_class_share_symbol_matches_exactly():
     lim = replace(LIMITS, blocked_symbols=frozenset({"BRK.B"}))
+    assert check(mk_order(symbol="BRK.B", limits=lim), lim)["reasons"] == [
+        "BRK.B is on the blocked list"]
     assert check(mk_order(symbol="brk.b", limits=lim), lim)["reasons"] == [
+        "order symbol 'brk.b' is not canonical (expected 'BRK.B')",
         "BRK.B is on the blocked list"]
     assert check(mk_order(symbol="BRK.A", limits=lim), lim)["verdict"] == "PASS"
 
@@ -333,7 +353,7 @@ def test_77_exit_plan_at_exactly_the_floor_passes():
 def test_77_exit_plan_one_cent_below_the_floor_is_refused():
     r = plan_at("99.76")
     assert r == {"ok": False,
-                 "reason": "risk per share 0.24 is below 0.25% of entry (0.2500)"}
+                 "reason": "risk per share 0.24 is below 0.25% of entry (0.25)"}
 
 
 def test_77_floor_checked_after_min_risk_per_share():
@@ -346,7 +366,7 @@ def test_77_floor_follows_the_limit():
     wide = replace(LIMITS, min_risk_pct=D("1"))
     assert plan_at("99.00", limits=wide)["ok"] is True
     assert plan_at("99.01", limits=wide)["reason"] == (
-        "risk per share 0.99 is below 1% of entry (1.0000)")
+        "risk per share 0.99 is below 1% of entry (1)")
 
 
 def test_77_risk_check_at_exactly_the_floor_passes():
@@ -357,7 +377,7 @@ def test_77_risk_check_at_exactly_the_floor_passes():
 def test_77_risk_check_one_cent_below_the_floor_blocks_with_the_reason():
     r = check(mk_order(stop="99.76", target="100.24", qty=10))
     assert r == {"verdict": "BLOCK",
-                 "reasons": ["risk per share 0.24 below 0.25% of entry (0.2500)"]}
+                 "reasons": ["risk per share 0.24 below 0.25% of entry (0.25)"]}
 
 
 def test_77_risk_check_uses_planned_prices_not_slippage():
@@ -365,7 +385,7 @@ def test_77_risk_check_uses_planned_prices_not_slippage():
     o = mk_order(stop="99.76", target="100.24", qty=1)
     o["slippage"] = "5.00"
     r = check(o)
-    assert "risk per share 0.24 below 0.25% of entry (0.2500)" in r["reasons"]
+    assert "risk per share 0.24 below 0.25% of entry (0.25)" in r["reasons"]
 
 
 @pytest.mark.parametrize("name", ["clean-buy", "red-flag", "extended-chase", "tsla"])
@@ -452,7 +472,8 @@ def test_78_risk_below_percent_of_entry_is_refused_before_sizing(sized_spy):
     # 0.50 clears the 0.10 floor but not 0.25% of 364.18 (0.9105)
     p = forged("364.18", "363.68", "364.68", "0.50")
     out = build(p)
-    assert out == {"ok": False, "reason": "risk per share 0.50 is below 0.25% of entry"}
+    assert out == {"ok": False,
+                   "reason": "risk per share 0.50 is below 0.25% of entry (0.91045)"}
     assert sized_spy == []
 
 
@@ -471,7 +492,8 @@ def test_78_boundary_exactly_at_the_percent_floor_is_sized(sized_spy):
 def test_78_one_cent_below_the_percent_floor_is_refused(sized_spy):
     p = forged("100.00", "99.76", "100.24", "0.24")
     out = build(p)
-    assert out == {"ok": False, "reason": "risk per share 0.24 is below 0.25% of entry"}
+    assert out == {"ok": False,
+                   "reason": "risk per share 0.24 is below 0.25% of entry (0.25)"}
     assert sized_spy == []
 
 
@@ -495,3 +517,149 @@ def test_140_quote_age_out_of_range_is_refused(age):
         limits_from_dict(cfg(max_order_quote_age_s=age))
     r = check(mk_order(), replace(LIMITS, max_order_quote_age_s=age))
     assert r["verdict"] == "BLOCK" and r["reasons"][0].startswith("limits invalid:")
+
+
+# ================= review fixes: scan keys, anchored pattern, blocklist, floors =================
+
+def _scan_rows(key):
+    from tests.test_scan import CRIT, mk
+    from tools.scan import scan
+    return scan({key: mk()}, CRIT, LIMITS)
+
+
+@pytest.mark.parametrize("key", ["ß", "ﬁ", "ı", "АAPL"], ids=ascii)
+def test_scan_rejects_non_ascii_snapshot_keys_as_invalid_symbol(key):
+    r = _scan_rows(key)
+    assert r["candidates"] == []
+    assert r["rejected"] == [{"symbol": key, "reasons": ["invalid symbol"]}]
+
+
+def test_scan_accepts_a_padded_lowercase_key_as_canonical():
+    r = _scan_rows(" aapl ")
+    assert r["rejected"] == []
+    assert [c["symbol"] for c in r["candidates"]] == ["AAPL"]
+
+
+def test_symbol_re_match_is_anchored_at_both_ends():
+    assert SYMBOL_RE.match("AAPL")
+    assert SYMBOL_RE.match("BRK.B")
+    assert SYMBOL_RE.match("AAPLXYZ") is None
+    assert SYMBOL_RE.match("AAPL\n") is None  # \Z, not $
+    assert SYMBOL_RE.match("xAAPL") is None
+
+
+@pytest.mark.parametrize("bad", [["BRK-B"], ["GME!!"], ["ＧＭＥ"], ["G ME"]], ids=ascii)
+def test_blocked_symbols_loader_refuses_an_invalid_ticker(bad):
+    with pytest.raises(ValueError, match="not a valid ticker"):
+        limits_from_dict(cfg(blocked_symbols=bad))
+
+
+def test_blocked_symbols_loader_normalises_and_skips_blanks():
+    lim = limits_from_dict(cfg(blocked_symbols=[" gme ", "BRK.B", ""]))
+    assert lim.blocked_symbols == frozenset({"GME", "BRK.B"})
+    assert validate_limits(lim) is None
+
+
+@pytest.mark.parametrize("bad", [frozenset({"gme"}), frozenset({"G ME"}),
+                                 frozenset({" GME"}), frozenset({"GME", "brk.b"})], ids=repr)
+def test_validate_limits_reports_non_canonical_blocked_symbols(bad):
+    with pytest.raises(ValueError, match="blocked_symbols must be a set of valid upper-case"):
+        validate_limits(replace(LIMITS, blocked_symbols=bad))
+
+
+@pytest.mark.parametrize("good", [frozenset({"GME"}), frozenset({"GME", "BRK.B"}), frozenset()],
+                         ids=repr)
+def test_validate_limits_accepts_canonical_blocked_symbols(good):
+    assert validate_limits(replace(LIMITS, blocked_symbols=good)) is None
+
+
+def test_check_order_canonical_symbol_passes():
+    assert check(mk_order(symbol="TSLA")) == {"verdict": "PASS", "reasons": []}
+
+
+@pytest.mark.parametrize("raw", [" TSLA", "tsla", "TSLA\n", "TSLA "], ids=repr)
+def test_check_order_blocks_a_non_canonical_symbol(raw):
+    assert check(mk_order(symbol=raw)) == {
+        "verdict": "BLOCK",
+        "reasons": [f"order symbol {raw!r} is not canonical (expected 'TSLA')"]}
+
+
+def test_check_order_padded_blocked_symbol_gets_both_reasons():
+    lim = replace(LIMITS, blocked_symbols=frozenset({"GME"}))
+    assert check(mk_order(symbol="gme", limits=lim), lim) == {
+        "verdict": "BLOCK",
+        "reasons": ["order symbol 'gme' is not canonical (expected 'GME')",
+                    "GME is on the blocked list"]}
+    assert check(mk_order(symbol="GME", limits=lim), lim) == {
+        "verdict": "BLOCK", "reasons": ["GME is on the blocked list"]}
+
+
+# ---- sub-cent percent floor: 0.25% of 40.01 is 0.100025, printed exactly ----
+
+def test_percent_floor_subcent_refused_by_exit_plan_build_order_and_risk_check(sized_spy):
+    lim = LIMITS  # min_risk_per_share 0.10, min_risk_pct 0.25, no atr given
+    assert lim.min_risk_per_share == D("0.10") and lim.min_risk_pct == D("0.25")
+    # exit_plan
+    ep = exit_plan("level", D("40.01"), lim, level=D("39.91"))
+    assert ep["ok"] is False
+    assert ep["reason"] == "risk per share 0.10 is below 0.25% of entry (0.100025)"
+    # build_order: refused before size_position is called
+    p = forged("40.01", "39.91", "40.21", "0.10")
+    out = build(p, lim)
+    assert out == {"ok": False,
+                   "reason": "risk per share 0.10 is below 0.25% of entry (0.100025)"}
+    assert sized_spy == []
+    # risk_check
+    r = check(mk_order(entry="40.01", stop="39.91", target="40.21", qty=10))
+    assert r["verdict"] == "BLOCK"
+    assert "risk per share 0.10 below 0.25% of entry (0.100025)" in r["reasons"]
+
+
+def test_percent_floor_subcent_boundary_accepted_by_all_three_gates(sized_spy):
+    ep = exit_plan("level", D("40.00"), LIMITS, level=D("39.90"))  # floor 0.1, risk 0.10
+    assert ep["ok"] is True and ep["risk_per_share"] == "0.10"
+    out = build(forged("40.00", "39.90", "40.20", "0.10"))
+    assert out["ok"] is True and len(sized_spy) == 1
+    assert check(out["order"]) == {"verdict": "PASS", "reasons": []}
+    r = check(mk_order(entry="40.00", stop="39.90", target="40.20", qty=10))
+    assert r == {"verdict": "PASS", "reasons": []}
+
+
+@pytest.mark.parametrize("cap", ["4.5", "3.3"])
+def test_non_integer_reward_cap_grid_every_accepted_plan_passes_risk_check(cap):
+    lim = replace(LIMITS, max_reward_multiple=D(cap))
+    assert validate_limits(lim) is None
+    multiples = [D(m) for m in MENU if D(m) <= D(cap)] + [D(cap)]
+    passed = 0
+    for entry in GRID_ENTRIES:
+        for off in GRID_OFFSETS:
+            for mult in multiples:
+                p = exit_plan("level", D(entry), lim, level=D(entry) - off,
+                              reward_multiple=mult)
+                if not p["ok"]:
+                    assert "below" in p["reason"], p
+                    continue
+                reward = D(p["target"]) - D(p["entry"])
+                risk = D(p["risk_per_share"])
+                assert reward <= (D(cap) * risk).quantize(CENT, rounding=ROUND_CEILING)
+                sized = size_position(
+                    Plan("AAPL", D(p["entry"]), D(p["stop"]), D(p["target"])), lim,
+                    slippage=minimum_allowance(D(p["entry"]), lim))
+                if not sized["ok"]:
+                    continue
+                r = check(sized["order"], lim)
+                assert r == {"verdict": "PASS", "reasons": []}, (cap, entry, off, mult, p, r)
+                passed += 1
+    assert passed > 40
+
+
+@pytest.mark.parametrize("cap", ["4.5", "3.3"])
+def test_non_integer_reward_cap_one_cent_over_exact_cap_is_blocked(cap):
+    lim = replace(LIMITS, max_reward_multiple=D(cap))
+    at = (D(cap) * D("1.00")).quantize(CENT, rounding=ROUND_CEILING)
+
+    def order(reward):
+        return mk_order(stop="99.00", target=str(D("100.00") + reward), limits=lim)
+
+    assert cap_reasons(check(order(at), lim)) == []
+    assert cap_reasons(check(order(at + CENT), lim)) != []

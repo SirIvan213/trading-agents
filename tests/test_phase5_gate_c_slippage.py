@@ -569,7 +569,7 @@ def test_reward_cap_and_min_risk_use_planned_prices_not_slippage():
         "risk per share 0.09 below minimum 0.10"]
     # ...and on the real default, 0.10 on a 100.00 entry is under 0.25%: blocked
     assert check(one_r("0.10", stop="99.90", target="100.10"))["reasons"] == [
-        "risk per share 0.10 below 0.25% of entry (0.2500)"]
+        "risk per share 0.10 below 0.25% of entry (0.25)"]
 
 
 def test_with_slippage_helper_adds_the_minimum_allowance():

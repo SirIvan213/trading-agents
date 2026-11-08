@@ -8,6 +8,8 @@ from datetime import time
 from decimal import Decimal
 from pathlib import Path
 
+from tools.symbols import normalize_symbol
+
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
 
@@ -38,7 +40,7 @@ class Limits:
     blocked_symbols: frozenset[str] = field(default_factory=frozenset)
     max_reward_multiple: Decimal = Decimal("5")
     # Minimum stop distance (#66): a stop a few cents from entry is a noise stop
-    # that sizing pushes to the position cap. ATR part is off when the multiple is 0.
+    # that sizing pushes to the position cap. The ATR multiple must be > 0 (#76).
     min_risk_per_share: Decimal = Decimal("0.10")
     min_risk_atr_multiple: Decimal = Decimal("1.0")
     # Maximum age of an exit plan at order time (#67), in seconds.
@@ -90,9 +92,13 @@ def _blocked(raw: object) -> frozenset[str]:
     for item in raw:
         if not isinstance(item, str):
             raise ValueError(f"blocked_symbols: entries must be strings, got {item!r}")
-        sym = item.strip().upper()
-        if sym:
-            out.add(sym)
+        if not item.strip():
+            continue
+        sym = normalize_symbol(item)
+        if sym is None:
+            # a typo would silently leave a symbol Ivan meant to block tradeable
+            raise ValueError(f"blocked_symbols: not a valid ticker: {item!r}")
+        out.add(sym)
     return frozenset(out)
 
 
@@ -174,9 +180,9 @@ def validate_limits(limits: Limits) -> None:
         problems.append(f"cash_buffer_pct must be at least 0 and below 100, got {buf}")
     bs = limits.blocked_symbols
     if not isinstance(bs, frozenset) or not all(
-        isinstance(x, str) and x and x == x.strip().upper() for x in bs
+        isinstance(x, str) and normalize_symbol(x) == x for x in bs
     ):
-        problems.append("blocked_symbols must be a set of stripped upper-case symbols")
+        problems.append("blocked_symbols must be a set of valid upper-case tickers")
     n = limits.max_trades_per_day
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         problems.append(f"max_trades_per_day must be an integer of at least 1, got {n!r}")

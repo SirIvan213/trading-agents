@@ -186,7 +186,7 @@ def exit_plan(
         # #77: a stop closer than min_risk_pct% of the price is a noise stop
         return _refuse(
             f"risk per share {risk} is below {limits.min_risk_pct}% of entry "
-            f"({pct_floor.quantize(Decimal('0.0001'))})"
+            f"({pct_floor.normalize():f})"
         )
     if (
         atr_d is not None

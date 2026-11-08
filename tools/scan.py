@@ -300,11 +300,12 @@ def scan(
     seen: set[str] = set()
     items = snapshots.items() if isinstance(snapshots, dict) else []
     for raw_sym, snap in items:
-        sym = str(raw_sym).strip().upper()
         reasons: list[str] = []
-        if normalize_symbol(sym) is None:
+        norm = normalize_symbol(raw_sym)  # ASCII check BEFORE upper-casing ("ß" is not "SS")
+        if norm is None:
             rejected.append({"symbol": str(raw_sym), "reasons": ["invalid symbol"]})
             continue
+        sym = norm
         if sym in seen:
             rejected.append({"symbol": sym, "reasons": ["duplicate symbol"]})
             continue

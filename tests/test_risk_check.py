@@ -336,22 +336,38 @@ GME_BLOCKED = replace(LIMITS, blocked_symbols=frozenset({"GME"}))
 GME_REASON = ["GME is on the blocked list"]
 
 
-@pytest.mark.parametrize("symbol", ["GME", "gme", " GME", "GME ", "GME\n", "\tgMe  "], ids=repr)
-def test_padded_or_lowercase_order_symbol_cannot_bypass_blocklist(symbol):
-    r = check(order=fc_order(symbol=symbol), limits=GME_BLOCKED)
+def _noncanon(raw, sym):
+    return f"order symbol {raw!r} is not canonical (expected {sym!r})"
+
+
+def test_canonical_blocked_symbol_is_blocked():
+    r = check(order=fc_order(symbol="GME"), limits=GME_BLOCKED)
     assert r == {"verdict": "BLOCK", "reasons": GME_REASON}
+
+
+@pytest.mark.parametrize("symbol", ["gme", " GME", "GME ", "GME\n", "\tgMe  "], ids=repr)
+def test_padded_or_lowercase_order_symbol_cannot_bypass_blocklist(symbol):
+    # The blocklist still matches on the canonical form, and the non-canonical
+    # raw value is reported as well.
+    r = check(order=fc_order(symbol=symbol), limits=GME_BLOCKED)
+    assert r == {"verdict": "BLOCK", "reasons": [_noncanon(symbol, "GME"), *GME_REASON]}
 
 
 def test_regression_whitespace_padded_symbol_used_to_bypass_blocklist():
     # Before the fix " GME" was not stripped, so it slipped past a blocked GME.
     r = check(order=fc_order(symbol=" GME"), limits=GME_BLOCKED)
-    assert r["verdict"] == "BLOCK" and r["reasons"] == GME_REASON
+    assert r["verdict"] == "BLOCK"
+    assert r["reasons"] == [_noncanon(" GME", "GME"), *GME_REASON]
 
 
-@pytest.mark.parametrize("symbol", ["AAPL", " aapl "], ids=repr)
-def test_other_symbols_pass_when_gme_is_blocked(symbol):
-    r = check(order=fc_order(symbol=symbol), limits=GME_BLOCKED)
+def test_other_symbols_pass_when_gme_is_blocked():
+    r = check(order=fc_order(symbol="AAPL"), limits=GME_BLOCKED)
     assert r == {"verdict": "PASS", "reasons": []}
+
+
+def test_padded_other_symbol_is_blocked_as_not_canonical_when_gme_is_blocked():
+    r = check(order=fc_order(symbol=" aapl "), limits=GME_BLOCKED)
+    assert r == {"verdict": "BLOCK", "reasons": [_noncanon(" aapl ", "AAPL")]}
 
 
 @pytest.mark.parametrize("symbol", [None, [], ["AAPL"], "", "   ", "\n", 5, {"s": 1}], ids=repr)
@@ -464,5 +480,6 @@ def test_loader_output_from_padded_entries_passes_validation_and_blocks_gme():
     assert lim.blocked_symbols == frozenset({"GME"})
     assert check(order=fc_order(symbol="GME"), limits=lim) == {
         "verdict": "BLOCK", "reasons": GME_REASON}
-    assert check(order=fc_order(symbol=" gme"), limits=lim)["reasons"] == GME_REASON
+    assert check(order=fc_order(symbol=" gme"), limits=lim)["reasons"] == [
+        _noncanon(" gme", "GME"), *GME_REASON]
     assert check(order=fc_order(symbol="AAPL"), limits=lim) == {"verdict": "PASS", "reasons": []}

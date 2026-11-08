@@ -108,9 +108,11 @@ def build_order(
     if risk < limits.min_risk_per_share:
         return {"ok": False, "reason": (
             f"risk per share {risk} is below min_risk_per_share {limits.min_risk_per_share}")}
-    if risk < entry * limits.min_risk_pct / 100:
+    pct_floor = entry * limits.min_risk_pct / 100
+    if risk < pct_floor:
         return {"ok": False, "reason": (
-            f"risk per share {risk} is below {limits.min_risk_pct}% of entry")}
+            f"risk per share {risk} is below {limits.min_risk_pct}% of entry "
+            f"({pct_floor.normalize():f})")}
     # Issue #118: the order is a MARKET order, so it fills near the last close. A plan whose
     # entry is any other price would be sized on a risk it does not carry.
     if plan.entry_level != "last_close" or _cents(plan.last_close) != entry:

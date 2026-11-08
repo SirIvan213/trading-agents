@@ -160,6 +160,9 @@ def check_order(
     elif normalize_symbol(raw_symbol) is None:
         # #34: a malformed or lookalike symbol could dodge the blocked list
         reasons.append(f"order symbol {symbol!r} is not a valid ticker")
+    elif raw_symbol != symbol:
+        # size_position always writes the canonical form; anything else is hand-built
+        reasons.append(f"order symbol {raw_symbol!r} is not canonical (expected {symbol!r})")
     if symbol in limits.blocked_symbols:
         reasons.append(f"{symbol} is on the blocked list")
     if order.get("side") != "buy":
@@ -301,5 +304,5 @@ def _numeric_rules(
         # #77: relative to price; risk_check has no ATR, so this is its only relative floor
         reasons.append(
             f"risk per share {risk_per_share} below {limits.min_risk_pct}% of entry "
-            f"({pct_floor.quantize(Decimal('0.0001'))})"
+            f"({pct_floor.normalize():f})"
         )
