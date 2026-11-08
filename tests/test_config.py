@@ -91,6 +91,12 @@ def test_money_field_accepts_small_positive(field):
         with pytest.raises(ValueError, match="good_setup_multiple must be one of"):
             limits_from_dict(d)
         return
+    if field == "max_loss_per_trade":
+        # #75: min_risk_per_share (0.10 by default) must be below max_loss_per_trade
+        with pytest.raises(ValueError, match="min_risk_per_share must be below"):
+            limits_from_dict(d)
+        d["min_risk_per_share"] = "0.01"
+        d["max_loss_per_trade"] = "0.02"
     assert limits_from_dict(d)
 
 

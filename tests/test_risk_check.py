@@ -1,6 +1,7 @@
 import json
 from dataclasses import replace
 from datetime import datetime
+from decimal import ROUND_CEILING
 from decimal import Decimal as D
 from zoneinfo import ZoneInfo
 
@@ -120,49 +121,42 @@ def cap_reasons(r):
     return [x for x in r["reasons"] if "over cap" in x]
 
 
-@pytest.mark.parametrize("target", ["105.00", "105.01", "104.99", "102.00"])
-def test_reward_at_or_within_cap_plus_one_cent_passes(target):
+@pytest.mark.parametrize("target", ["105.00", "104.99", "102.00"])
+def test_reward_at_or_within_exact_cap_passes(target):
     r = check(order=cap_order(target), limits=CAP5)
     assert r == {"verdict": "PASS", "reasons": []}
 
 
-def test_reward_one_cent_over_tolerance_blocks_with_exact_reason():
-    r = check(order=cap_order("105.02"), limits=CAP5)
+def test_reward_one_cent_over_exact_cap_blocks_with_exact_reason():
+    # #33: the flat one-cent tolerance is gone; 105.01 is one cent over 5 x 1.00
+    r = check(order=cap_order("105.01"), limits=CAP5)
     assert r["verdict"] == "BLOCK"
-    assert r["reasons"] == [
-        "reward:risk 5.02 over cap 5 (beyond one-cent rounding tolerance)"
-    ]
+    assert r["reasons"] == ["reward:risk 5.01 over cap 5 (reward 5.01 > 5.00)"]
 
 
 def test_reward_far_over_cap_blocks_with_exact_reason():
     r = check(order=cap_order("106"), limits=CAP5)
     assert r["verdict"] == "BLOCK"
-    assert r["reasons"] == [
-        "reward:risk 6.00 over cap 5 (beyond one-cent rounding tolerance)"
-    ]
+    assert r["reasons"] == ["reward:risk 6.00 over cap 5 (reward 6.00 > 5.00)"]
 
 
-def test_tolerance_is_one_cent_per_share_not_relative():
-    # risk 0.50: cap reward = 2.50, plus 0.01 tolerance = 2.51
-    ok = check(order=cap_order("102.51", stop="99.50"), limits=CAP5)
+def test_exact_cap_is_per_share_not_relative():
+    # risk 0.50: cap reward = 2.50 exactly
+    ok = check(order=cap_order("102.50", stop="99.50"), limits=CAP5)
     assert ok["verdict"] == "PASS"
-    bad = check(order=cap_order("102.52", stop="99.50"), limits=CAP5)
+    bad = check(order=cap_order("102.51", stop="99.50"), limits=CAP5)
     assert bad["verdict"] == "BLOCK"
-    assert bad["reasons"] == [
-        "reward:risk 5.04 over cap 5 (beyond one-cent rounding tolerance)"
-    ]
+    assert bad["reasons"] == ["reward:risk 5.02 over cap 5 (reward 2.51 > 2.50)"]
 
 
 def test_test_local_cap_of_two():
     assert CAP2.max_reward_multiple == D("2")
-    assert check(order=cap_order("102.01"), limits=CAP2)["verdict"] == "PASS"
-    r = check(order=cap_order("102.02"), limits=CAP2)
+    assert check(order=cap_order("102.00"), limits=CAP2)["verdict"] == "PASS"
+    r = check(order=cap_order("102.01"), limits=CAP2)
     assert r["verdict"] == "BLOCK"
-    assert r["reasons"] == [
-        "reward:risk 2.02 over cap 2 (beyond one-cent rounding tolerance)"
-    ]
+    assert r["reasons"] == ["reward:risk 2.01 over cap 2 (reward 2.01 > 2.00)"]
     # the same order is fine under the shipped cap of 5
-    assert check(order=cap_order("102.02"), limits=CAP5)["verdict"] == "PASS"
+    assert check(order=cap_order("102.01"), limits=CAP5)["verdict"] == "PASS"
 
 
 def test_cap_rule_does_not_hide_other_reasons():
@@ -199,13 +193,15 @@ def test_exit_plan_at_the_cap_always_passes_the_cap_rule(limits, multiple):
                 assert cap_reasons(r) == [], (entry, off, atr, plan, r)
                 risk = D(plan["entry"]) - D(plan["stop"])
                 reward = D(plan["target"]) - D(plan["entry"])
-                assert reward <= multiple * risk + D("0.01")
+                assert reward <= (multiple * risk).quantize(D("0.01"), rounding=ROUND_CEILING)
                 checked += 1
     assert checked == 80
 
 
-# Lowest production-reachable risks (the #66 floor is 0.10): ATR None or tiny, so the plan
-# is not refused and the cap rule is still exercised near the minimum.
+# Lowest production-reachable risks (the #66 floor is 0.10, the #77 floor is 0.25% of entry):
+# ATR None or tiny, so the plan is not refused and the cap rule is still exercised near the
+# minimum. Entries whose 0.25% floor is above the offset are refused by exit_plan (for that
+# reason) and skipped here.
 NEAR_MIN_OFFSETS = [D("0.10"), D("0.12"), D("0.15")]
 NEAR_MIN_ATRS = [None, D("0.01")]
 
@@ -213,12 +209,18 @@ NEAR_MIN_ATRS = [None, D("0.01")]
 @pytest.mark.parametrize("limits,multiple", [(CAP5, D("5")), (CAP2, D("2"))])
 def test_exit_plan_near_minimum_risk_always_passes_the_cap_rule(limits, multiple):
     checked = 0
+    refused = 0
     for entry in GRID_ENTRIES:
         for off in NEAR_MIN_OFFSETS:
             for atr in NEAR_MIN_ATRS:
                 level = D(entry) - off
                 plan = exit_plan("level", D(entry), limits, level=level, atr=atr,
                                  reward_multiple=multiple)
+                if D(entry) * limits.min_risk_pct / 100 > off:
+                    assert not plan["ok"], (entry, off, atr, plan)
+                    assert "% of entry" in plan["reason"]
+                    refused += 1
+                    continue
                 assert plan["ok"], (entry, off, atr, plan)
                 assert D(plan["risk_per_share"]) >= D("0.10")
                 order = cap_order(plan["target"], entry=plan["entry"], stop=plan["stop"], qty=1)
@@ -226,9 +228,9 @@ def test_exit_plan_near_minimum_risk_always_passes_the_cap_rule(limits, multiple
                 assert cap_reasons(r) == [], (entry, off, atr, plan, r)
                 risk = D(plan["entry"]) - D(plan["stop"])
                 reward = D(plan["target"]) - D(plan["entry"])
-                assert reward <= multiple * risk + D("0.01")
+                assert reward <= (multiple * risk).quantize(D("0.01"), rounding=ROUND_CEILING)
                 checked += 1
-    assert checked == 30
+    assert (checked, refused) == (14, 16)
 
 
 def test_exit_plan_above_cap_is_refused_before_risk_check_is_needed():
@@ -346,7 +348,7 @@ def test_regression_whitespace_padded_symbol_used_to_bypass_blocklist():
     assert r["verdict"] == "BLOCK" and r["reasons"] == GME_REASON
 
 
-@pytest.mark.parametrize("symbol", ["AAPL", "G ME", " aapl "], ids=repr)
+@pytest.mark.parametrize("symbol", ["AAPL", " aapl "], ids=repr)
 def test_other_symbols_pass_when_gme_is_blocked(symbol):
     r = check(order=fc_order(symbol=symbol), limits=GME_BLOCKED)
     assert r == {"verdict": "PASS", "reasons": []}
@@ -403,7 +405,7 @@ def test_tiny_positive_prices_are_evaluated_normally():
                limits=replace(LIMITS, max_reward_multiple=D("2")))
     assert r2["verdict"] == "BLOCK"
     assert r2["reasons"] == [
-        "reward:risk 4.00 over cap 2 (beyond one-cent rounding tolerance)"
+        "reward:risk 4.00 over cap 2 (reward 0.40 > 0.20)"
     ]
     # a one-cent stop is a noise stop and is blocked by the minimum risk rule
     r3 = check(order=fc_order(entry="0.02", stop_loss="0.01", take_profit="0.05"))

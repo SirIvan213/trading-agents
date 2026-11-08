@@ -1,6 +1,7 @@
 """resample, atr_5m, the 5-minute plan_exit context and the clean-buy trend. Offline only."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal as D
 from pathlib import Path
@@ -246,11 +247,18 @@ def test_stop_buffer_uses_the_1_minute_atr_not_atr_5m():
 def test_min_risk_atr_multiple_refusal_follows_the_larger_of_the_two_atrs():
     assert LIMITS.min_risk_atr_multiple == D("1.0")
     s = session("clean-buy")
+    # this fixture's ATRs sit below 0.25% of an 80 entry (0.2018): the real default refuses
+    # these plans on the percent floor first (#77)
     # entry 80.72 with a vwap level of 80.61:
     # stop floor(80.61 - 0.0130) = 80.59, risk 0.13: above the 0.10 floor, just under 1.0 x
     # the 1-minute ATR 0.1301
     s.summary = {**s.summary, "price_levels": {**s.summary["price_levels"], "vwap": "80.61"}}
     inp = {"setup": "level", "entry": "80.72", "level": "80.61"}
+    res0, _ = s.execute("plan_exit", {"setup": "level", "entry": "80.72", "level": "80.61"})
+    assert res0 == {"ok": False,
+                    "reason": "risk per share 0.13 is below 0.25% of entry (0.2018)"}
+    # loosen only that floor to isolate the ATR ordering under test
+    s.limits = replace(s.limits, min_risk_pct=D("0.01"))
     res, err = s.execute("plan_exit", inp)
     assert err is False and res["ok"] is False
     assert res["reason"] == "risk per share 0.13 is below 1.0 x ATR 0.1301"

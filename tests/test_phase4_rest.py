@@ -74,23 +74,26 @@ def test_bad_min_risk_per_share_rejected(bad):
         limits_from_dict(cfg(min_risk_per_share=bad))
 
 
-@pytest.mark.parametrize("bad", ["-0.01", "-1", "NaN", "Infinity", "abc"])
+@pytest.mark.parametrize("bad", ["-0.01", "-1", "0", "0.00", "NaN", "Infinity", "abc"])
 def test_bad_min_risk_atr_multiple_rejected(bad):
     with pytest.raises(ValueError, match="min_risk_atr_multiple"):
         limits_from_dict(cfg(min_risk_atr_multiple=bad))
 
 
-def test_zero_atr_multiple_is_allowed_and_disables_the_rule():
-    assert limits_from_dict(cfg(min_risk_atr_multiple="0")).min_risk_atr_multiple == 0
+def test_zero_atr_multiple_is_rejected():
+    # #76: a zero multiple is a disabled limit, not a setting
+    with pytest.raises(ValueError, match="min_risk_atr_multiple must be greater than zero"):
+        limits_from_dict(cfg(min_risk_atr_multiple="0"))
 
 
-@pytest.mark.parametrize("bad", [0, -1, True, False, 1.5, "abc", None, "1.5", [], "-5"])
+@pytest.mark.parametrize("bad", [0, -1, 901, 3600, True, False, 1.5, "abc", None, "1.5", [],
+                                 "-5"])
 def test_bad_max_plan_age_rejected(bad):
     with pytest.raises(ValueError, match="max_plan_age_s"):
         limits_from_dict(cfg(max_plan_age_s=bad))
 
 
-@pytest.mark.parametrize("good", [1, 300, 3600, 300.0, "300"])
+@pytest.mark.parametrize("good", [1, 300, 900, 300.0, "300"])
 def test_good_max_plan_age_accepted(good):
     assert limits_from_dict(cfg(max_plan_age_s=good)).max_plan_age_s == int(good)
 
@@ -110,13 +113,17 @@ def test_validate_limits_rejects_hand_built_bad_values(field, bad):
 
 def test_validate_limits_accepts_the_shipped_values():
     assert validate_limits(LIMITS) is None
-    assert validate_limits(replace(LIMITS, min_risk_atr_multiple=D("0"))) is None
+    with pytest.raises(ValueError, match="min_risk_atr_multiple"):
+        validate_limits(replace(LIMITS, min_risk_atr_multiple=D("0")))
 
 
 # ===================== #66: exit_plan =====================
 
 ENTRY = D("100.00")
-NOISE = replace(LIMITS, min_risk_per_share=D("0.10"), min_risk_atr_multiple=D("0"))
+# Isolates the absolute floor: the ATR multiple (0 is no longer valid, #76) and the percent-of-entry
+# floor (#77, 0.25% of 100.00 = 0.25) are made too small to bind at these prices.
+NOISE = replace(LIMITS, min_risk_per_share=D("0.10"), min_risk_atr_multiple=D("0.01"),
+                min_risk_pct=D("0.01"))
 
 
 def plan_level(level, limits=LIMITS, atr=None, entry=ENTRY):
@@ -162,8 +169,9 @@ def test_exit_plan_atr_multiple_scales():
     assert r == {"ok": False, "reason": "risk per share 3.99 is below 2 x ATR 2.00"}
 
 
-def test_exit_plan_atr_multiple_zero_disables_the_atr_rule():
-    off = replace(ATRL, min_risk_atr_multiple=D("0"))
+def test_exit_plan_tiny_atr_multiple_barely_binds():
+    # zero is no longer a valid multiple (#76); 0.01 x ATR 2.00 = 0.02 is far below the risk
+    off = replace(ATRL, min_risk_atr_multiple=D("0.01"))
     r = plan_level("99.50", off, atr=D("2.00"))  # stop 99.30, risk 0.70 < ATR 2.00
     assert r["ok"] is True and r["risk_per_share"] == "0.70"
 
@@ -172,8 +180,8 @@ def test_exit_plan_no_atr_means_no_atr_rule():
     assert plan_level("99.50", ATRL, atr=None)["ok"] is True
 
 
-def test_exit_plan_absolute_minimum_applies_even_when_atr_rule_is_off():
-    off = replace(LIMITS, min_risk_atr_multiple=D("0"))
+def test_exit_plan_absolute_minimum_applies_even_when_atr_rule_is_tiny():
+    off = replace(LIMITS, min_risk_atr_multiple=D("0.01"))
     assert plan_level("99.95", off, atr=D("0.01"))["ok"] is False
 
 
@@ -201,12 +209,13 @@ def put_vwap(s, vwap):
 def test_plan_exit_noise_stop_pair_is_refused_without_a_record():
     s = loaded()
     # entry last_close 103.10, a vwap level of 103.00 -> stop floor(103.00 - 0.08151) = 102.91
-    # risk 0.19 passes the 0.10 minimum but is below 1 x ATR 0.8151
-    put_vwap(s, "103.00")
+    # (#77: level 103.00 would be risk 0.19, now below 0.25% of entry, so use 102.80)
+    # risk 0.39 passes the 0.10 minimum and 0.25% of entry (0.2578) but is below 1 x ATR 0.8151
+    put_vwap(s, "102.80")
     res, err = s.execute("plan_exit",
-                         {"setup": "level", "entry": "103.10", "level": "103.00"})
+                         {"setup": "level", "entry": "103.10", "level": "102.80"})
     assert err is False
-    assert res == {"ok": False, "reason": "risk per share 0.19 is below 1.0 x ATR 0.8151"}
+    assert res == {"ok": False, "reason": "risk per share 0.39 is below 1.0 x ATR 0.8151"}
     assert s.exit_plans == []
 
 
@@ -245,12 +254,13 @@ def test_plan_exit_provisional_5_minute_atr_binds_where_the_1_minute_atr_does_no
     assert [p.plan_id for p in s.exit_plans] == ["plan-1"]
 
 
-def test_plan_exit_with_atr_rule_off_accepts_the_same_pair():
+def test_plan_exit_with_tiny_atr_multiple_accepts_the_same_pair():
     s = loaded()
-    s.limits = replace(s.limits, min_risk_atr_multiple=D("0"))
-    put_vwap(s, "103.00")
-    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "103.00"})
-    assert res["ok"] is True and res["risk_per_share"] == "0.19"
+    s.limits = replace(s.limits, min_risk_atr_multiple=D("0.01"))
+    s.summary = {**s.summary, "atr_5m": None, "atr_5m_provisional": False}
+    put_vwap(s, "102.80")
+    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "103.10", "level": "102.80"})
+    assert res["ok"] is True and res["risk_per_share"] == "0.39"
     assert len(s.exit_plans) == 1
 
 
@@ -267,11 +277,13 @@ def check(o, limits=LIMITS):
 
 
 def test_risk_check_risk_exactly_at_the_minimum_passes():
-    assert check(order(stop="99.90", target="100.10")) == {"verdict": "PASS", "reasons": []}
+    # percent-of-entry floor (#77) loosened so only the absolute floor is under test
+    assert check(order(stop="99.90", target="100.10"), NOISE) == {"verdict": "PASS",
+                                                                   "reasons": []}
 
 
 def test_risk_check_risk_below_the_minimum_blocks_with_exact_reason():
-    r = check(order(stop="99.91", target="100.09"))
+    r = check(order(stop="99.91", target="100.09"), NOISE)
     assert r == {"verdict": "BLOCK", "reasons": ["risk per share 0.09 below minimum 0.10"]}
 
 
@@ -289,7 +301,7 @@ def test_risk_check_inverted_order_gives_only_the_stop_reason():
 
 
 def test_risk_check_minimum_reason_is_appended_after_the_reward_cap():
-    lim = replace(LIMITS, max_reward_multiple=D("2"))
+    lim = replace(NOISE, max_reward_multiple=D("2"))
     r = check(order(stop="99.95", target="100.50"), lim)  # risk 0.05, reward 0.50 = 10x
     assert r["verdict"] == "BLOCK"
     assert r["reasons"][-1] == "risk per share 0.05 below minimum 0.10"
@@ -515,6 +527,7 @@ def test_no_atr_only_the_absolute_floor_applies_refused_at_009():
 
 def test_no_atr_only_the_absolute_floor_applies_passes_at_010():
     s = few_bars_session()
+    s.limits = replace(s.limits, min_risk_pct=D("0.01"))  # isolate the 0.10 floor from #77
     res, err = s.execute("plan_exit", {"setup": "level", "entry": "100.00", "level": "99.90"})
     assert err is False and res["ok"] is True and res["risk_per_share"] == "0.10"
     assert res["plan_id"] == "plan-1" and len(s.exit_plans) == 1
@@ -523,5 +536,6 @@ def test_no_atr_only_the_absolute_floor_applies_passes_at_010():
 def test_no_atr_large_multiple_does_not_matter():
     s = few_bars_session()
     s.limits = replace(s.limits, min_risk_atr_multiple=D("50"))
-    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "100.00", "level": "99.90"})
-    assert res["ok"] is True  # there is no ATR to multiply
+    put_vwap(s, "99.75")
+    res, _ = s.execute("plan_exit", {"setup": "level", "entry": "100.00", "level": "99.75"})
+    assert res["ok"] is True  # there is no ATR to multiply (risk 0.25 = the #77 floor)
