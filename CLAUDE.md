@@ -17,7 +17,10 @@ checks it against hard risk limits, and asks a human before anything reaches a
    analyst or trader text, and analyst or trader `confidence` never reaches
    `size_position`, `risk_check` or the limits passed to them. The model picks
    among tool-produced plans; it never supplies or adjusts a price, stop, target
-   or size.
+   or size. Choosing a `reward_multiple` from `plan_exit`'s fixed menu (1, 1.5, 2,
+   2.5, 3), at or below the plan's tool-computed `suggested_multiple`, is a choice
+   among tool-computed options, like choosing a `plan_id`: the tool computes the
+   target, and the model supplies no price.
 3. **Never weaken a risk limit to make something pass.** If a test or a trade
    fails `risk_check`, fix the cause. Any diff touching `tools/risk_check.py`,
    `tools/size.py`, broker code, or the paper/live switch must be called out in
@@ -86,9 +89,13 @@ qa-engineer → `tests/`, code-reviewer is read-only.
 
 - **Never commit to `main`.** Every change goes on a branch.
 - **One branch per task**, created from an up-to-date `main`. Don't pile
-  unrelated work onto an open PR's branch.
-- **Before pushing:** `pytest -q` and `ruff check .` must both pass, then run
-  the code-reviewer subagent on the diff and fix any blockers it reports.
+  unrelated work onto an open PR's branch. Name it `<type>/<short-name>`, e.g.
+  `docs/wording-batch`, `fix/entry-error`, `hardening/risk-gate-limits`,
+  `gate/phase5-d-event-gate`.
+- **Before pushing:** `pytest -q` and `ruff check .` must both pass, on docs-only
+  branches too, then run the code-reviewer subagent on the diff and fix any
+  blockers it reports. After fixing blockers, run the code-reviewer again, and
+  repeat until it reports none.
 - **Open the PR with `gh pr create`** against `main`. The description has
   these sections:
   - **Summary**: what changed and why.
@@ -97,7 +104,8 @@ qa-engineer → `tests/`, code-reviewer is read-only.
     lines quoted; say "None" if there are none.
   - **Follow-ups**: known gaps and reviewer suggestions not done in this PR.
   - **Test plan**: commands run and their results.
-- **Never merge.** Ivan merges after CI passes.
+- **Never merge.** Ivan merges after CI passes: the `test` job (`ruff check .`
+  and `pytest -q`) on both ubuntu-latest and windows-latest.
 - **Follow-ups become issues.** Right after opening a PR, file each item in its
   Follow-ups section as a GitHub issue with `gh issue create`, labeled
   `before-phase-N` (put it in that phase's milestone), `hardening` or `docs`,
