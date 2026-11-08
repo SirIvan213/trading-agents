@@ -11,9 +11,6 @@ plan, the session VWAP and the 5-minute ATR, against thresholds in Limits:
   A structural anchor is still REQUIRED for the higher multiple below (a backstop that is
   always met while entries are last_close, #118), but it is no longer a label (#123): a label
   that is always true carries no information.
-                    With entry = last_close (issue #118) the other levels (last_close,
-                    session_high) are at or above entry and exit_plan refuses them, so this is
-                    a backstop that is True on every plan plan_exit returns today.
   suggested_multiple
       good_setup_multiple when extended is False, stop_within_max_width is True, the stop
       sits under one of STRUCTURAL_LEVELS
@@ -60,9 +57,8 @@ def plan_labels(
     "atr_5m_provisional"} for a long plan. JSON-serializable (bools, None and a string).
 
     `atr_5m` None or not positive makes extended and stop_within_max_width None; `vwap` None
-    makes
-    extended None. A boundary value is not extended (strictly greater than the threshold) and
-    is tight (at or below the threshold).
+    makes extended None. A boundary value is not extended (strictly greater than the
+    threshold) and is within the maximum width (at or below the threshold).
     """
     usable = atr_5m is not None and atr_5m > 0
     extended: bool | None = None

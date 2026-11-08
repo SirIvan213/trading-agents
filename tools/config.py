@@ -48,8 +48,8 @@ class Limits:
     # Plan labels (tools/plan_labels.py), in 5-minute ATRs. They set the suggested (maximum)
     # reward multiple plan_exit allows; they never change a stop, a size or a risk limit.
     max_extension_atr_5m: Decimal = Decimal("2.0")  # entry - VWAP above this: extended
-    max_stop_atr_5m: Decimal = Decimal("2.5")       # risk per share at or below this: tight
-    good_setup_multiple: Decimal = Decimal("2")     # suggested when not extended, tight, structural
+    max_stop_atr_5m: Decimal = Decimal("2.5")       # risk at or below this: within max width
+    good_setup_multiple: Decimal = Decimal("2")     # suggested when the plan qualifies
     # Kill switch (#32): false blocks every order in risk_check, including the approval
     # re-check. A missing key means true, so existing configs keep working.
     trading_enabled: bool = True

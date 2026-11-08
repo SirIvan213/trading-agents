@@ -9,7 +9,12 @@ import pytest
 
 from agents.bear import unavailable_bear
 from agents.debate_common import build_payload
-from agents.money_guard import allowed_values, money_violations, quoted_values
+from agents.money_guard import (
+    allowed_values,
+    context_ratios,
+    money_violations,
+    quoted_values,
+)
 from agents.schemas import DebateRecord, ExitPlanRecord, PlanContext, PlanLabels
 from agents.tool_registry import TOOLS, price_levels
 from agents.trader import PROMPT as TRADER_PROMPT
@@ -267,9 +272,45 @@ def test_money_guard_allows_a_quoted_context_ratio_only_when_it_is_in_the_packet
     with_ctx = make_packet(plans=list(s.exit_plans))
     without = make_packet(plans=[s.exit_plans[0].model_copy(update={"context": None})])
     text = "The plan risks risk_atr_5m 1.82 and entry_vs_vwap_atr_5m 1.71 of ATR."
-    assert {"1.82", "1.71", "0.1868"} <= quoted_values(with_ctx)
-    assert money_violations(text, allowed_values(with_ctx), quoted_values(with_ctx)) == []
-    assert money_violations(text, allowed_values(without), quoted_values(without)) != []
+    assert {"1.82", "1.71"} <= context_ratios(with_ctx)
+    assert "0.1868" not in context_ratios(with_ctx)       # the ATR is a dollar value
+    assert "1.82" not in quoted_values(with_ctx)           # ratios are NOT general quotes
+    assert money_violations(text, allowed_values(with_ctx), quoted_values(with_ctx),
+                            context_ratios(with_ctx)) == []
+    assert money_violations(text, allowed_values(without), quoted_values(without),
+                            context_ratios(without)) != []
+
+
+@pytest.mark.parametrize("text", [
+    "stop 1.82", "target 1.82", "$1.82", "buy 1.82", "buy 1.82 shares", "1.82 shares",
+    "1.82 per share", "entry 1.71", "price 1.71",
+])
+def test_a_context_ratio_never_passes_as_a_price_stop_target_or_size(text):
+    s = session("clean-buy")
+    clean_vwap(s)
+    packet = make_packet(plans=list(s.exit_plans))
+    assert money_violations(text, allowed_values(packet), quoted_values(packet),
+                            context_ratios(packet)) != [], text
+
+
+def test_a_negative_context_ratio_quoted_as_written_passes():
+    plan = make_plan().model_copy(update={"context": PlanContext(
+        target_vs_session_high="below", risk_atr_5m="1.20",
+        entry_vs_vwap_atr_5m="-0.35", session_high_vs_entry_atr_5m="2.10", atr_5m="0.2000")})
+    packet = make_packet(plans=[plan])
+    text = "entry_vs_vwap_atr_5m -0.35: the entry is under VWAP."
+    assert money_violations(text, allowed_values(packet), quoted_values(packet),
+                            context_ratios(packet)) == []
+    assert money_violations("entry_vs_vwap_atr_5m -0.36", allowed_values(packet),
+                            quoted_values(packet), context_ratios(packet)) != []
+
+
+def test_the_atr_itself_is_not_quotable_in_a_money_pattern():
+    s = session("clean-buy")
+    clean_vwap(s)
+    packet = make_packet(plans=list(s.exit_plans))
+    assert money_violations("stop 0.1868", allowed_values(packet), quoted_values(packet),
+                            context_ratios(packet)) != []
 
 
 def test_money_guard_still_rejects_an_unquoted_ratio_with_context_present():
@@ -277,7 +318,28 @@ def test_money_guard_still_rejects_an_unquoted_ratio_with_context_present():
     clean_vwap(s)
     packet = make_packet(plans=list(s.exit_plans))
     assert money_violations("risk_atr_5m 1.83", allowed_values(packet),
-                            quoted_values(packet)) != []
+                            quoted_values(packet), context_ratios(packet)) != []
+
+
+@pytest.mark.parametrize("name", ["bull", "bear", "trader"])
+def test_debate_and_trader_prompts_never_call_a_plan_tight(name):
+    import re
+    text = (AGENTS_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8")
+    # "too tight" only appears inside the definition that rules that reading out
+    leftovers = [m.start() for m in re.finditer(r"\btight\b", text)
+                 if not text[:m.start()].endswith("too ")]
+    assert leftovers == [], name
+
+
+def test_bull_and_bear_may_repeat_context_ratios_but_never_as_money():
+    for name in ("bull", "bear"):
+        text = (AGENTS_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8")
+        assert "a plan's `context` ratio" in text
+        assert "never as a price, stop, target or size" in text
+
+
+def test_trader_reads_the_higher_multiple_plans_context():
+    assert "read the HIGHER-multiple plan's `context`" in TRADER_PROMPT
 
 
 def test_record_without_context_validates_and_is_skipped_by_quoted_values():
