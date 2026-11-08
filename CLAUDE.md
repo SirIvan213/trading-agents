@@ -29,16 +29,26 @@ checks it against hard risk limits, and asks a human before anything reaches a
 6. **Never make a billed API call (Claude, or any paid data source) without
    Ivan's explicit approval in this session.** Tests and checks use fakes with
    the network blocked.
-   **The one standing exception:** scheduled `pipeline.run_day` runs (Phase 5 paper
-   trading, #156) are pre-approved, within caps enforced in code:
-   - at most 10 decisions per New York day;
-   - a daily token cap, set in config;
-   - FMP fetched at most once per New York day.
 
-   When a cap is reached, the run stops making decisions for the day. It never
-   raises a cap. Nothing else is covered: smoke scripts, ad hoc or manual runs, new
-   paid sources, raising a cap, and Claude Code sessions still need explicit
-   approval each time.
+   **The one standing exception (Phase 5, #156):** the Claude and FMP calls made by
+   `pipeline.run_day` are pre-approved, but only when all of these hold:
+   - Windows Task Scheduler launched it, from the task Ivan set up;
+   - `paper` is `true`;
+   - `run_day` enforces all three daily caps in code, and refuses to start if any cap
+     is missing or invalid (fail closed):
+     - at most 10 decisions per New York day;
+     - at most N tokens per New York day, input plus output across all agents. Ivan
+       sets N. It has no default, and changing it counts as raising a cap;
+     - FMP fetched at most once per New York day.
+
+   When the decision or token cap is reached, the run stops making decisions for the
+   day. After the day's one FMP fetch it reuses that data and calls FMP no more.
+   Nothing carries over between days, and the run never raises a cap.
+
+   Nothing else is covered: smoke scripts, ad hoc or manual runs, new paid sources
+   and raising a cap still need Ivan's explicit approval each time. A Claude Code
+   session must never start `run_day`, or create or change its scheduled task, under
+   this exception.
 
 ## Layout
 
