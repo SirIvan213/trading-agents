@@ -29,6 +29,16 @@ checks it against hard risk limits, and asks a human before anything reaches a
 6. **Never make a billed API call (Claude, or any paid data source) without
    Ivan's explicit approval in this session.** Tests and checks use fakes with
    the network blocked.
+   **The one standing exception:** scheduled `pipeline.run_day` runs (Phase 5 paper
+   trading, #156) are pre-approved, within caps enforced in code:
+   - at most 10 decisions per New York day;
+   - a daily token cap, set in config;
+   - FMP fetched at most once per New York day.
+
+   When a cap is reached, the run stops making decisions for the day. It never
+   raises a cap. Nothing else is covered: smoke scripts, ad hoc or manual runs, new
+   paid sources, raising a cap, and Claude Code sessions still need explicit
+   approval each time.
 
 ## Layout
 
