@@ -36,9 +36,12 @@ checks it against hard risk limits, and asks a human before anything reaches a
    - `paper` is `true`;
    - `run_day` enforces all three daily caps in code, and refuses to start if any cap
      is missing or invalid (fail closed):
-     - at most 10 decisions per New York day;
-     - at most N tokens per New York day, input plus output across all agents. Ivan
-       sets N. It has no default, and changing it counts as raising a cap;
+     - at most 10 decisions per New York day. A decision is one symbol going
+       through analysts → debate → Trader, however it ends (early stop, forced PASS,
+       failure); retries inside it count toward that same decision;
+     - at most 600,000 tokens per New York day, counting all tokens across all
+       agents: input, output, cache reads and cache writes. Retries count too.
+       Ivan set this value (#157); changing it counts as raising a cap;
      - FMP fetched at most once per New York day.
 
    When the decision or token cap is reached, the run stops making decisions for the
