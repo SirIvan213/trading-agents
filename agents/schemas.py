@@ -153,11 +153,9 @@ class PlanLabels(BaseModel):
     extended: bool | None = Field(
         description="entry more than max_extension_atr_5m 5-minute ATRs above VWAP; null = unknown"
     )
-    tight_stop: bool | None = Field(
-        description="risk per share at most max_stop_atr_5m 5-minute ATRs; null = unknown"
-    )
-    structural_stop: bool = Field(
-        description="stop under or_low, or_high, vwap or session_low"
+    stop_within_max_width: bool | None = Field(
+        description="the stop is no wider than max_stop_atr_5m 5-minute ATRs (good, not 'too "
+                    "tight'); null = unknown"
     )
     suggested_multiple: str = Field(
         description="highest reward multiple plan_exit allowed for this plan"
@@ -165,6 +163,21 @@ class PlanLabels(BaseModel):
     atr_5m_provisional: bool = Field(
         description="the 5-minute ATR came from fewer than 14 bars (early session)"
     )
+
+
+class PlanContext(BaseModel):
+    """plan_exit's structural context, stored on the record so the Bull, Bear and Trader can
+    tell two plans with the same entry and stop apart (#113). Tool output; it never feeds
+    sizing, stops, targets or risk_check."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_vs_session_high: Literal["below", "at_or_above", "unknown"]
+    risk_atr_5m: str | None = Field(description="risk per share in 5-minute ATRs")
+    entry_vs_vwap_atr_5m: str | None = Field(description="entry minus VWAP in 5-minute ATRs")
+    session_high_vs_entry_atr_5m: str | None = Field(
+        description="session high minus entry in 5-minute ATRs")
+    atr_5m: str | None = Field(description="the 5-minute ATR used (may be provisional)")
 
 
 class ExitPlanRecord(BaseModel):
@@ -197,6 +210,9 @@ class ExitPlanRecord(BaseModel):
     )
     labels: PlanLabels | None = Field(
         default=None, description="tool-computed plan labels (context only)"
+    )
+    context: PlanContext | None = Field(
+        default=None, description="plan_exit's structural context (context only, #113)"
     )
 
 

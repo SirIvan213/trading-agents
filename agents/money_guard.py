@@ -245,6 +245,16 @@ def quoted_values(packet: DecisionPacket) -> frozenset[str]:
                 raw = _verbatim(m.group(0))
                 if not _not_a_value(point, m.start(), m.start() + len(raw), raw, dates):
                     out.add(raw)
+    # #113: plan_exit's context ratios on the plan records are tool output in the packet;
+    # the debaters may repeat them verbatim ("risk_atr_5m 1.82"), like evidence figures.
+    for plan in packet.exit_plans:
+        ctx = plan.context
+        if ctx is None:
+            continue
+        for raw in (ctx.risk_atr_5m, ctx.entry_vs_vwap_atr_5m,
+                    ctx.session_high_vs_entry_atr_5m, ctx.atr_5m):
+            if isinstance(raw, str) and raw:
+                out.add(raw)
     return frozenset(out)
 
 

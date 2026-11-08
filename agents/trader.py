@@ -122,9 +122,10 @@ def run_trader(
 ) -> TraderRun:
     """Decide BUY (one plan_id) or PASS. Never raises; every failure is a forced PASS.
 
-    Forced PASS without an API call: a bad trader config ("config_error"), a fatal debate or
-    a fatal / missing Bear ("fatal_bear"), a debate for another symbol or as_of
-    ("debate_mismatch"), or no exit plans ("no_plans"). After the call:
+    Forced PASS without an API call: a bad trader config ("config_error"), a debate for
+    another symbol or as_of ("debate_mismatch"), a failed analyst, i.e. packet.all_ok false
+    ("analyst_failed", #108), a fatal debate or a fatal / missing Bear ("fatal_bear"), or no
+    exit plans ("no_plans"). After the call:
     invalid output after one retry, including a plan_id not in the packet ("invalid_output"),
     an API error, a cancel or an exception.
     """
@@ -142,6 +143,8 @@ def run_trader(
         bear = debate.final_bear
         if debate.symbol != packet.symbol or debate.as_of != packet.as_of:
             code = "debate_mismatch"  # a debate about another packet cannot clear a Bear
+        elif not packet.all_ok:
+            code = "analyst_failed"  # #108: a failed analyst is a PASS in code, no API call
         elif debate.fatal or bear is None or bear.fatal:
             code = "fatal_bear"
         elif not packet.exit_plans:

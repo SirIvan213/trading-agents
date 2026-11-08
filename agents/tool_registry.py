@@ -12,7 +12,7 @@ from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
-from agents.schemas import ExitPlanRecord, PlanLabels
+from agents.schemas import ExitPlanRecord, PlanContext, PlanLabels
 from pipeline.data import MarketData, session_window
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY, ny_today, run_scan
@@ -52,8 +52,10 @@ TOOLS: list[dict[str, Any]] = [
             "and ATR come from get_bars automatically; do not supply them. Requires get_bars "
             "first. entry must be the get_bars price_levels last_close (orders are market "
             "orders); level must be copied exactly from price_levels. The result's `labels` "
-            "are tool-computed from configured thresholds: extended, tight_stop, "
-            "structural_stop, suggested_multiple and atr_5m_provisional. reward_multiple "
+            "are tool-computed from configured thresholds: extended, "
+            "stop_within_max_width (true = the stop is no wider than the configured maximum; "
+            "good, not 'too tight'), suggested_multiple and atr_5m_provisional. "
+            "reward_multiple "
             "(optional) picks the target multiple of risk from a fixed menu; it defaults to "
             "suggested_multiple and may not exceed it. The result also says whether the "
             "target is below the session high (target_vs_session_high) and gives, in "
@@ -283,7 +285,9 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     names = ", ".join(levels)
     entry = _decimal(inp.get("entry"), "entry")
     if _level_name(levels, entry) is None:
-        return _err(f"entry must be one of get_bars price_levels: {names}")
+        # #122: say what IS allowed, so the model does not try other levels as the entry
+        return _err("entry must be the last_close value from get_bars price_levels "
+                    "(orders are market orders)")
     # Issue #118: orders are MARKET orders, so the entry is always last_close. Another price
     # level may be a stop structure (`level`), never the entry.
     last_close = levels.get("last_close")
@@ -366,6 +370,11 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
             as_of=s.now.astimezone(NY).isoformat(),
             last_close=last_close,
             labels=PlanLabels(**labels),
+            context=PlanContext(
+                target_vs_session_high=_vs_session_high(result["target"], levels),
+                atr_5m=s.summary.get("atr_5m"),
+                **_atr_context(result, levels, _summary_atr_5m(s.summary)),
+            ),
         )
         if s.ledger is not None:
             s.ledger.record(record)  # LedgerError -> a tool error via ToolSession.execute
