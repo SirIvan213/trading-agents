@@ -17,7 +17,7 @@ from agents.tool_registry import TOOLS, ToolSession
 from pipeline.data import MarketData
 from pipeline.ledger import PlanLedger
 from pipeline.market import ny_today
-from tools.config import Limits, load_limits
+from tools.config import Limits, load_limits, validate_limits
 from tools.scan import ScanCriteria, validate_symbols
 
 PROMPT = (Path(__file__).parent / "prompts" / "technical.md").read_text(encoding="utf-8")
@@ -52,11 +52,12 @@ def run_technical(
         validate_symbols([symbol])
     except (ValueError, AttributeError):
         raise ValueError("symbol must be a valid ticker") from None
-    if limits is None:
-        try:
-            limits = load_limits()
-        except Exception:  # noqa: BLE001 - no file contents in the message
-            raise ValueError("limits config is invalid") from None
+    try:
+        # #62: hand-built limits are validated too, not only a loaded config
+        limits = load_limits() if limits is None else limits
+        validate_limits(limits)
+    except Exception:  # noqa: BLE001 - no file contents in the message
+        raise ValueError("limits config is invalid") from None
     session = ToolSession(
         symbol=symbol.strip().upper(),
         now=now,

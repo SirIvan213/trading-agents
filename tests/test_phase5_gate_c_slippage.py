@@ -356,11 +356,19 @@ def grid_plan(entry: str, risk: str):
 
 
 def test_every_accepted_quote_keeps_every_fill_within_every_limit():
-    accepted = refused_price = unsizable = 0
+    accepted = refused_price = unsizable = noise_refused = 0
     for entry, risk, spread, limits, off in product(
             ENTRIES, RISKS, SPREADS, GRID_LIMITS, ASK_OFFSETS):
         p = grid_plan(entry, risk)
         if p is None:
+            continue
+        if D(risk) < D(entry) * limits.min_risk_pct / 100:
+            # #78: a stop closer than min_risk_pct% of the entry is refused before sizing,
+            # whatever the quote; never sized, so skip the fill checks
+            noise_refused += 1
+            out = build_order(p, limits, NOW, {"ap": float(D(entry)), "bp": float(D(entry)),
+                                               "t": (NOW - timedelta(seconds=2)).isoformat()})
+            assert out["ok"] is False and "% of entry" in out["reason"], out
             continue
         edge = max(D(spread), minimum_allowance(D(entry), limits)).quantize(
             D("0.01"), "ROUND_CEILING")  # the allowance for this quote
@@ -401,6 +409,7 @@ def test_every_accepted_quote_keeps_every_fill_within_every_limit():
             gate=gate_for_order(out["order"], NOW))
         assert verdict["verdict"] == "PASS", (entry, risk, spread, verdict)
     assert accepted > 500 and refused_price > 200 and unsizable >= 0  # both paths ran
+    assert noise_refused > 0
 
 
 # ======================= risk_check =======================
@@ -550,12 +559,17 @@ def test_reward_to_risk_is_judged_without_slippage_both_ways():
 def test_reward_cap_and_min_risk_use_planned_prices_not_slippage():
     cap5 = one_r("0.50", target="105.00")  # exactly 5R on the planned prices
     assert check(cap5) == {"verdict": "PASS", "reasons": []}
-    over = check(one_r("0.50", target="105.02"))
+    over = check(one_r("0.50", target="105.01"))  # #33: one cent over the exact 5R cap
     assert over["verdict"] == "BLOCK" and "over cap 5" in over["reasons"][0]
-    # risk exactly at the 0.10 minimum passes however big the allowance; 0.09 blocks
-    assert check(one_r("0.10", stop="99.90", target="100.10"))["verdict"] == "PASS"
-    assert check(one_r("0.10", stop="99.91", target="100.09"))["reasons"] == [
+    # risk exactly at the 0.10 minimum passes however big the allowance; 0.09 blocks (the
+    # percent-of-entry floor, #77, is loosened here so only the absolute floor is tested)
+    loose = replace(LIMITS, min_risk_pct=D("0.01"))
+    assert check(one_r("0.10", stop="99.90", target="100.10"), loose)["verdict"] == "PASS"
+    assert check(one_r("0.10", stop="99.91", target="100.09"), loose)["reasons"] == [
         "risk per share 0.09 below minimum 0.10"]
+    # ...and on the real default, 0.10 on a 100.00 entry is under 0.25%: blocked
+    assert check(one_r("0.10", stop="99.90", target="100.10"))["reasons"] == [
+        "risk per share 0.10 below 0.25% of entry (0.25)"]
 
 
 def test_with_slippage_helper_adds_the_minimum_allowance():

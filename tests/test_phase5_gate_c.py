@@ -187,6 +187,9 @@ def with_last_close(s, price: str) -> None:
 
 def test_early_session_provisional_atr_5m_binds_through_plan_exit():
     s = early_session(45)  # 09:30-10:14: nine finished 5-minute bars, so provisional
+    # this fixture's ATRs (~0.14-0.21) sit below 0.25% of an 80 entry (0.20), so the percent
+    # floor (#77) would refuse first; loosen it only to isolate the ATR rule under test
+    s.limits = replace(s.limits, min_risk_pct=D("0.01"))
     assert s.summary["atr"] == "0.1363"
     assert s.summary["atr_5m"] == "0.2050" and s.summary["atr_5m_provisional"] is True
     # level 80.25 (vwap) gives stop floor(80.25 - 0.01363) = 80.23
@@ -204,6 +207,7 @@ def test_early_session_provisional_atr_5m_binds_through_plan_exit():
 
 def test_early_session_with_no_5m_atr_falls_back_to_the_1_minute_rule_only():
     s = early_session(45)
+    s.limits = replace(s.limits, min_risk_pct=D("0.01"))  # isolate the ATR rule (see above)
     s.summary = {**s.summary, "atr_5m": None, "atr_5m_provisional": False}
     with_last_close(s, "80.43")  # the same risk 0.20 now passes: only the 1-minute 0.1363 applies
     res, _ = s.execute("plan_exit", {"setup": "level", "entry": "80.43", "level": "80.25"})

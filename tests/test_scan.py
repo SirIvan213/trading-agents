@@ -86,10 +86,10 @@ def test_fixture_rejections_have_expected_reasons():
     assert any("above maximum" in x and "price" in x for x in rej["BIGP"])
     assert any("volume" in x for x in rej["LOWV"])
     assert any("spread" in x and "above maximum" in x for x in rej["WIDE"])
-    assert any("spread unavailable" in x for x in rej["CROSSQ"])
-    assert any("spread unavailable" in x for x in rej["NOQUOTE"])
-    assert rej["NULLSNAP"] == ["null or malformed snapshot"]
-    assert any("malformed snapshot" in x for x in rej["BADSNAP"])
+    assert any("spread unavailable" in x for x in rej["CROSQ"])
+    assert any("spread unavailable" in x for x in rej["NOQTE"])
+    assert rej["NULLS"] == ["null or malformed snapshot"]
+    assert any("malformed snapshot" in x for x in rej["BADSN"])
 
 
 def test_every_symbol_is_candidate_or_rejected_exactly_once():

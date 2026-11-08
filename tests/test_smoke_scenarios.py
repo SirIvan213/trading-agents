@@ -207,7 +207,7 @@ def test_quote_above_entry_plus_allowance_is_refused_as_price_moved(smoke, capsy
     """A plan whose entry is 30 cents under the saved quote (ask 80.73 > 80.42 + allowance
     0.09) gets NO ORDER with the price-moved reason through the real fixture_quotes (#68)."""
     sym = "BRKO"
-    stale_plan = dict(entry="80.42", stop="80.26", target="80.74", risk_per_share="0.16",
+    stale_plan = dict(entry="80.42", stop="80.20", target="80.64", risk_per_share="0.22",
                       last_close="80.42")
     code, out, _, _ = smoke("clean-buy", [*debaters(sym), reply(trader(sym))], capsys,
                             plan_over=stale_plan)

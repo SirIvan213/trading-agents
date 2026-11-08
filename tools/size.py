@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from tools.config import Limits
+from tools.symbols import normalize_symbol
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,8 @@ def size_position(plan: Plan, limits: Limits, slippage: Decimal = Decimal("0")) 
     symbol = plan.symbol.strip().upper() if isinstance(plan.symbol, str) else ""
     if not symbol:
         return {"ok": False, "reason": "symbol is required"}
+    if normalize_symbol(plan.symbol) is None:
+        return {"ok": False, "reason": "symbol is not a valid ticker"}  # #34
     if plan.entry <= 0 or plan.stop <= 0:
         return {"ok": False, "reason": "entry and stop must be positive"}
     if plan.stop >= plan.entry:

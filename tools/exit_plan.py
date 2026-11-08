@@ -82,7 +82,8 @@ def exit_plan(
 
     Minimum stop distance: a stop a few cents from entry is a noise stop that
     sizing then pushes to the position cap. After the other checks, the plan is
-    refused when risk per share is below limits.min_risk_per_share, or, when
+    refused when risk per share is below limits.min_risk_per_share, below
+    limits.min_risk_pct percent of the entry (#77), or, when
     limits.min_risk_atr_multiple > 0, below that multiple of the LARGER of the 1-minute `atr`
     and the 5-minute `atr_5m` (issue #115). Each ATR counts only when given. A provisional
     5-minute ATR (fewer than 14 five-minute bars, `atr_5m_provisional` True; early in the
@@ -180,6 +181,13 @@ def exit_plan(
         return _refuse(
             f"risk per share {risk} is below min_risk_per_share {limits.min_risk_per_share}"
         )
+    pct_floor = entry * limits.min_risk_pct / 100
+    if risk < pct_floor:
+        # #77: a stop closer than min_risk_pct% of the price is a noise stop
+        return _refuse(
+            f"risk per share {risk} is below {limits.min_risk_pct}% of entry "
+            f"({pct_floor.normalize():f})"
+        )
     if (
         atr_d is not None
         and limits.min_risk_atr_multiple > 0
@@ -203,6 +211,9 @@ def exit_plan(
 
     if atr is None and setup == "orb":
         notes.append("no atr given; stop has no volatility buffer")
+    if atr is None:
+        # #77: say so instead of skipping the ATR floor silently
+        notes.append("no atr given; the ATR floor (min_risk_atr_multiple) was not applied")
     notes.append(
         f"stop = {setup} structure {structure} minus buffer {buffer}, rounded down to the cent"
     )

@@ -8,6 +8,8 @@ from datetime import time
 from decimal import Decimal
 from pathlib import Path
 
+from tools.symbols import normalize_symbol
+
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
 
@@ -38,7 +40,7 @@ class Limits:
     blocked_symbols: frozenset[str] = field(default_factory=frozenset)
     max_reward_multiple: Decimal = Decimal("5")
     # Minimum stop distance (#66): a stop a few cents from entry is a noise stop
-    # that sizing pushes to the position cap. ATR part is off when the multiple is 0.
+    # that sizing pushes to the position cap. The ATR multiple must be > 0 (#76).
     min_risk_per_share: Decimal = Decimal("0.10")
     min_risk_atr_multiple: Decimal = Decimal("1.0")
     # Maximum age of an exit plan at order time (#67), in seconds.
@@ -57,6 +59,9 @@ class Limits:
     # Slippage on market entries (#68): sizing adds max(spread, slippage_pct% of entry, 0.01)
     # per share, from a live quote at most max_order_quote_age_s old (tools/slippage.py).
     slippage_pct: Decimal = Decimal("0.10")
+    # Minimum stop distance relative to price (#77): a stop closer than this percent of the
+    # entry is a noise stop. Enforced in exit_plan, build_order and risk_check.
+    min_risk_pct: Decimal = Decimal("0.25")
     max_order_quote_age_s: int = 15
 
 
@@ -87,9 +92,13 @@ def _blocked(raw: object) -> frozenset[str]:
     for item in raw:
         if not isinstance(item, str):
             raise ValueError(f"blocked_symbols: entries must be strings, got {item!r}")
-        sym = item.strip().upper()
-        if sym:
-            out.add(sym)
+        if not item.strip():
+            continue
+        sym = normalize_symbol(item)
+        if sym is None:
+            # a typo would silently leave a symbol Ivan meant to block tradeable
+            raise ValueError(f"blocked_symbols: not a valid ticker: {item!r}")
+        out.add(sym)
     return frozenset(out)
 
 
@@ -132,22 +141,38 @@ def validate_limits(limits: Limits) -> None:
     atr_mult = limits.min_risk_atr_multiple
     if not isinstance(atr_mult, Decimal) or not atr_mult.is_finite():
         problems.append(f"min_risk_atr_multiple must be a finite number, got {atr_mult!r}")
-    elif atr_mult < 0:
-        problems.append(f"min_risk_atr_multiple must be at least 0, got {atr_mult}")
+    elif atr_mult <= 0:
+        # #76: a zero multiple is a disabled limit, not a setting
+        problems.append(f"min_risk_atr_multiple must be greater than zero, got {atr_mult}")
+    pct = limits.min_risk_pct
+    if not isinstance(pct, Decimal) or not pct.is_finite():
+        problems.append(f"min_risk_pct must be a finite number, got {pct!r}")
+    elif not (0 < pct < 10):
+        problems.append(f"min_risk_pct must be above 0 and below 10, got {pct}")
+    mrps = limits.min_risk_per_share
+    if isinstance(mrps, Decimal) and mrps.is_finite() and mrps > 0:
+        if mrps % Decimal("0.01") != 0:
+            problems.append(f"min_risk_per_share must be whole cents, got {mrps}")
+        mlpt = limits.max_loss_per_trade
+        if isinstance(mlpt, Decimal) and mlpt.is_finite() and mrps >= mlpt:
+            problems.append("min_risk_per_share must be below max_loss_per_trade "
+                            "(otherwise no whole share ever fits)")
     slip = limits.slippage_pct
     if not isinstance(slip, Decimal) or not slip.is_finite():
         problems.append(f"slippage_pct must be a finite number, got {slip!r}")
     elif not (0 <= slip < 100):
         problems.append(f"slippage_pct must be at least 0 and below 100, got {slip}")
     qage = limits.max_order_quote_age_s
-    if isinstance(qage, bool) or not isinstance(qage, int) or qage < 1:
-        problems.append(f"max_order_quote_age_s must be an integer of at least 1, got {qage!r}")
+    if isinstance(qage, bool) or not isinstance(qage, int) or not 1 <= qage <= 60:
+        # #140: an older quote makes the price-moved check and the allowance meaningless
+        problems.append(f"max_order_quote_age_s must be an integer from 1 to 60, got {qage!r}")
     gap = limits.max_or_missing_minutes
     if isinstance(gap, bool) or not isinstance(gap, int) or gap < 0:
         problems.append(f"max_or_missing_minutes must be an integer of at least 0, got {gap!r}")
     age = limits.max_plan_age_s
-    if isinstance(age, bool) or not isinstance(age, int) or age < 1:
-        problems.append(f"max_plan_age_s must be an integer of at least 1, got {age!r}")
+    if isinstance(age, bool) or not isinstance(age, int) or not 1 <= age <= 900:
+        # #75: an intraday plan older than 15 minutes is stale
+        problems.append(f"max_plan_age_s must be an integer from 1 to 900, got {age!r}")
     buf = limits.cash_buffer_pct
     if not isinstance(buf, Decimal) or not buf.is_finite():
         problems.append(f"cash_buffer_pct must be a finite number, got {buf!r}")
@@ -155,9 +180,9 @@ def validate_limits(limits: Limits) -> None:
         problems.append(f"cash_buffer_pct must be at least 0 and below 100, got {buf}")
     bs = limits.blocked_symbols
     if not isinstance(bs, frozenset) or not all(
-        isinstance(x, str) and x and x == x.strip().upper() for x in bs
+        isinstance(x, str) and normalize_symbol(x) == x for x in bs
     ):
-        problems.append("blocked_symbols must be a set of stripped upper-case symbols")
+        problems.append("blocked_symbols must be a set of valid upper-case tickers")
     n = limits.max_trades_per_day
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         problems.append(f"max_trades_per_day must be an integer of at least 1, got {n!r}")
@@ -268,6 +293,7 @@ def limits_from_dict(d: dict) -> Limits:
         trading_enabled=_json_bool(d.get("trading_enabled", True), "trading_enabled"),
         max_or_missing_minutes=_whole(d.get("max_or_missing_minutes", 3), "max_or_missing_minutes"),
         slippage_pct=_dec(d, "slippage_pct", "0.10"),
+        min_risk_pct=_dec(d, "min_risk_pct", "0.25"),
         max_order_quote_age_s=_whole(d.get("max_order_quote_age_s", 15), "max_order_quote_age_s"),
     )
     validate_limits(limits)
