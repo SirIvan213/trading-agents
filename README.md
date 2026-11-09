@@ -36,7 +36,7 @@ pytest -q
 
 Data requests honour the `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` environment variables
 (Python's default opener). A proxy sees the full request URLs and headers, including the
-Alpaca and FMP keys and the SEC user agent, so only set one you trust.
+Alpaca, Alpha Vantage and FMP keys and the SEC user agent, so only set one you trust.
 
 ## Configuration
 
@@ -48,7 +48,8 @@ from code or prompts.
 | `ANTHROPIC_API_KEY` | Claude API key | required for billed runs |
 | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | Alpaca market data and news | required for live data |
 | `SEC_USER_AGENT` | identifies you to SEC EDGAR | `"Your Name you@example.com"` |
-| `FMP_API_KEY` | FMP earnings calendar (see below) | required for the event gate |
+| `ALPHA_VANTAGE_API_KEY` | Alpha Vantage earnings calendar, the primary (see below) | required for the event gate |
+| `FMP_API_KEY` | FMP earnings calendar, a block-only secondary (see below) | optional: without it the gate still works |
 | `TRADING_AGENTS_MODEL` | model for every agent | `claude-sonnet-5-5` (`claude-opus-5-5` for the trader) |
 | `TRADING_AGENTS_EFFORT` | effort for every agent | `low`, `medium`, `high`, `xhigh` or `max`; default `high` |
 | `TRADING_AGENTS_<AGENT>_MODEL` | model for one agent; wins over `TRADING_AGENTS_MODEL` | `<AGENT>` is `TECHNICAL`, `SENTIMENT`, `FUNDAMENTALS`, `BULL`, `BEAR` or `TRADER` |
@@ -68,24 +69,50 @@ halts. It returns one of three results, and **only CLEAR lets an order through**
   and no halt today.
 - **EVENT**: a source shows earnings today or in the trade window (or an estimated date
   within three trading days), an item 2.02 filed today, or a halt or pause today.
-- **UNKNOWN**: a source failed, was malformed or stale, or could not prove the symbol
-  clear (for example no 8-K item 2.02 in the last 100 days).
+- **UNKNOWN**: a source failed, was malformed, stale or too sparse, or could not prove the
+  symbol clear (for example no 8-K item 2.02 in the last 100 days).
 
 `risk_check` blocks EVENT and UNKNOWN. The reason names the kind and the source, e.g.
-`event gate EVENT: EVENT (fmp): earnings today ...` against
-`event gate UNKNOWN: UNKNOWN (fmp): earnings source unavailable: ...`. The order ticket
-shows an `Event gate: <STATUS> (<reason>)` line, and the decision journal entry carries a
-`gate` field with the status and reason.
+`event gate EVENT: EVENT (alphavantage): estimated earnings date ...` against
+`event gate UNKNOWN: UNKNOWN (alphavantage): earnings source unavailable: ...`. The order
+ticket shows an `Event gate: <STATUS> (<reason>)` line, and the decision journal entry
+carries a `gate` field with the status and reason.
 
-The earnings calendar comes from [Financial Modeling Prep](https://site.financialmodelingprep.com/):
+Two earnings calendars feed the gate (#167, #145):
 
-- The key goes in `.env` as `FMP_API_KEY`. FMP bills per call on its side.
-- It is called from the event gate in the order path and from the Sentiment analyst's
-  `get_news` tool.
-- One range call per New York day is cached in `journal/cache/` (git-ignored). A failed
-  fetch is not cached and is retried on the next use.
-- The first live call needs Ivan's explicit approval (CLAUDE.md rule 6). Tests never call
-  FMP.
+- **[Alpha Vantage](https://www.alphavantage.co/documentation/) (primary).** Its
+  `EARNINGS_CALENDAR` endpoint returns, per its docs, the full list of scheduled reports
+  for the next 3 months as CSV (to be confirmed by the first live call). Only this calendar can prove CLEAR. It gives no report time and no confirmed flag,
+  so every date counts as an estimate: a symbol is blocked from three trading days before
+  its listed date.
+  - The key goes in `.env` as `ALPHA_VANTAGE_API_KEY`. A free key allows 25 calls a day;
+    the gate makes one.
+  - The terms license personal, non-commercial use, which covers private investment
+    research and testing. Use on behalf of a firm, or by someone affiliated with a broker,
+    adviser or bank, counts as commercial (Terms of Service, section 2).
+- **[Financial Modeling Prep](https://site.financialmodelingprep.com/) (secondary).** It
+  can only add an EVENT, for example from its report times or confirmed dates. Its failure
+  never blocks on its own, and it never proves CLEAR: the free tier listed 3 reports for a
+  week of earnings season.
+  - The key goes in `.env` as `FMP_API_KEY`. FMP bills per call on its side.
+
+How the calendars are fetched and checked:
+
+- **Plausibility.** The primary calendar must list at least 50 reports from today to a week
+  ahead, on at least 3 different trading days, or the gate says UNKNOWN. That floor is a
+  starting point. Recalibrate it from live counts: `python -m pipeline.smoke_events SYMBOL
+  --live` prints rows per day. A quiet week, such as late December, may fall below it, which
+  blocks trading.
+- **Caching.** Each calendar is fetched once per New York day and cached in `journal/cache/`
+  (git-ignored).
+  - A failed or invalid FMP reply is not cached and is retried on the next use.
+  - A failed Alpha Vantage fetch is retried only after 15 minutes, and a reply that does not
+    validate (for example one cut short) after 60, to stay under the free key's
+    25-calls-a-day limit.
+- **Where they are called.** Both are read by the event gate in the order path and by the
+  Sentiment analyst's `get_news` tool.
+- **Approval.** The first live call to each needs Ivan's explicit approval (CLAUDE.md rule
+  6). Tests never call either.
 
 ## Status
 

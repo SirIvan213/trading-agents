@@ -5,20 +5,28 @@ EVENT, UNKNOWN and a missing result). No setting changes that.
 
 Earnings (`earnings_status`):
   CLEAR needs positive proof from both required sources:
-    - FMP (primary): a fresh, well-formed calendar reply covering the window, with no event
-      for the symbol in it; and
+    - the primary calendar (`calendar`): a fresh, well-formed, PLAUSIBLE whole-market reply
+      covering the window, with no event for the symbol in it. In production this is Alpha
+      Vantage (#167), whose dates are all estimates; the check itself does not depend on the
+      source, and findings carry the calendar's own "source" ("alphavantage" or "fmp").
+      Plausible means at least MIN_CALENDAR_ROWS reports dated from today to the end of the
+      range, on at least MIN_CALENDAR_TRADING_DAYS different trading days: a near-empty
+      calendar (FMP's free tier listed 3 reports for a week of earnings season) proves
+      nothing; and
     - SEC (coverage): an 8-K item 2.02 (results of operations) filed in the last
-      COVERAGE_DAYS days, proof the company reports quarterly so FMP's silence means
-      something (an empty calendar for a company FMP does not cover proves nothing).
+      COVERAGE_DAYS days, proof the company reports quarterly so the calendar's silence
+      means something (an empty calendar for a company it does not cover proves nothing).
   EVENT: earnings dated today (any hour, confirmed or estimated, with or without a report
     time); earnings inside the window; an ESTIMATED date within ESTIMATE_TRADING_DAYS
     trading days (dates move); an item 2.02 filed today; or a secondary source's EVENT
-    (an earnings headline in the news digest).
-  UNKNOWN: FMP transport errors, malformed or stale replies, a reply that does not cover the
-    window; SEC unavailable or malformed; no item 2.02 in the last COVERAGE_DAYS days.
+    (an earnings headline in the news digest, or a report on FMP's calendar).
+  UNKNOWN: calendar transport errors, malformed, stale or sparse replies, a reply that does
+    not cover the window; SEC unavailable or malformed; no item 2.02 in the last
+    COVERAGE_DAYS days.
   Secondary sources (SECONDARY_EARNINGS_SIGNALS) can only ADD an EVENT: their failure never
-  blocks on its own and never clears. Add one (e.g. a block-only Alpha Vantage cross-check) by
-  appending (name, fn) where fn(symbol, now, window_end, sources) -> list of EVENT reasons.
+  blocks on its own and never clears. FMP's calendar (`fmp_calendar`) is one (#145). Add
+  another by appending (name, fn) where fn(symbol, now, window_end, sources) -> list of EVENT
+  reasons; `sources` holds calendar, fmp_calendar, filings and news.
 
 Halts (`halt_status`), from two REQUIRED sources (#112, #144):
   - the Nasdaq Trader trade-halt feed (tools.halt_feed): any halt or pause for the symbol
@@ -33,7 +41,8 @@ Each finding keeps its own status and source, so EVENT and UNKNOWN reasons stay 
 the ticket and the journal. Inputs are tool output only, never model text (CLAUDE.md rule 2).
 
 Input shapes (each fetched by the caller; a failed fetch is {"ok": False, "reason"}):
-  calendar  tools.earnings_calendar.parse_fmp_calendar(...) result
+  calendar  tools.earnings_calendar.parse_av_calendar(...) (or parse_fmp_calendar) result
+  fmp_calendar  tools.earnings_calendar.parse_fmp_calendar(...) result (secondary)
   filings   {"ok": True, "submissions": <EDGAR submissions dict or None>}
   news      {"ok": True, "news": <Alpaca news reply {"news": [...]}>}
 """
@@ -55,6 +64,13 @@ ESTIMATE_TRADING_DAYS = 3     # an estimated date this close blocks
 MAX_CALENDAR_AGE = timedelta(hours=20)  # fetched once per day, before the open
 CALENDAR_HORIZON_DAYS = 7     # callers fetch [today, today + 7 days]: covers the 3rd
                               # trading day after a long weekend, stays far under FMP's row cap
+# Plausibility of the primary calendar (#167): a whole-market calendar lists many reports
+# over [today, today + 7]. Fewer rows, or rows on fewer trading days, is UNKNOWN. A starting
+# floor, to be recalibrated from live counts (pipeline.smoke_events prints rows per day); a
+# quiet week (late December) may fall below it, which fails closed.
+MIN_CALENDAR_ROWS = 50
+MIN_CALENDAR_TRADING_DAYS = 3
+CALENDAR_SOURCES = {"alphavantage": "Alpha Vantage", "fmp": "FMP"}
 FUTURE_SKEW = timedelta(minutes=5)
 NEWS_LOOKBACK_HOURS = 24
 MAX_HALT_FEED_AGE = timedelta(minutes=3)   # our fetch of the feed (cached for 60 s)
@@ -89,6 +105,16 @@ def _trading_days_after(day: date, n: int) -> date:
         while d.weekday() >= 5:
             d += timedelta(days=1)
     return d
+
+
+def _is_trading_day(day: date) -> bool:
+    """NYSE session that day; a weekday where the calendar has no coverage (as
+    _trading_days_after guesses). risk_check blocks every order on an uncovered date anyway
+    ("market calendar does not cover this date")."""
+    try:
+        return session_hours(day) is not None
+    except CalendarError:
+        return day.weekday() < 5
 
 
 def _compact(text: object) -> str:
@@ -133,14 +159,46 @@ def _parse_time(text: object) -> datetime | None:
 
 
 # --------------------------------------------------------------------------------------
-# Earnings: FMP (primary), SEC item 2.02 (coverage), secondary signals (EVENT only)
+# Earnings: primary calendar, SEC item 2.02 (coverage), secondary signals (EVENT only)
 # --------------------------------------------------------------------------------------
 
-def _fmp_findings(symbol: str, now: datetime, window_end: datetime, calendar: object,
-                  aliases: frozenset[str]) -> tuple[list[Finding], bool]:
-    """(findings, proven_clear) from the FMP calendar."""
+def calendar_source(calendar: object) -> str:
+    """The calendar's source name for findings: "alphavantage", "fmp", or "calendar"."""
+    src = calendar.get("source") if isinstance(calendar, dict) else None
+    return src if isinstance(src, str) and src in CALENDAR_SOURCES else "calendar"
+
+
+def _row_finding(row: object, symbol: str, today: date, window_day: date, horizon: date,
+                 aliases: frozenset[str], source: str) -> Finding | None:
+    """The EVENT for one calendar row of this company, or None. Raises ValueError when the
+    row is this company's but has no valid date."""
+    if not isinstance(row, dict) or norm_ticker(row.get("symbol")) not in aliases:
+        return None
+    day = date.fromisoformat(str(row.get("date")))
+    when = row.get("time") or "no report time given"
+    listed = norm_ticker(row.get("symbol"))
+    under = "" if listed == norm_ticker(symbol) else f", listed as {listed}"
+    kind = "confirmed" if row.get("confirmed") is True else "estimated"
+    if day == today:
+        return _finding("earnings", source, EVENT,
+                        f"earnings today {day} ({when}, {kind}{under})")
+    if today < day <= window_day:
+        return _finding("earnings", source, EVENT,
+                        f"earnings {day} inside the trade window ({when}, {kind}{under})")
+    if kind == "estimated" and today < day <= horizon:
+        return _finding("earnings", source, EVENT,
+                        f"estimated earnings date {day} within {ESTIMATE_TRADING_DAYS} trading "
+                        f"days (estimated dates move{under})")
+    return None
+
+
+def _calendar_findings(symbol: str, now: datetime, window_end: datetime, calendar: object,
+                       aliases: frozenset[str]) -> tuple[list[Finding], bool]:
+    """(findings, proven_clear) from the primary earnings calendar."""
+    source = calendar_source(calendar)
+
     def unknown(reason: str) -> tuple[list[Finding], bool]:
-        return [_finding("earnings", "fmp", UNKNOWN, reason)], False
+        return [_finding("earnings", source, UNKNOWN, reason)], False
 
     if not isinstance(calendar, dict) or calendar.get("ok") is not True:
         why = calendar.get("reason") if isinstance(calendar, dict) else None
@@ -181,32 +239,33 @@ def _fmp_findings(symbol: str, now: datetime, window_end: datetime, calendar: ob
     if latest < need_to:
         return unknown(f"earnings calendar rows stop at {latest}, before {need_to}: "
                        "the reply may be cut short")
+    # Plausibility (#167): the source answered, but a near-empty answer proves nothing. FMP's
+    # free tier listed 3 reports for a week of earnings season, and the gate said CLEAR.
+    # Counted over [today, today + CALENDAR_HORIZON_DAYS] whatever range the reply covers (a
+    # wider one must not spread the floor over months), one per (symbol, date): repeated rows
+    # do not pad it.
+    upto = min(end, today + timedelta(days=CALENDAR_HORIZON_DAYS))
+    ahead = {(norm_ticker(r.get("symbol")), str(r.get("date"))) for r in rows
+             if isinstance(r, dict) and today.isoformat() <= str(r.get("date")) <= upto.isoformat()}
+    if len(ahead) < MIN_CALENDAR_ROWS:
+        return unknown(f"earnings calendar lists only {len(ahead)} reports for {today}..{upto} "
+                       f"(at least {MIN_CALENDAR_ROWS} needed): too sparse to prove a symbol "
+                       "clear")
+    trading = sum(1 for d in {date.fromisoformat(d) for _, d in ahead} if _is_trading_day(d))
+    if trading < MIN_CALENDAR_TRADING_DAYS:
+        return unknown(f"earnings calendar lists reports on only {trading} trading day(s) in "
+                       f"{today}..{upto} (at least {MIN_CALENDAR_TRADING_DAYS} needed): too "
+                       "sparse to prove a symbol clear")
 
     findings: list[Finding] = []
     window_day = window_end.astimezone(NY).date()
     for row in rows:
-        if not isinstance(row, dict) or norm_ticker(row.get("symbol")) not in aliases:
-            continue
         try:
-            day = date.fromisoformat(str(row.get("date")))
+            found = _row_finding(row, symbol, today, window_day, horizon, aliases, source)
         except ValueError:
             return unknown("earnings calendar is malformed")
-        when = row.get("time") or "no report time given"
-        listed = norm_ticker(row.get("symbol"))
-        under = "" if listed == norm_ticker(symbol) else f", listed as {listed}"
-        kind = "confirmed" if row.get("confirmed") is True else "estimated"
-        if day == today:
-            findings.append(_finding("earnings", "fmp", EVENT,
-                                     f"earnings today {day} ({when}, {kind}{under})"))
-        elif today < day <= window_day:
-            findings.append(_finding("earnings", "fmp", EVENT,
-                                     f"earnings {day} inside the trade window "
-                                     f"({when}, {kind}{under})"))
-        elif kind == "estimated" and today < day <= horizon:
-            findings.append(_finding(
-                "earnings", "fmp", EVENT,
-                f"estimated earnings date {day} within {ESTIMATE_TRADING_DAYS} trading days "
-                f"(estimated dates move{under})"))
+        if found is not None:
+            findings.append(found)
     return findings, not findings
 
 
@@ -277,44 +336,73 @@ def news_earnings_headlines(symbol: str, now: datetime, window_end: datetime,
             for h in dg["headlines"] if "earnings" in h.get("flags", [])]
 
 
+def fmp_calendar_events(symbol: str, now: datetime, window_end: datetime,
+                        sources: dict) -> list[str]:
+    """Secondary signal (#145): FMP's calendar lists this company (any share class) today,
+    inside the trade window, or on an estimated date within ESTIMATE_TRADING_DAYS trading
+    days. Block-only: it never clears (the primary calendar decides CLEAR). A failed or
+    malformed FMP calendar adds nothing and a row that cannot be read is skipped; a sparse or
+    stale one still adds the rows it lists for this company, which can only over-block."""
+    cal = sources.get("fmp_calendar")
+    rows = cal.get("rows") if isinstance(cal, dict) and cal.get("ok") is True else None
+    if not isinstance(rows, list):
+        return []
+    today = now.astimezone(NY).date()
+    horizon = _trading_days_after(today, ESTIMATE_TRADING_DAYS)
+    window_day = window_end.astimezone(NY).date()
+    aliases = _aliases(symbol, sources.get("filings"))
+    reasons = []
+    for row in rows:
+        try:
+            found = _row_finding(row, symbol, today, window_day, horizon, aliases, "fmp")
+        except ValueError:
+            continue
+        if found is not None:
+            reasons.append(f"FMP calendar: {found['reason']}")
+    return reasons
+
+
 SecondarySignal = Callable[[str, datetime, datetime, dict], list[str]]
 SECONDARY_EARNINGS_SIGNALS: tuple[tuple[str, SecondarySignal], ...] = (
     ("news", news_earnings_headlines),
+    ("fmp", fmp_calendar_events),
 )
 
 
 def earnings_status(
     symbol: str, now: datetime, window_end: datetime, *, calendar: object, filings: object,
-    news: object = None,
+    news: object = None, fmp_calendar: object = None,
     secondary: tuple[tuple[str, SecondarySignal], ...] = SECONDARY_EARNINGS_SIGNALS,
 ) -> dict:
-    """{"status": CLEAR|EVENT|UNKNOWN, "findings": [...], "clear_through", "last_item_202"}.
-    See the module docstring for the rule. Never raises."""
+    """{"status": CLEAR|EVENT|UNKNOWN, "findings": [...], "clear_through", "calendar_source",
+    "last_item_202"}. See the module docstring for the rule. Never raises."""
     sym = symbol.strip().upper() if isinstance(symbol, str) else ""
     if not sym or not _aware(now) or not _aware(window_end):
         return {"status": UNKNOWN, "findings": [_finding(
             "earnings", "gate", UNKNOWN, "event gate called without a symbol, now or window")],
-            "clear_through": None, "last_item_202": None}
-    fmp, fmp_clear = _fmp_findings(sym, now, window_end, calendar, _aliases(sym, filings))
+            "clear_through": None, "calendar_source": calendar_source(calendar),
+            "last_item_202": None}
+    cal, cal_clear = _calendar_findings(sym, now, window_end, calendar, _aliases(sym, filings))
     sec, covered, last_202 = _sec_findings(sym, now, filings)
     extra: list[Finding] = []
-    sources = {"calendar": calendar, "filings": filings, "news": news}
+    sources = {"calendar": calendar, "fmp_calendar": fmp_calendar, "filings": filings,
+               "news": news}
     for name, signal in secondary:
         try:
             reasons = signal(sym, now, window_end, sources)
         except Exception:  # noqa: BLE001 - a secondary failure never blocks or clears
             continue
         extra.extend(_finding("earnings", name, EVENT, str(r)) for r in reasons or [])
-    findings = fmp + sec + extra
+    findings = cal + sec + extra
     if any(f["status"] == EVENT for f in findings):
         status = EVENT
-    elif fmp_clear and covered and not findings:
+    elif cal_clear and covered and not findings:
         status = CLEAR
     else:
         status = UNKNOWN
     clear_through = calendar.get("to") if status == CLEAR and isinstance(calendar, dict) else None
     return {"status": status, "findings": findings, "clear_through": clear_through,
-            "last_item_202": last_202}
+            "calendar_source": calendar_source(calendar), "last_item_202": last_202}
 
 
 def _news_halt_findings(symbol: str, now: datetime, news: object) -> list[Finding]:
@@ -432,14 +520,14 @@ def halt_status(symbol: str, now: datetime, news: object, halts: object = None) 
 
 def event_gate(
     symbol: str, now: datetime, window_end: datetime, *, calendar: object, filings: object,
-    news: object, halts: object = None,
+    news: object, halts: object = None, fmp_calendar: object = None,
     secondary: tuple[tuple[str, SecondarySignal], ...] = SECONDARY_EARNINGS_SIGNALS,
 ) -> dict:
     """The combined gate result risk_check requires: {"status", "symbol", "checked_at",
     "window_end", "earnings", "halt", "findings", "reason"}. EVENT if any EVENT finding,
     CLEAR only when earnings and halt are both CLEAR, else UNKNOWN. Never raises."""
     earn = earnings_status(symbol, now, window_end, calendar=calendar, filings=filings,
-                           news=news, secondary=secondary)
+                           news=news, fmp_calendar=fmp_calendar, secondary=secondary)
     halt = halt_status(symbol, now, news, halts)
     findings = earn["findings"] + halt["findings"]
     if any(f["status"] == EVENT for f in findings):
@@ -449,8 +537,9 @@ def event_gate(
     else:
         status = UNKNOWN
     if status == CLEAR:
-        reason = (f"no earnings through {earn['clear_through']} (FMP); last 8-K item 2.02 "
-                  f"filed {earn['last_item_202']}; no halt today")
+        label = CALENDAR_SOURCES.get(earn["calendar_source"], "calendar")
+        reason = (f"no earnings through {earn['clear_through']} ({label}); last 8-K item "
+                  f"2.02 filed {earn['last_item_202']}; no halt today")
     else:
         # EVENT findings first, then UNKNOWN: the two kinds stay distinct and labelled
         ordered = sorted(findings, key=lambda f: f["status"] != EVENT)

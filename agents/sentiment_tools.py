@@ -5,10 +5,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from agents.session_base import SingleSymbolSession, symbol_tool
-from pipeline.events import calendar_input
+from pipeline.events import calendar_input, fmp_calendar_input
 from pipeline.market import NY
 from tools.config import MARKET_CLOSE
-from tools.event_gate import earnings_status
+from tools.event_gate import CALENDAR_SOURCES, earnings_status, fmp_calendar_events
 from tools.news import digest, parse_8k_filings
 
 LOOKBACK_HOURS = 24
@@ -18,8 +18,8 @@ TOOLS: list[dict[str, Any]] = [
         "get_news",
         "Fetch the last 24 hours of news headlines and SEC 8-K filings for the symbol and "
         "return a digest: headlines (with flags), filings, catalysts, red_flags, counts and "
-        "earnings_calendar (the FMP earnings calendar's verdict for the symbol today; the "
-        "catalyst earnings_scheduled when it lists a report). Call this first.",
+        "earnings_calendar (the earnings calendars' verdict for the symbol today; the "
+        "catalyst earnings_scheduled when one lists a report). Call this first.",
     ),
 ]
 
@@ -58,10 +58,12 @@ class SentimentSession(SingleSymbolSession):
         return result, False
 
     def _earnings_calendar(self, now: datetime, subs_input: dict) -> dict:
-        """#13: the earnings calendar's verdict for this symbol as a digest field, and the
-        catalyst "earnings_scheduled" when FMP lists a report today or within the window.
+        """#13: the earnings calendars' verdict for this symbol as a digest field, and the
+        catalyst "earnings_scheduled" when Alpha Vantage (primary) or FMP (secondary) lists a
+        report today, within the window, or on an estimated date within 3 trading days.
         Context for the analyst only: the order path runs its own gate (tools.event_gate)."""
-        if not hasattr(self.data, "earnings_calendar"):
+        if not (hasattr(self.data, "av_earnings_calendar")
+                or hasattr(self.data, "earnings_calendar")):
             return {"earnings_calendar": {"status": "UNKNOWN",
                                           "reason": "no earnings calendar source"}}
         try:
@@ -69,13 +71,16 @@ class SentimentSession(SingleSymbolSession):
             window_end = datetime.combine(today, MARKET_CLOSE, tzinfo=NY)
             status = earnings_status(self.symbol, now, window_end,
                                      calendar=calendar_input(self.data, today),
-                                     filings=subs_input, secondary=())
+                                     fmp_calendar=fmp_calendar_input(self.data, today),
+                                     filings=subs_input,
+                                     secondary=(("fmp", fmp_calendar_events),))
         except Exception as exc:  # noqa: BLE001 - context must never break get_news
             return {"earnings_calendar": {"status": "UNKNOWN",
                                           "reason": f"calendar failed ({type(exc).__name__})"}}
         reasons = "; ".join(f"{f['status']} ({f['source']}): {f['reason']}"
                             for f in status["findings"]) or "no report listed in the window"
         out: dict = {"earnings_calendar": {"status": status["status"], "reason": reasons}}
-        if any(f["source"] == "fmp" and f["status"] == "EVENT" for f in status["findings"]):
+        if any(f["source"] in CALENDAR_SOURCES and f["status"] == "EVENT"
+               for f in status["findings"]):
             out["earnings_scheduled"] = True
         return out

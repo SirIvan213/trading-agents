@@ -263,11 +263,11 @@ def events_of(**inputs):
 
 
 class QuietGateData(HaltFeedFake):
-    """Wraps a fake data object so the event gate reads CLEAR from it: an FMP calendar with
-    only other companies' rows, an item 2.02 filing 30 days ago, and the news without halt or
-    earnings
-    headlines. Every other attribute is the wrapped object's. Used where a test is about
-    something else (the order flow) and runs through pipeline.decide.run_decision (#112)."""
+    """Wraps a fake data object so the event gate reads CLEAR from it: Alpha Vantage and FMP
+    calendars with only other companies' rows, an item 2.02 filing 30 days ago, and the news
+    without halt or earnings headlines. Every other attribute is the wrapped object's. Used
+    where a test is about something else (the order flow) and runs through
+    pipeline.decide.run_decision (#112)."""
 
     def __init__(self, inner) -> None:
         self._inner = inner
@@ -282,6 +282,13 @@ class QuietGateData(HaltFeedFake):
         from tests.fakes import background_rows
         return {"fetched_at": fetched.isoformat(), "from": start.isoformat(),
                 "to": end.isoformat(), "reply": background_rows(start, end)}
+
+    def av_earnings_calendar(self, start: date, end: date) -> dict:
+        fetched = datetime.combine(start, datetime.min.time().replace(hour=8, minute=30),
+                                   tzinfo=NY)
+        from tests.fakes import av_csv
+        return {"fetched_at": fetched.isoformat(), "from": start.isoformat(),
+                "to": end.isoformat(), "reply": av_csv(start=start, end=end)}
 
     def submissions(self, symbol: str):
         return submissions_202(datetime(2026, 11, 3, 12, 0, tzinfo=NY), 30, symbol=symbol)

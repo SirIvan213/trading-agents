@@ -14,7 +14,14 @@ import pipeline.order_flow as of
 from journal.log import APPROVED
 from pipeline.events import events_from, gate_inputs, halts_input
 from pipeline.scenarios import ScenarioData, load_scenario, scenario_names
-from tests.fakes import NOON, FakeAllData, background_rows, fresh_halt_feed, halt_feed_xml
+from tests.fakes import (
+    NOON,
+    FakeAllData,
+    av_csv,
+    background_rows,
+    fresh_halt_feed,
+    halt_feed_xml,
+)
 from tests.fakes import halt_item_xml as hi
 from tests.order_helpers import (
     T0,
@@ -326,8 +333,11 @@ def test_a_clear_gate_is_json_serializable():
 # ============================ D. through events_from / halts_input ============================
 
 def data_for(now, **over):
-    """A clean data object (calendar, SEC, news, fresh halt feed); parts replaced via kwargs."""
+    """A clean data object (calendars, SEC, news, fresh halt feed); parts replaced via kwargs."""
     d = dict(
+        av_earnings_calendar=lambda s, e: {
+            "fetched_at": (now - timedelta(minutes=1)).isoformat(), "from": s.isoformat(),
+            "to": e.isoformat(), "reply": av_csv(start=s, end=e)},
         earnings_calendar=lambda s, e: {"fetched_at": (now - timedelta(minutes=1)).isoformat(),
                                         "from": s.isoformat(), "to": e.isoformat(),
                                         "reply": background_rows(s, e)},
@@ -422,11 +432,16 @@ def test_halts_input_missing_body_key_is_a_failure_by_type_name():
 def test_gate_inputs_passes_shared_halts_and_calendar_through():
     sentinel_h = {"ok": False, "reason": "shared-h"}
     sentinel_c = {"ok": False, "reason": "shared-c"}
+    sentinel_f = {"ok": False, "reason": "shared-f"}
     calls = []
-    data = data_for(T0, halt_feed=lambda: calls.append(1))
-    inputs = gate_inputs(data, "TSLA", T0, calendar=sentinel_c, halts=sentinel_h)
-    assert inputs["halts"] is sentinel_h and inputs["calendar"] is sentinel_c and calls == []
-    assert set(inputs) == {"calendar", "filings", "news", "halts"}
+    data = data_for(T0, halt_feed=lambda: calls.append(1),
+                    av_earnings_calendar=lambda s, e: calls.append(2),
+                    earnings_calendar=lambda s, e: calls.append(3))
+    inputs = gate_inputs(data, "TSLA", T0, calendar=sentinel_c, halts=sentinel_h,
+                         fmp_calendar=sentinel_f)
+    assert inputs["halts"] is sentinel_h and inputs["calendar"] is sentinel_c
+    assert inputs["fmp_calendar"] is sentinel_f and calls == []
+    assert set(inputs) == {"calendar", "fmp_calendar", "filings", "news", "halts"}
 
 
 def test_gate_inputs_reads_the_feed_once_per_call_for_each_symbol_when_not_shared():

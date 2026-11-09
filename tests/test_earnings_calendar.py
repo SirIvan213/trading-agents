@@ -1,8 +1,10 @@
 """FMP earnings calendar fetch and parse, and how every transport failure ends (#13, #112).
 
 A fake opener stands in for the network; nothing here reads a real key or makes a request. Each
-failure goes all the way: fetch -> FmpCalendarCache -> events_from -> event_gate -> check_order,
-and must end UNKNOWN (never "no earnings") and a BLOCK, with its own distinct reason.
+failure goes all the way: fetch -> FmpCalendarCache -> events_from -> event_gate -> check_order.
+FMP is a block-only secondary since #145/#167 (Alpha Vantage is the primary calendar), so an
+FMP failure, with a good Alpha Vantage calendar, must add nothing: it never blocks on its own
+and is never cached. Alpha Vantage's own failures are in test_av_earnings_calendar.py.
 """
 import io
 import json
@@ -16,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from pipeline.events import FmpCalendarCache, events_from
-from tests.fakes import fresh_halt_feed, load_fixture
+from tests.fakes import av_csv, fresh_halt_feed, load_fixture
 from tests.order_helpers import NY, fmp_row, submissions_202, verdict_for
 from tools.earnings_calendar import fetch_fmp_earnings_calendar, parse_fmp_calendar
 
@@ -154,11 +156,18 @@ def test_an_empty_key_is_also_missing(monkeypatch):
 
 # ======================= fetch failure -> gate UNKNOWN -> check_order BLOCK ==================
 
+def good_av(s, e):
+    return {"fetched_at": NOW.replace(hour=8).isoformat(), "from": s.isoformat(),
+            "to": e.isoformat(), "reply": av_csv(start=s, end=e)}
+
+
 def chain(tmp_path, opener):
-    """data -> FmpCalendarCache(fetch via the fake opener) -> events_from -> the gate result."""
+    """data -> FmpCalendarCache(fetch via the fake opener) -> events_from -> the gate result,
+    with a good Alpha Vantage calendar as the primary."""
     cache = FmpCalendarCache(
         tmp_path, lambda s, e: fetch_fmp_earnings_calendar(s, e, opener=opener), lambda: NOW)
     data = SimpleNamespace(
+        av_earnings_calendar=good_av,
         earnings_calendar=cache.get,
         submissions=lambda sym: submissions_202(NOW, 30, symbol=sym),
         halt_feed=lambda: fresh_halt_feed(NOW),
@@ -167,22 +176,25 @@ def chain(tmp_path, opener):
 
 
 @pytest.mark.parametrize("make,message", FAIL_PARAMS)
-def test_blocked_every_fmp_failure_is_unknown_and_blocks_the_order(tmp_path, make, message):
+def test_an_fmp_failure_never_blocks_on_its_own_and_is_not_cached(tmp_path, make, message):
     gate = chain(tmp_path, make())
-    assert gate["status"] == "UNKNOWN"
-    assert f"UNKNOWN (fmp): earnings source unavailable: {message}" in gate["reason"]
-    assert KEY not in gate["reason"]
+    assert gate["status"] == "CLEAR", gate["reason"]
+    assert "(fmp)" not in gate["reason"] and KEY not in gate["reason"]
     assert list(tmp_path.glob("fmp-earnings-*.json")) == []  # a failure is never cached
-    v = verdict_for(gate, NOW)
-    assert v["verdict"] == "BLOCK"
-    assert any(r.startswith("event gate UNKNOWN: ") and message in r for r in v["reasons"])
+    assert verdict_for(gate, NOW) == {"verdict": "PASS", "reasons": []}
 
 
-def test_blocked_a_missing_fmp_key_is_unknown_and_blocks(tmp_path, monkeypatch):
+def test_a_missing_fmp_key_never_blocks_on_its_own(tmp_path, monkeypatch):
     monkeypatch.delenv("FMP_API_KEY")
     gate = chain(tmp_path, opener_returning([]))
-    assert gate["status"] == "UNKNOWN"
-    assert "earnings source unavailable: FMP_API_KEY must be set in the environment" \
+    assert gate["status"] == "CLEAR", gate["reason"]
+    assert verdict_for(gate, NOW)["verdict"] == "PASS"
+
+
+def test_blocked_an_fmp_row_for_the_symbol_today_still_blocks(tmp_path):
+    gate = chain(tmp_path, opener_returning(fx("earnings_calendar_tsla_today_amc.json")))
+    assert gate["status"] == "EVENT"
+    assert "EVENT (fmp): FMP calendar: earnings today 2026-11-09 (amc, confirmed)" \
         in gate["reason"]
     assert verdict_for(gate, NOW)["verdict"] == "BLOCK"
 
@@ -232,13 +244,10 @@ def test_a_malformed_reply_is_not_ok_and_names_why(reply, why):
 
 
 @pytest.mark.parametrize("reply,why", MAL_PARAMS)
-def test_blocked_a_malformed_reply_is_unknown_and_blocks(tmp_path, reply, why):
+def test_a_malformed_fmp_reply_never_blocks_on_its_own(tmp_path, reply, why):
     gate = chain(tmp_path, opener_returning(reply))
-    assert gate["status"] == "UNKNOWN"
-    assert "UNKNOWN (fmp): earnings source unavailable:" in gate["reason"]
-    v = verdict_for(gate, NOW)
-    assert v["verdict"] == "BLOCK"
-    assert any(r.startswith("event gate UNKNOWN: ") for r in v["reasons"])
+    assert gate["status"] == "CLEAR", gate["reason"]
+    assert verdict_for(gate, NOW) == {"verdict": "PASS", "reasons": []}
 
 
 def test_one_bad_row_among_good_ones_makes_the_whole_reply_malformed():

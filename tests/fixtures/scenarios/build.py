@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -159,6 +159,30 @@ OTHER_REPORTS = [
 ]
 
 
+AV_HEADER = "symbol,name,reportDate,fiscalDateEnding,estimate,currency"
+AV_FIRST, AV_LAST = date(2026, 11, 3), date(2027, 1, 29)  # a 3-month reply from the run day
+AV_PER_WEEKDAY = 12  # 5 weekdays x 12 = 60 reports in [2026-11-03, 2026-11-10]
+
+
+def av_calendar(extra: list[tuple[str, str, str]] = ()) -> str:
+    """A SYNTHETIC Alpha Vantage EARNINGS_CALENDAR CSV for a run on 2026-11-03 (#167): the
+    column set a third-party guide shows (Alpha Vantage does not document it), other
+    companies reporting AV_PER_WEEKDAY times every weekday through 2027-01-29, plus `extra`
+    (symbol, name, reportDate). None of the background symbols is a scenario symbol. Never
+    a copy of real data."""
+    lines = [AV_HEADER]
+    for sym, name, day in extra:
+        lines.append(f'{sym},"{name}",{day},2026-09-30,1.12,USD')
+    day, n = AV_FIRST, 0
+    while day <= AV_LAST:
+        if day.weekday() < 5:
+            for _ in range(AV_PER_WEEKDAY):
+                n += 1
+                lines.append(f"QAV{n:04d},Background Co {n},{day.isoformat()},2026-09-30,,USD")
+        day += timedelta(days=1)
+    return "\n".join(lines) + "\n"
+
+
 def halt_item(symbol: str, name: str, market: str, day: str, time: str, code: str,
               resumed: tuple[str, str, str] = ("", "", "")) -> str:
     """One <item> of the Nasdaq Trader trade-halt RSS feed (SYNTHETIC data in the feed's
@@ -236,6 +260,7 @@ def build() -> None:
         ("2026-10-29T20:01:00.000Z", "8-K", "2.02,9.01", "brko-8k_20261029.htm"),
     ]))
     write("clean-buy", "earnings_calendar.json", OTHER_REPORTS)
+    write_text("clean-buy", "av_earnings_calendar.csv", av_calendar())
     write_text("clean-buy", "halts.xml", halt_feed(OTHER_HALTS))
     write("clean-buy", "companyfacts.json", company_facts(9900001, "Brookfield Optics", 0.05))
 
@@ -261,6 +286,8 @@ def build() -> None:
     ]))
     write("red-flag", "earnings_calendar.json",
           [fmp_row("VNTR", "2026-11-03", None, True), *OTHER_REPORTS])
+    write_text("red-flag", "av_earnings_calendar.csv",
+               av_calendar([("VNTR", "Ventara Inc.", "2026-11-03")]))
     # The 10:05-10:09 gap in the bars: a LULD volatility pause, resumed at 10:10
     write_text("red-flag", "halts.xml", halt_feed([
         halt_item("VNTR", "Ventara Inc.", "NASDAQ", "11/03/2026", "10:05:00.214", "LUDP",
@@ -289,11 +316,13 @@ def build() -> None:
             ("2026-10-29T20:01:00.000Z", "8-K", "2.02,9.01", "chsw-8k_20261029.htm"),
         ]))
     write("extended-chase", "earnings_calendar.json", OTHER_REPORTS)
+    write_text("extended-chase", "av_earnings_calendar.csv", av_calendar())
     write_text("extended-chase", "halts.xml", halt_feed(OTHER_HALTS))
     (FIXTURES / "nasdaq_halts_tsla.xml").write_text(halt_feed(OTHER_HALTS), encoding="utf-8")
     # The TSLA baseline's calendar for the same window (TSLA reported on 2026-10-22).
     (FIXTURES / "fmp_earnings_calendar_tsla.json").write_text(
         json.dumps(OTHER_REPORTS, indent=1) + "\n", encoding="utf-8")
+    (FIXTURES / "av_earnings_calendar_tsla.csv").write_text(av_calendar(), encoding="utf-8")
     write("extended-chase", "companyfacts.json",
           company_facts(9900003, "Chasewater Labs", 0.05))
 

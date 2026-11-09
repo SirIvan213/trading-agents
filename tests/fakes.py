@@ -117,19 +117,50 @@ def merged_news() -> dict:
 
 
 
+BACKGROUND_PER_DAY = 13  # 4 days x 13 = 52 rows: above the gate's MIN_CALENDAR_ROWS (50)
+
+
 def background_rows(start: date, end: date) -> list[dict]:
-    """Other companies reporting on every day of [start, end] (#112 review): a real
-    whole-market FMP calendar is never empty and always has rows near its end, and the gate
-    now treats an empty or cut-short reply as UNKNOWN. None of these symbols is a test symbol."""
+    """Other companies reporting on every day of [start, end] (#112 review, #167): a real
+    whole-market FMP calendar is never empty, always has rows near its end, and lists many
+    reports a week; the gate treats an empty, cut-short or sparse reply as UNKNOWN.
+    BACKGROUND_PER_DAY rows a day. None of these symbols is a test symbol."""
     rows, day, n = [], start, 0
     while day <= end:
-        n += 1
-        rows.append({"symbol": f"ZBG{n:02d}", "date": day.isoformat(), "epsActual": None,
-                     "epsEstimated": 0.5, "revenueActual": None, "revenueEstimated": 1000000,
-                     "time": "amc", "periodEnding": "2026-09-30", "fiscalPeriod": "Q3",
-                     "fiscalYear": 2026, "confirmed": True, "lastUpdated": "2026-11-02"})
+        for _ in range(BACKGROUND_PER_DAY):
+            n += 1
+            rows.append({"symbol": f"ZBG{n:03d}", "date": day.isoformat(), "epsActual": None,
+                         "epsEstimated": 0.5, "revenueActual": None,
+                         "revenueEstimated": 1000000, "time": "amc",
+                         "periodEnding": "2026-09-30", "fiscalPeriod": "Q3",
+                         "fiscalYear": 2026, "confirmed": True, "lastUpdated": "2026-11-02"})
         day += timedelta(days=1)
     return rows
+
+
+AV_HEADER = "symbol,name,reportDate,fiscalDateEnding,estimate,currency"
+
+
+def av_csv(rows: list[tuple[str, str]] = (), *, start: date | None = None,
+           end: date | None = None, background: bool = True, after_days: int = 30) -> str:
+    """A SYNTHETIC Alpha Vantage EARNINGS_CALENDAR CSV (the column set a third-party guide
+    shows; the real one is confirmed by Ivan's first live call). `rows` are (symbol, date)
+    pairs. With `background`, other companies (ZAV...) report BACKGROUND_PER_DAY times a day
+    from `start` through `end` + `after_days` (a 3-month whole-market reply runs past the
+    gate's range)."""
+    lines = [AV_HEADER]
+    for sym, day in rows:
+        lines.append(f"{sym},{sym} Inc,{day},2026-09-30,0.51,USD")
+    if background:
+        if start is None or end is None:
+            raise ValueError("background rows need start and end")
+        day, n = start, 0
+        while day <= end + timedelta(days=after_days):
+            for _ in range(BACKGROUND_PER_DAY):
+                n += 1
+                lines.append(f"ZAV{n:04d},\"Zav {n}, Inc.\",{day.isoformat()},2026-09-30,,USD")
+            day += timedelta(days=1)
+    return "\r\n".join(lines) + "\r\n"
 
 
 def halt_item_xml(symbol: str, code: str = "LUDP", *, halt_date: str = "11/03/2026",
@@ -197,9 +228,15 @@ class FakeFilingsData(HaltFeedFake):
         facts_fixture: str = "sec_companyfacts_abcd.json",
         calendar_rows: list | None = None,
         calendar_raises: Exception | None = None,
+        av_rows: list[tuple[str, str]] | None = None,
+        av_raises: Exception | None = None,
+        av_reply: str | None = None,
     ) -> None:
         self.calendar_rows = calendar_rows or []
         self.calendar_raises = calendar_raises
+        self.av_rows = av_rows or []
+        self.av_raises = av_raises
+        self.av_reply = av_reply
         self.facts_fixture = facts_fixture
         self.calls: list[tuple] = []
         self.news_raises = news_raises
@@ -231,6 +268,19 @@ class FakeFilingsData(HaltFeedFake):
         return {"fetched_at": fetched.isoformat(), "from": start.isoformat(),
                 "to": end.isoformat(),
                 "reply": [*self.calendar_rows, *background_rows(start, end)]}
+
+    def av_earnings_calendar(self, start: date, end: date) -> dict:
+        """The Alpha Vantage calendar (primary) as LiveData returns it: fetched 08:30 ET on
+        `start`; `av_rows` (symbol, date) plus other companies' background rows through a
+        month past `end`, or `av_reply` verbatim when given (#167)."""
+        self.calls.append(("av_earnings_calendar", start, end))
+        if self.av_raises:
+            raise self.av_raises
+        fetched = datetime.combine(start, time(8, 30), tzinfo=NY)
+        reply = (self.av_reply if self.av_reply is not None
+                 else av_csv(self.av_rows, start=start, end=end))
+        return {"fetched_at": fetched.isoformat(), "from": start.isoformat(),
+                "to": end.isoformat(), "reply": reply}
 
     def company_facts(self, symbol: str) -> dict | None:
         self.calls.append(("company_facts", symbol))
