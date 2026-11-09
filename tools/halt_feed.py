@@ -82,9 +82,9 @@ def parse_halt_feed(body: object) -> dict:
     "resumption_trade_time"}]} or {"ok": False, "reason"}.
 
     One leading UTF-8 byte-order mark is stripped (the live feed sends one).
-    Strict: not UTF-8 (a UTF-16/UTF-32 BOM, a second BOM, another declared encoding, or bytes
-    that do not decode), a
-    DOCTYPE/ENTITY declaration anywhere, not XML, not exactly one rss channel, items outside
+    Strict: not UTF-8 (a UTF-16/UTF-32 BOM, a second BOM, a NUL byte, another declared
+    encoding, or bytes that do not decode), a DOCTYPE/ENTITY declaration anywhere, not XML,
+    not exactly one rss channel, items outside
     that channel, no valid pubDate, a numItems that is missing or does not match the item
     count (a cut-short feed), or ANY item without a symbol, a MM/DD/YYYY halt date or an
     HH:MM:SS halt time makes the whole feed not ok."""
@@ -93,9 +93,11 @@ def parse_halt_feed(body: object) -> dict:
     if len(body) > MAX_BODY_BYTES:
         return {"ok": False, "reason": "halt feed body is too large"}
     raw = bytes(body)
-    # The live feed starts with a UTF-8 byte-order mark (EF BB BF): strip exactly one. Any
-    # other BOM (UTF-16 or UTF-32, either byte order) is still refused: a UTF-16 body could
-    # smuggle a DOCTYPE past the byte-level check below (#144 review).
+    # The live feed starts with a UTF-8 byte-order mark (EF BB BF): strip exactly one. Other
+    # BOMs (UTF-16 or UTF-32, either byte order) are refused. That alone does NOT stop UTF-16
+    # smuggling: what does is (1) refusing any NUL byte below (ASCII in UTF-16/UTF-32 always
+    # has NULs; XML 1.0 forbids U+0000) and (2) parsing the decoded text we checked, never
+    # the raw bytes, so expat cannot pick its own encoding (#144 review, BOM-fix review).
     if raw.startswith((b"\x00\x00\xfe\xff", b"\xff\xfe", b"\xfe\xff")):
         return {"ok": False, "reason": "halt feed has a UTF-16 or UTF-32 byte-order mark "
                                        "(UTF-8 required)"}
@@ -104,6 +106,8 @@ def parse_halt_feed(body: object) -> dict:
         if raw.startswith(b"\xef\xbb\xbf"):
             # a second BOM would hide the encoding declaration from the check below
             return {"ok": False, "reason": "halt feed has more than one byte-order mark"}
+    if b"\x00" in raw:
+        return {"ok": False, "reason": "halt feed contains NUL bytes (UTF-8 required)"}
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -115,7 +119,7 @@ def parse_halt_feed(body: object) -> dict:
     if "<!DOCTYPE" in upper or "<!ENTITY" in upper:
         return {"ok": False, "reason": "halt feed declares a DOCTYPE or entities"}
     try:
-        root = ET.fromstring(raw)
+        root = ET.fromstring(text)  # the checked str: expat reads it as UTF-8, no sniffing
     except ET.ParseError:
         return {"ok": False, "reason": "halt feed is not valid XML"}
     channels = root.findall("channel") if root.tag == "rss" else []

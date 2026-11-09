@@ -507,6 +507,38 @@ def test_blocked_a_utf16_body_cannot_smuggle_a_doctype_past_the_check():
     assert parse_halt_feed(text.encode("utf-16"))["ok"] is False
 
 
+def _smuggling_body(with_decl: bool) -> str:
+    """A feed whose IssueSymbol comes from an entity, if a parser ever expands it."""
+    body = feed([item("TSLA", "LUDP")]).decode("utf-8")
+    body = body.split("?>", 1)[1]  # drop the utf-8 declaration
+    assert "<ndaq:IssueSymbol>TSLA</ndaq:IssueSymbol>" in body
+    body = body.replace("<ndaq:IssueSymbol>TSLA</ndaq:IssueSymbol>",
+                        "<ndaq:IssueSymbol>&x;</ndaq:IssueSymbol>")
+    doctype = "<!DOCTYPE rss [<!ENTITY x 'NVDA'>]>"
+    decl = '<?xml version="1.0" encoding="utf-16"?>' if with_decl else ""
+    return decl + doctype + body
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("utf8_bom", [False, True], ids=["no-bom", "utf8-bom"])
+@pytest.mark.parametrize("with_decl", [False, True], ids=["no-decl", "decl"])
+def test_blocked_a_bomless_utf16_body_cannot_smuggle_a_doctype(codec, utf8_bom, with_decl):
+    """BOM-fix review: UTF-16 without its own BOM is ASCII + NULs, valid UTF-8; the parser
+    must still refuse it and never return the entity-substituted symbol."""
+    raw = _smuggling_body(with_decl).encode(codec)
+    if utf8_bom:
+        raw = b"\xef\xbb\xbf" + raw
+    out = parse_halt_feed(raw)
+    assert out["ok"] is False, out
+    assert "NVDA" not in str(out)
+    assert out["reason"] == "halt feed contains NUL bytes (UTF-8 required)"
+
+
+def test_blocked_a_nul_byte_in_an_otherwise_utf8_feed():
+    raw = feed([item("TSLA", "LUDP")]).replace(b"TSLA", b"TS\x00LA", 1)
+    assert parse_halt_feed(raw)["reason"] == "halt feed contains NUL bytes (UTF-8 required)"
+
+
 def test_a_leading_utf8_bom_is_stripped_and_the_feed_parses():
     """The live feed starts with EF BB BF; that must not make every halt check UNKNOWN."""
     body = b"\xef\xbb\xbf" + feed([item("TSLA", "LUDP")])
