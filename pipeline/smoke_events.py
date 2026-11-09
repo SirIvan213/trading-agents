@@ -102,9 +102,17 @@ def plan_lines(symbols: list[str]) -> list[str]:
     ]
 
 
+def _content_type_line(cal: dict) -> list[str]:
+    """The reply's Content-Type as the server labelled it (#172), when the source records it."""
+    if "content_type" not in cal:
+        return []
+    ctype = cal.get("content_type")
+    return [f"  Content-Type: {ctype!r}" if ctype is not None else "  Content-Type: none sent"]
+
+
 def _calendar_lines(cal: dict, name: str = "FMP") -> list[str]:
     if cal.get("ok") is not True:
-        return [f"{name} calendar: NOT OK: {cal.get('reason')}"]
+        return [f"{name} calendar: NOT OK: {cal.get('reason')}", *_content_type_line(cal)]
     rows = cal.get("rows") or []
     per_day = Counter(r.get("date") for r in rows)
     days = sorted(per_day)
@@ -113,7 +121,7 @@ def _calendar_lines(cal: dict, name: str = "FMP") -> list[str]:
             f"{MIN_CALENDAR_TRADING_DAYS} trading days); {cal.get('total_rows')} rows in the "
             f"reply, {cal.get('rows_after_end')} after the range")
     out = [f"{name} calendar: ok; fetched {cal.get('fetched_at')}; range {cal.get('from')}.."
-           f"{cal.get('to')}; {size}"]
+           f"{cal.get('to')}; {size}", *_content_type_line(cal)]
     if cal.get("columns") is not None:
         out.append(f"  columns: {str(cal.get('columns'))[:200]}")
         out.append(f"  rows sorted by reportDate: {cal.get('sorted_by_date')} (if False, only "

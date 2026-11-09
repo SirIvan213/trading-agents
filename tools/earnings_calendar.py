@@ -143,8 +143,12 @@ def parse_fmp_calendar(reply: object, fetched_at: datetime, start: date, end: da
 # Alpha Vantage (primary, #167)
 # --------------------------------------------------------------------------------------
 
-def fetch_av_earnings_calendar(opener: Callable | None = None) -> str:
+def fetch_av_earnings_calendar(opener: Callable | None = None,
+                               meta: dict | None = None) -> str:
     """Fetch Alpha Vantage's whole-market earnings calendar (3-month horizon) as CSV text.
+    Sends Accept: */* because the server answers Accept: text/csv with HTTP 406 (#172 live
+    check); the body is validated as CSV by parse_av_calendar whatever it is labelled. With
+    `meta`, the reply's Content-Type is stored in meta["content_type"].
     Raises RuntimeError on a missing key, a transport error, an HTTP error status, an
     oversized body and a body that is not UTF-8. One leading UTF-8 byte-order mark is
     stripped. Error and rate-limit messages come back as JSON with HTTP 200; the parser
@@ -155,8 +159,8 @@ def fetch_av_earnings_calendar(opener: Callable | None = None) -> str:
         raise RuntimeError("ALPHA_VANTAGE_API_KEY must be set in the environment")
     query = urllib.parse.urlencode({"function": "EARNINGS_CALENDAR", "horizon": AV_HORIZON,
                                     "apikey": key})
-    body = get_bytes(f"{AV_URL}?{query}", {"Accept": "text/csv"}, opener=opener,
-                     max_bytes=AV_MAX_BYTES)
+    body = get_bytes(f"{AV_URL}?{query}", {"Accept": "*/*"}, opener=opener,
+                     max_bytes=AV_MAX_BYTES, meta=meta)
     if len(body) > AV_MAX_BYTES:
         raise RuntimeError("Alpha Vantage earnings calendar reply is too large")
     raw = bytes(body)
@@ -166,6 +170,15 @@ def fetch_av_earnings_calendar(opener: Callable | None = None) -> str:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         raise RuntimeError("Alpha Vantage earnings calendar reply is not UTF-8") from None
+
+
+def fetch_av_earnings_calendar_typed(
+    opener: Callable | None = None,
+) -> tuple[str, str | None]:
+    """fetch_av_earnings_calendar(...) and the reply's Content-Type (None when absent)."""
+    meta: dict = {}
+    text = fetch_av_earnings_calendar(opener, meta=meta)
+    return text, meta.get("content_type")
 
 
 def parse_av_calendar(reply: object, fetched_at: datetime, start: date, end: date) -> dict:
