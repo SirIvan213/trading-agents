@@ -50,8 +50,10 @@ def get_bytes(
     opener: Callable | None = None,
     timeout: float = 10,
     max_bytes: int | None = None,
+    meta: dict | None = None,
 ) -> bytes:
-    """GET `url` and return the raw body bytes.
+    """GET `url` and return the raw body bytes. With `meta`, the response's Content-Type
+    header (or None) is stored in meta["content_type"], cut to 100 characters.
 
     `opener` defaults to an OpenerDirector that refuses redirects, built at call time; it is
     called as opener(request, timeout=timeout) and must return a context manager
@@ -83,6 +85,8 @@ def get_bytes(
                 raise RuntimeError(f"response came from a different origin (requested {path})")
             raw = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
             length = _content_length(resp)
+            if meta is not None:
+                meta["content_type"] = _header(resp, "Content-Type")
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             raise RuntimeError(f"redirect refused (HTTP {exc.code}) from {path}") from None
@@ -104,6 +108,13 @@ def get_bytes(
     if length is not None and len(body) < length and (max_bytes is None or len(body) <= max_bytes):
         raise RuntimeError(f"incomplete response from {path} ({len(body)} of {length} bytes)")
     return body
+
+
+def _header(resp: object, name: str) -> str | None:
+    """A response header's value cut to 100 characters, or None when absent."""
+    getter = getattr(getattr(resp, "headers", None), "get", None)
+    value = getter(name) if callable(getter) else None
+    return value[:100] if isinstance(value, str) else None
 
 
 def _content_length(resp: object) -> int | None:

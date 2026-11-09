@@ -30,7 +30,7 @@ from typing import Any
 
 from pipeline.market import NY
 from tools.earnings_calendar import (
-    fetch_av_earnings_calendar,
+    fetch_av_earnings_calendar_typed,
     fetch_fmp_earnings_calendar,
     parse_av_calendar,
     parse_fmp_calendar,
@@ -93,6 +93,7 @@ class _DailyCalendarCache:
         self._lock = threading.Lock()
         self._failed: tuple[datetime, date, dict | BaseException] | None = None
         self._good: dict | None = None
+        self._extra: dict = {}  # extra record fields from the latest _fetch (under the lock)
 
     def _path(self, today: date) -> Path:
         return self.cache_dir / f"{self.prefix}-{today.isoformat()}.json"
@@ -131,6 +132,7 @@ class _DailyCalendarCache:
                 if isinstance(outcome, BaseException):
                     raise RuntimeError(_failure(outcome))
                 return outcome
+            self._extra: dict = {}
             try:
                 reply = self._fetch(start, end)
             except Exception as exc:
@@ -138,7 +140,8 @@ class _DailyCalendarCache:
                 # masked like a served failure: no caller can leak a key from the fetch error
                 raise RuntimeError(_failure(exc)) from None
             record = {"fetched_at": now.astimezone(NY).isoformat(),
-                      "from": start.isoformat(), "to": end.isoformat(), "reply": reply}
+                      "from": start.isoformat(), "to": end.isoformat(), "reply": reply,
+                      **self._extra}
             # Only a reply that validates is cached: a bad one would hold UNKNOWN all day.
             if not self._valid(reply, now, start, end):
                 self._failed = (now, start, record)
@@ -186,12 +189,19 @@ class AvCalendarCache(_DailyCalendarCache):
     remember = True
 
     def __init__(self, cache_dir: Path = CACHE_DIR,
-                 fetch: Callable[[], str] = fetch_av_earnings_calendar,
+                 fetch: Callable[[], object] = fetch_av_earnings_calendar_typed,
                  clock: Callable[[], datetime] | None = None) -> None:
         super().__init__(cache_dir, fetch, clock)
 
     def _fetch(self, start: date, end: date) -> object:
-        return self.fetch()
+        """The CSV text. A fetch that returns (text, content_type) also records the reply's
+        Content-Type in the cache record (#172: smoke_events prints it)."""
+        out = self.fetch()
+        if isinstance(out, tuple) and len(out) == 2:
+            text, ctype = out
+            self._extra = {"content_type": ctype if isinstance(ctype, str) else None}
+            return text
+        return out
 
     def _valid(self, reply: object, now: datetime, start: date, end: date) -> bool:
         return parse_av_calendar(reply, now, start, end).get("ok") is True
@@ -217,6 +227,9 @@ def _read_calendar(data: Any, method: str, source: str, today: date,
     if result.get("ok") is not True:
         # parse reasons quote a few characters of server text: mask keys like _failure does
         result = {"ok": False, "source": source, "reason": _mask(str(result.get("reason")))}
+    if isinstance(raw, dict) and "content_type" in raw:
+        ctype = raw["content_type"]
+        result["content_type"] = _mask(ctype[:100]) if isinstance(ctype, str) else None
     return result
 
 
