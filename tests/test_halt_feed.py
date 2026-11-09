@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +28,7 @@ from tools.halt_feed import (
 from tools.http import get_bytes, get_json
 
 PUB = datetime(2026, 11, 3, 10, 59, tzinfo=NY)
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 URL = "https://feed.example.test/rss.aspx?feed=tradehalts&k=SECRET-QUERY"
 
 
@@ -505,9 +507,102 @@ def test_blocked_a_utf16_body_cannot_smuggle_a_doctype_past_the_check():
     assert parse_halt_feed(text.encode("utf-16"))["ok"] is False
 
 
-def test_blocked_a_bom_or_a_non_utf8_declaration():
-    assert parse_halt_feed(b"\xef\xbb\xbf" + feed([]))["reason"] == (
-        "halt feed has a byte-order mark (UTF-8 required)")
+def _smuggling_body(with_decl: bool) -> str:
+    """A feed whose IssueSymbol comes from an entity, if a parser ever expands it."""
+    body = feed([item("TSLA", "LUDP")]).decode("utf-8")
+    body = body.split("?>", 1)[1]  # drop the utf-8 declaration
+    assert "<ndaq:IssueSymbol>TSLA</ndaq:IssueSymbol>" in body
+    body = body.replace("<ndaq:IssueSymbol>TSLA</ndaq:IssueSymbol>",
+                        "<ndaq:IssueSymbol>&x;</ndaq:IssueSymbol>")
+    doctype = "<!DOCTYPE rss [<!ENTITY x 'NVDA'>]>"
+    decl = '<?xml version="1.0" encoding="utf-16"?>' if with_decl else ""
+    return decl + doctype + body
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("utf8_bom", [False, True], ids=["no-bom", "utf8-bom"])
+@pytest.mark.parametrize("with_decl", [False, True], ids=["no-decl", "decl"])
+def test_blocked_a_bomless_utf16_body_cannot_smuggle_a_doctype(codec, utf8_bom, with_decl):
+    """BOM-fix review: UTF-16 without its own BOM is ASCII + NULs, valid UTF-8; the parser
+    must still refuse it and never return the entity-substituted symbol."""
+    raw = _smuggling_body(with_decl).encode(codec)
+    if utf8_bom:
+        raw = b"\xef\xbb\xbf" + raw
+    out = parse_halt_feed(raw)
+    assert out["ok"] is False, out
+    assert "NVDA" not in str(out)
+    assert out["reason"] == "halt feed contains NUL bytes (UTF-8 required)"
+
+
+@pytest.mark.parametrize("decl", ['encoding = "latin-1"', "encoding\t=\t'utf-16'",
+                                  'encoding ="cp037"', 'encoding = "utf-7"'])
+def test_blocked_a_spaced_non_utf8_encoding_declaration(decl):
+    raw = feed([]).replace(b'encoding="utf-8"', decl.encode("ascii"))
+    assert parse_halt_feed(raw)["reason"] == "halt feed declares a non-UTF-8 encoding"
+
+
+def test_the_parser_reads_the_checked_text_as_utf8():
+    """Pins the second half of the UTF-16 fix: parse the decoded str, not the raw bytes, so a
+    declaration can never change how the bytes are read."""
+    import tools.halt_feed as hf
+    seen = []
+    real = hf.ET.fromstring
+
+    def spy(data):
+        seen.append(type(data))
+        return real(data)
+
+    import unittest.mock as mock
+    with mock.patch.object(hf.ET, "fromstring", spy):
+        assert parse_halt_feed(feed([item("TSLA", "LUDP")]))["ok"] is True
+    assert seen == [str]
+
+
+def test_blocked_a_nul_byte_in_an_otherwise_utf8_feed():
+    raw = feed([item("TSLA", "LUDP")]).replace(b"TSLA", b"TS\x00LA", 1)
+    assert parse_halt_feed(raw)["reason"] == "halt feed contains NUL bytes (UTF-8 required)"
+
+
+def test_a_leading_utf8_bom_is_stripped_and_the_feed_parses():
+    """The live feed starts with EF BB BF; that must not make every halt check UNKNOWN."""
+    body = b"\xef\xbb\xbf" + feed([item("TSLA", "LUDP")])
+    assert body.startswith(b"\xef\xbb\xbf")
+    out = parse_halt_feed(body)
+    assert out["ok"] is True, out
+    assert out == parse_halt_feed(feed([item("TSLA", "LUDP")]))
+    assert [i["symbol"] for i in out["items"]] == ["TSLA"]
+
+
+def test_the_utf8_bom_fixture_passes():
+    fixture = FIXTURES / "nasdaq" / "halts_utf8_bom.xml"
+    raw = fixture.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf")
+    out = parse_halt_feed(raw)
+    assert out["ok"] is True, out
+    assert [(i["symbol"], i["reason"]) for i in out["items"]] == [("VNTR", "LUDP")]
+
+
+@pytest.mark.parametrize("bom", [b"\xff\xfe", b"\xfe\xff", b"\xff\xfe\x00\x00",
+                                 b"\x00\x00\xfe\xff"],
+                         ids=["utf16-le", "utf16-be", "utf32-le", "utf32-be"])
+def test_blocked_a_utf16_or_utf32_bom(bom):
+    assert parse_halt_feed(bom + feed([]))["reason"] == (
+        "halt feed has a UTF-16 or UTF-32 byte-order mark (UTF-8 required)")
+
+
+def test_blocked_two_utf8_boms():
+    assert parse_halt_feed(b"\xef\xbb\xbf\xef\xbb\xbf" + feed([]))["reason"] == (
+        "halt feed has more than one byte-order mark")
+
+
+def test_blocked_a_utf8_bom_does_not_open_the_doctype_or_encoding_checks():
+    doctype = b"\xef\xbb\xbf" + feed([]).replace(b"<rss ", b"<!DOCTYPE rss><rss ")
+    assert parse_halt_feed(doctype)["reason"] == "halt feed declares a DOCTYPE or entities"
+    latin = b"\xef\xbb\xbf" + feed([]).replace(b'encoding="utf-8"', b'encoding="iso-8859-1"')
+    assert parse_halt_feed(latin)["reason"] == "halt feed declares a non-UTF-8 encoding"
+
+
+def test_blocked_a_non_utf8_declaration():
     latin = feed([]).replace(b'encoding="utf-8"', b'encoding="iso-8859-1"')
     assert parse_halt_feed(latin)["reason"] == "halt feed declares a non-UTF-8 encoding"
 
