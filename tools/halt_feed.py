@@ -112,7 +112,7 @@ def parse_halt_feed(body: object) -> dict:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return {"ok": False, "reason": "halt feed is not UTF-8"}
-    decl = re.match(r"\s*<\?xml[^>]*encoding=[\"']([^\"']+)[\"']", text)
+    decl = re.match(r"\s*<\?xml[^>]*encoding\s*=\s*[\"']([^\"']+)[\"']", text)
     if decl and decl.group(1).strip().lower() not in ("utf-8", "utf8"):
         return {"ok": False, "reason": "halt feed declares a non-UTF-8 encoding"}
     upper = text.upper()

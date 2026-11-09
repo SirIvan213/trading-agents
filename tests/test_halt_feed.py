@@ -534,6 +534,30 @@ def test_blocked_a_bomless_utf16_body_cannot_smuggle_a_doctype(codec, utf8_bom, 
     assert out["reason"] == "halt feed contains NUL bytes (UTF-8 required)"
 
 
+@pytest.mark.parametrize("decl", ['encoding = "latin-1"', "encoding\t=\t'utf-16'",
+                                  'encoding ="cp037"', 'encoding = "utf-7"'])
+def test_blocked_a_spaced_non_utf8_encoding_declaration(decl):
+    raw = feed([]).replace(b'encoding="utf-8"', decl.encode("ascii"))
+    assert parse_halt_feed(raw)["reason"] == "halt feed declares a non-UTF-8 encoding"
+
+
+def test_the_parser_reads_the_checked_text_as_utf8():
+    """Pins the second half of the UTF-16 fix: parse the decoded str, not the raw bytes, so a
+    declaration can never change how the bytes are read."""
+    import tools.halt_feed as hf
+    seen = []
+    real = hf.ET.fromstring
+
+    def spy(data):
+        seen.append(type(data))
+        return real(data)
+
+    import unittest.mock as mock
+    with mock.patch.object(hf.ET, "fromstring", spy):
+        assert parse_halt_feed(feed([item("TSLA", "LUDP")]))["ok"] is True
+    assert seen == [str]
+
+
 def test_blocked_a_nul_byte_in_an_otherwise_utf8_feed():
     raw = feed([item("TSLA", "LUDP")]).replace(b"TSLA", b"TS\x00LA", 1)
     assert parse_halt_feed(raw)["reason"] == "halt feed contains NUL bytes (UTF-8 required)"
