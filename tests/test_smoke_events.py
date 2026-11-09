@@ -12,6 +12,7 @@ from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (aut
 from tools.halt_feed import HALT_FEED_URL
 
 SENTINELS = {
+    "ALPHA_VANTAGE_API_KEY": "SENTINEL-AV-KEY-000",
     "FMP_API_KEY": "SENTINEL-FMP-KEY-111",
     "ALPACA_API_KEY": "SENTINEL-ALPACA-ID-222",
     "ALPACA_SECRET_KEY": "SENTINEL-ALPACA-SECRET-333",
@@ -46,8 +47,10 @@ def test_dry_run_prints_the_plan_requests_nothing_and_exits_3(monkeypatch, capsy
     assert "== smoke_events: dry plan only, NOTHING was requested ==" in out
     assert "symbols: AAPL, TSLA" in out
     assert HALT_FEED_URL in out and "FMP earnings calendar" in out and "SEC EDGAR" in out
+    assert "Alpha Vantage earnings calendar (primary)" in out
     assert "Alpaca news" in out
-    assert "No Claude call, no order, no decision-journal write (only the FMP cache file)." in out
+    assert ("No Claude call, no order, no decision-journal write (only the two calendar cache "
+            "files).") in out
     assert "--live" in out
     for k in SENTINELS:
         assert f"{k} set" in out

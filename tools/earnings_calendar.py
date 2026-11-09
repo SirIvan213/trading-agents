@@ -1,6 +1,21 @@
-"""Earnings calendar from Financial Modeling Prep (issues #13, #112).
+"""Earnings calendars: Alpha Vantage (primary, #167) and Financial Modeling Prep (#13, #112).
 
-One range call per day: GET /stable/earnings-calendar?from=&to=&includeReportTimes=true&apikey=
+Alpha Vantage (`fetch_av_earnings_calendar`, `parse_av_calendar`) is the event gate's primary
+calendar: with no symbol, its EARNINGS_CALENDAR endpoint returns "the full list of company
+earnings scheduled" for a horizon of 3, 6 or 12 months, as CSV
+(https://www.alphavantage.co/documentation/). We ask for 3 months, the shortest. The columns
+are not documented officially; a third-party guide shows
+symbol,name,reportDate,fiscalDateEnding,estimate,currency. Only `symbol` and `reportDate` are
+required here. No report time or confirmed flag is documented, so every Alpha Vantage date is
+treated as ESTIMATED (the gate blocks within 3 trading days of it). The key comes from
+ALPHA_VANTAGE_API_KEY. Free keys allow 25 calls a day; the terms license personal,
+non-commercial use, which includes "investment analysis, research, testing, monitoring" that
+is "private and individual in nature" (Terms of Service, section 2.a).
+
+FMP, below, is now a block-only secondary signal (#145): the free tier returned 3 rows for a
+week of earnings season (#167), which proves nothing.
+
+FMP: one range call per day: GET /stable/earnings-calendar?from=&to=&includeReportTimes=true&apikey=
 returns a JSON list with one row per company report, e.g.
 
     {"symbol": "JW-B", "date": "2026-09-04", "time": "bmo", "confirmed": false,
@@ -18,13 +33,15 @@ This module only fetches and validates; tools.event_gate decides.
 """
 from __future__ import annotations
 
+import csv
+import io
 import os
 import re
 import urllib.parse
 from collections.abc import Callable
 from datetime import date, datetime
 
-from tools.http import get_json
+from tools.http import get_bytes, get_json
 
 FMP_EARNINGS_URL = "https://financialmodelingprep.com/stable/earnings-calendar"
 REPORT_TIMES = frozenset({"bmo", "amc"})
@@ -32,6 +49,11 @@ REPORT_TIMES = frozenset({"bmo", "amc"})
 # short, so it is not proof that a symbol is absent.
 FMP_ROW_CAP = 4000
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+AV_URL = "https://www.alphavantage.co/query"
+AV_HORIZON = "3month"  # the shortest the endpoint offers; covers [today, today + 7] easily
+AV_MAX_BYTES = 8_000_000  # three months of the whole market is far smaller
+AV_REQUIRED_COLUMNS = ("symbol", "reportDate")
 
 
 def fetch_fmp_earnings_calendar(
@@ -113,5 +135,128 @@ def parse_fmp_calendar(reply: object, fetched_at: datetime, start: date, end: da
             "time": row["time"],
             "confirmed": row.get("confirmed") is True,
         })
-    return {"ok": True, "fetched_at": fetched_at.isoformat(), "from": start.isoformat(),
-            "to": end.isoformat(), "rows": rows}
+    return {"ok": True, "source": "fmp", "fetched_at": fetched_at.isoformat(),
+            "from": start.isoformat(), "to": end.isoformat(), "rows": rows}
+
+
+# --------------------------------------------------------------------------------------
+# Alpha Vantage (primary, #167)
+# --------------------------------------------------------------------------------------
+
+def fetch_av_earnings_calendar(opener: Callable | None = None) -> str:
+    """Fetch Alpha Vantage's whole-market earnings calendar (3-month horizon) as CSV text.
+    Raises RuntimeError on a missing key, a transport error, an HTTP error status, an
+    oversized body and a body that is not UTF-8. One leading UTF-8 byte-order mark is
+    stripped. Error and rate-limit messages come back as JSON with HTTP 200; the parser
+    refuses them. The first live call needs Ivan's approval (CLAUDE.md rule 6): never call
+    it from tests."""
+    key = (os.environ.get("ALPHA_VANTAGE_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("ALPHA_VANTAGE_API_KEY must be set in the environment")
+    query = urllib.parse.urlencode({"function": "EARNINGS_CALENDAR", "horizon": AV_HORIZON,
+                                    "apikey": key})
+    body = get_bytes(f"{AV_URL}?{query}", {"Accept": "text/csv"}, opener=opener,
+                     max_bytes=AV_MAX_BYTES)
+    if len(body) > AV_MAX_BYTES:
+        raise RuntimeError("Alpha Vantage earnings calendar reply is too large")
+    raw = bytes(body)
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RuntimeError("Alpha Vantage earnings calendar reply is not UTF-8") from None
+
+
+def parse_av_calendar(reply: object, fetched_at: datetime, start: date, end: date) -> dict:
+    """Validate an Alpha Vantage CSV reply and keep the reports dated in [start, end].
+
+    Returns {"ok": True, "source": "alphavantage", "fetched_at", "from", "to", "rows",
+    "columns", "total_rows", "rows_after_end", "sorted_by_date"} with rows {"symbol", "date",
+    "time": None, "confirmed": False} (no report time or confirmed flag is documented, so
+    every date is an estimate), or {"ok": False, "reason"}.
+
+    Strict, because a reply that is partly wrong cannot prove a symbol clear. Not ok: a
+    body that is not text, is empty or holds a NUL byte; a JSON body (Alpha Vantage's error and
+    rate-limit messages, never echoed: they are server text); a header without `symbol` or
+    `reportDate`, or with a repeated column; ANY row with the wrong number of fields, no
+    symbol or no valid YYYY-MM-DD date; a body that does not end with a line break (cut
+    short); a row dated BEFORE `start` (the data may be stale);
+    no row in [start, end]; and no row after `end` (a 3-month calendar always lists reports
+    beyond the next week, so a reply without any may be cut short). Rows after `end` are
+    counted, then dropped. Plausibility (enough rows, enough trading days) is the gate's
+    check (tools.event_gate)."""
+    if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
+        return {"ok": False, "reason": "earnings calendar fetch time is not timezone-aware"}
+    if not isinstance(reply, str):
+        return {"ok": False, "reason": "Alpha Vantage earnings calendar reply is not text"}
+    if "\x00" in reply:
+        return {"ok": False, "reason": "Alpha Vantage earnings calendar reply holds NUL bytes"}
+    text = reply.removeprefix("\ufeff").strip()
+    if not text:
+        return {"ok": False, "reason": "Alpha Vantage earnings calendar reply is empty"}
+    if not reply.endswith("\n") and text[0] not in "{[":
+        # A cut-short CSV can still parse (a cut at a row boundary, or inside the last
+        # field); the reply must end with its final line break (#167 review).
+        return {"ok": False, "reason": (
+            "Alpha Vantage earnings calendar reply does not end with a line break: it may be "
+            "cut short")}
+    if text[0] in "{[":
+        return {"ok": False, "reason": (
+            "Alpha Vantage returned a message instead of the calendar (rate limit, key or "
+            "plan problem)")}
+    try:
+        records = list(csv.reader(io.StringIO(text), strict=True))
+    except csv.Error:
+        return {"ok": False, "reason": "Alpha Vantage earnings calendar reply is not valid CSV"}
+    header = [h.strip() for h in records[0]]
+    if len(set(header)) != len(header):
+        return {"ok": False, "reason": "Alpha Vantage earnings calendar header repeats a column"}
+    for col in AV_REQUIRED_COLUMNS:
+        if col not in header:
+            return {"ok": False, "reason": (
+                f"Alpha Vantage earnings calendar header has no {col} column")}
+    i_sym, i_day = header.index("symbol"), header.index("reportDate")
+    rows: list[dict] = []
+    total = after = 0
+    previous: date | None = None
+    sorted_by_date = True
+    for n, rec in enumerate(records[1:], start=2):
+        if not rec:
+            continue  # a blank line
+        total += 1
+        bad = f"Alpha Vantage earnings calendar reply is malformed: line {n}"
+        if len(rec) != len(header):
+            return {"ok": False, "reason": (
+                f"{bad} has {len(rec)} fields, the header has {len(header)}")}
+        sym, day = rec[i_sym].strip(), rec[i_day].strip()
+        if not sym:
+            return {"ok": False, "reason": f"{bad} has no symbol"}
+        try:
+            if not _DATE.fullmatch(day):
+                raise ValueError
+            when = date.fromisoformat(day)
+        except ValueError:
+            return {"ok": False, "reason": f"{bad} ({sym[:16]!r}) has no valid report date"}
+        if previous is not None and when < previous:
+            sorted_by_date = False
+        previous = when
+        if when < start:
+            return {"ok": False, "reason": (
+                f"Alpha Vantage earnings calendar lists {sym[:16]!r} on {day}, before "
+                f"{start}: the data may be stale")}
+        if when > end:
+            after += 1
+            continue
+        rows.append({"symbol": sym.upper(), "date": day, "time": None, "confirmed": False})
+    if not rows:
+        return {"ok": False, "reason": (
+            f"Alpha Vantage earnings calendar lists no reports in {start}..{end}")}
+    if not after:
+        return {"ok": False, "reason": (
+            f"Alpha Vantage earnings calendar lists no reports after {end}: it may be cut "
+            "short")}
+    return {"ok": True, "source": "alphavantage", "fetched_at": fetched_at.isoformat(),
+            "from": start.isoformat(), "to": end.isoformat(), "rows": rows,
+            "columns": header, "total_rows": total, "rows_after_end": after,
+            "sorted_by_date": sorted_by_date}

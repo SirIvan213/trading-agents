@@ -5,6 +5,7 @@ only the URL path, never the query string.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -66,6 +67,11 @@ def get_bytes(
     request headers (the Alpaca key headers, the SEC user agent). Only set them to a proxy
     you trust. An injected `opener` bypasses this. With `max_bytes`, at most max_bytes + 1 bytes are
     read, so a caller can refuse an oversized body without holding all of it in memory.
+
+    A body shorter than the response's Content-Length is refused ("incomplete response"):
+    http.client's read(n) returns a cut-short body silently when the connection drops, and a
+    cut CSV can still parse (#167 review). A chunked reply that ends early (IncompleteRead) is
+    refused the same way.
     """
     open_fn = opener or _default_open
     path = _path(url)
@@ -76,6 +82,7 @@ def get_bytes(
             if isinstance(final, str) and _origin(final) != _origin(url):
                 raise RuntimeError(f"response came from a different origin (requested {path})")
             raw = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
+            length = _content_length(resp)
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             raise RuntimeError(f"redirect refused (HTTP {exc.code}) from {path}") from None
@@ -89,7 +96,24 @@ def get_bytes(
         raise RuntimeError(f"network error for {path}: {type(reason).__name__}") from None
     except OSError as exc:
         raise RuntimeError(f"network error for {path}: {type(exc).__name__}") from None
-    return raw if isinstance(raw, (bytes, bytearray)) else str(raw).encode("utf-8")
+    except http.client.HTTPException:  # IncompleteRead and friends: not an OSError
+        raise RuntimeError(f"incomplete response from {path}") from None
+    body = raw if isinstance(raw, (bytes, bytearray)) else str(raw).encode("utf-8")
+    # A body shorter than announced was cut in transit. (A longer read can only happen with
+    # max_bytes, where the caller refuses the oversized body itself.)
+    if length is not None and len(body) < length and (max_bytes is None or len(body) <= max_bytes):
+        raise RuntimeError(f"incomplete response from {path} ({len(body)} of {length} bytes)")
+    return body
+
+
+def _content_length(resp: object) -> int | None:
+    """The response's Content-Length as an int, or None when absent or unreadable."""
+    headers = getattr(resp, "headers", None)
+    getter = getattr(headers, "get", None)
+    value = getter("Content-Length") if callable(getter) else None
+    if not isinstance(value, str) or not value.strip().isdigit():
+        return None
+    return int(value.strip())
 
 
 def get_json(

@@ -273,9 +273,15 @@ def test_blocked_a_hand_forged_or_broken_calendar_input_is_unknown(calendar):
 
 
 def test_blocked_a_failed_calendar_keeps_its_reason():
-    gate, v = run(calendar={"ok": False, "reason": "HTTP 429 from /stable/earnings-calendar"})
+    gate, v = run(calendar={"ok": False, "source": "alphavantage",
+                            "reason": "HTTP 429 from /query"})
     assert_blocked(gate, v, "UNKNOWN",
-        "UNKNOWN (fmp): earnings source unavailable: HTTP 429 from /stable/earnings-calendar")
+        "UNKNOWN (alphavantage): earnings source unavailable: HTTP 429 from /query")
+
+
+def test_blocked_a_failed_calendar_without_a_source_is_labelled_calendar():
+    gate, v = run(calendar={"ok": False, "reason": "x"})
+    assert_blocked(gate, v, "UNKNOWN", "UNKNOWN (calendar): earnings source unavailable: x")
 
 
 # ============================ SEC: an empty calendar proves nothing ============================
@@ -484,8 +490,9 @@ def test_a_secondary_that_returns_nothing_leaves_clear(out):
 
 
 def test_a_secondary_that_returns_nothing_cannot_clear_an_unknown():
-    gate, v = run(calendar={"ok": False, "reason": "x"}, secondary=(("av", lambda *a: []),))
-    assert_blocked(gate, v, "UNKNOWN", "UNKNOWN (fmp)")
+    gate, v = run(calendar={"ok": False, "source": "alphavantage", "reason": "x"},
+                  secondary=(("av", lambda *a: []),))
+    assert_blocked(gate, v, "UNKNOWN", "UNKNOWN (alphavantage)")
 
 
 def test_blocked_a_secondary_that_returns_a_reason_adds_an_event():
@@ -502,11 +509,11 @@ def test_blocked_a_custom_secondary_appended_to_the_default_tuple_works():
 
     gate, v = run(secondary=(*SECONDARY_EARNINGS_SIGNALS, ("alphavantage", cross_check)))
     assert_blocked(gate, v, "EVENT", "EVENT (alphavantage): cross-check says earnings tomorrow")
-    assert seen == [("TSLA", ["calendar", "filings", "news"])]
+    assert seen == [("TSLA", ["calendar", "filings", "fmp_calendar", "news"])]
 
 
 def test_the_default_tuple_is_unchanged_by_a_custom_one():
-    assert [n for n, _ in SECONDARY_EARNINGS_SIGNALS] == ["news"]
+    assert [n for n, _ in SECONDARY_EARNINGS_SIGNALS] == ["news", "fmp"]
 
 
 def test_an_empty_secondary_tuple_removes_the_news_cross_check_only():

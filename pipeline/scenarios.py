@@ -3,12 +3,14 @@
 Each scenario lives in tests/fixtures/scenarios/<name>/scenario.json:
     {"name", "symbol", "description",
      "files": {"bars", "snapshot", "news", "submissions", "companyfacts",
-               "earnings_calendar", "halts"},  # relative paths; earnings_calendar = an
-                                                # FMP reply list, halts = the Nasdaq feed XML
+               "earnings_calendar", "av_earnings_calendar", "halts"},
+               # relative paths; earnings_calendar = an FMP reply list,
+               # av_earnings_calendar = an Alpha Vantage CSV, halts = the Nasdaq feed XML
      "expected": {"action": "BUY" | "PASS" | null, "fatal_bear": true | false | null, "why"}}
 File paths are relative to the scenario folder and must stay inside tests/fixtures/.
 `ScenarioData` serves them through the same methods the live data classes have (bars,
-snapshots, news, submissions, company_facts, earnings_calendar); it makes no network calls.
+snapshots, news, submissions, company_facts, earnings_calendar, av_earnings_calendar,
+halt_feed); it makes no network calls.
 
 The expected outcome is a label for humans reading the smoke output. It never feeds an
 agent, a prompt, sizing or the risk check.
@@ -28,10 +30,11 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
 SCENARIOS_DIR = FIXTURES / "scenarios"
 FILE_KEYS = ("bars", "snapshot", "news", "submissions", "companyfacts", "earnings_calendar",
-             "halts")
-TEXT_KEYS = frozenset({"halts"})  # raw files (the halt feed is XML), not JSON
+             "av_earnings_calendar", "halts")
+# raw files, not JSON: the halt feed is XML, the Alpha Vantage calendar CSV
+TEXT_KEYS = frozenset({"halts", "av_earnings_calendar"})
 HALT_FEED_LAG = timedelta(seconds=30)  # the scenario's feed fetch, just before its clock
-CALENDAR_FETCH_TIME = time(8, 30)  # the scenario day's once-a-day FMP fetch, before the open
+CALENDAR_FETCH_TIME = time(8, 30)  # the scenario day's once-a-day calendar fetches, pre-open
 DEFAULT = "tsla"
 
 
@@ -102,6 +105,7 @@ class ScenarioData:
         self._news, self._subs = load["news"], load["submissions"]
         self._facts = load["companyfacts"]
         self._calendar = load["earnings_calendar"]
+        self._av_calendar = load["av_earnings_calendar"].decode("utf-8")
         self._halts = load["halts"]
 
     def bars(self, symbol: str, start: datetime, end: datetime) -> dict:
@@ -133,6 +137,13 @@ class ScenarioData:
         rows = [r for r in self._calendar
                 if isinstance(r, dict) and lo <= str(r.get("date", "")) <= hi]
         return {"fetched_at": fetched.isoformat(), "from": lo, "to": hi, "reply": rows}
+
+    def av_earnings_calendar(self, start: date, end: date) -> dict:
+        """The saved (synthetic) Alpha Vantage CSV, as LiveData returns it: fetched at 08:30 ET
+        on the scenario day. The whole file is the reply (Alpha Vantage returns 3 months)."""
+        fetched = datetime.combine(self.as_of().date(), CALENDAR_FETCH_TIME, tzinfo=NY)
+        return {"fetched_at": fetched.isoformat(), "from": start.isoformat(),
+                "to": end.isoformat(), "reply": self._av_calendar}
 
     def halt_feed(self) -> dict:
         """The saved (synthetic) Nasdaq halt feed, as LiveData returns it: fetched 30 s before

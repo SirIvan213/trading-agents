@@ -49,8 +49,8 @@ def test_blocked_an_empty_reply_is_not_proof_that_nobody_reports():
     assert cal == {"ok": False, "reason": "earnings calendar reply is empty"}
     gate = gate_for("TSLA", NOW, calendar=cal)
     assert gate["status"] == "UNKNOWN"
-    assert "UNKNOWN (fmp): earnings source unavailable: earnings calendar reply is empty" \
-        in gate["reason"]
+    assert "UNKNOWN (calendar): earnings source unavailable: earnings calendar reply is " \
+        "empty" in gate["reason"]
 
 
 def test_blocked_a_reply_at_the_row_cap_may_be_cut_short():

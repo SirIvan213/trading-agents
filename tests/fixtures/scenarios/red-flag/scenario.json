@@ -9,6 +9,7 @@
   "submissions": "submissions.json",
   "companyfacts": "companyfacts.json",
   "earnings_calendar": "earnings_calendar.json",
+  "av_earnings_calendar": "av_earnings_calendar.csv",
   "halts": "halts.xml"
  },
  "expected": {

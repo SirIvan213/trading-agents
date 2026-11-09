@@ -18,11 +18,18 @@ from agents.sentiment_tools import SentimentSession
 from journal.log import APPROVED, Journal
 from pipeline.data import LiveData
 from pipeline.decide import run_decision
-from pipeline.events import FmpCalendarCache, events_from
+from pipeline.events import AvCalendarCache, FmpCalendarCache, events_from
 from pipeline.order_flow import approve, propose, render_ticket
 from pipeline.scenarios import ScenarioData, load_scenario
 from tests.debate_helpers import reply
-from tests.fakes import NOON, FakeAllData, FakeClient, background_rows, fresh_halt_feed
+from tests.fakes import (
+    NOON,
+    FakeAllData,
+    FakeClient,
+    av_csv,
+    background_rows,
+    fresh_halt_feed,
+)
 from tests.order_helpers import (
     NY,
     T0,
@@ -280,11 +287,12 @@ def test_blocked_an_event_proposal_keeps_its_distinct_reason(journal):
 
 
 def test_blocked_an_unknown_proposal_keeps_its_distinct_reason(journal):
-    ev = events_of(calendar={"ok": False, "reason": "HTTP 429 from /stable/earnings-calendar"})
+    ev = events_of(calendar={"ok": False, "source": "alphavantage",
+                             "reason": "HTTP 429 from /query"})
     p = propose_with(journal, ev)
     assert p.ok is False and p.stage == "risk" and p.gate["status"] == "UNKNOWN"
     assert p.reason.startswith(
-        "event gate UNKNOWN: UNKNOWN (fmp): earnings source unavailable: HTTP 429")
+        "event gate UNKNOWN: UNKNOWN (alphavantage): earnings source unavailable: HTTP 429")
     assert "EVENT (" not in p.reason
 
 
@@ -494,15 +502,17 @@ def test_live_data_earnings_calendar_goes_through_the_cache(tmp_path):
 
 
 def test_blocked_live_data_with_a_failing_fetch_gives_an_unknown_gate(tmp_path):
-    fetch = Fetch(RuntimeError("request to /stable/earnings-calendar timed out"))
-    data = LiveData(calendar_cache=cache_with(tmp_path, fetch))
+    def fetch():
+        raise RuntimeError("request to /query timed out")
     now = datetime(2026, 11, 9, 10, 30, tzinfo=NY)
-    shim = SimpleNamespace(earnings_calendar=data.earnings_calendar,
+    data = LiveData(av_cache=AvCalendarCache(tmp_path, fetch, lambda: now))
+    shim = SimpleNamespace(av_earnings_calendar=data.av_earnings_calendar,
                            submissions=lambda s: None,
                            news=lambda syms, a, b: {"news": [], "next_page_token": None})
     gate = events_from(shim)("TSLA", now, now.replace(hour=15, minute=55))
     assert gate["status"] == "UNKNOWN"
-    why = "earnings source unavailable: request to /stable/earnings-calendar timed out"
+    why = ("UNKNOWN (alphavantage): earnings source unavailable: request to /query timed "
+           "out")
     assert why in gate["reason"]
     assert verdict_for(gate, now)["verdict"] == "BLOCK"
 
@@ -512,6 +522,9 @@ def test_blocked_live_data_with_a_failing_fetch_gives_an_unknown_gate(tmp_path):
 def data_for(now, **over):
     """A data object that is clear unless a part is replaced."""
     d = dict(
+        av_earnings_calendar=lambda s, e: {
+            "fetched_at": (now - timedelta(minutes=1)).isoformat(), "from": s.isoformat(),
+            "to": e.isoformat(), "reply": av_csv(start=s, end=e)},
         earnings_calendar=lambda s, e: {"fetched_at": (now - timedelta(minutes=1)).isoformat(),
                                         "from": s.isoformat(), "to": e.isoformat(),
                                         "reply": background_rows(s, e)},
@@ -565,7 +578,17 @@ def test_blocked_a_data_object_without_an_earnings_calendar_is_unknown():
     data = SimpleNamespace(submissions=lambda s: None, news=lambda a, b, c: {"news": []})
     gate = events_from(data)("TSLA", NOW9, WINDOW9)
     assert gate["status"] == "UNKNOWN"
-    assert "UNKNOWN (fmp): earnings source unavailable:" in gate["reason"]
+    assert ("UNKNOWN (alphavantage): earnings source unavailable: no av_earnings_calendar "
+            "source") in gate["reason"]
+
+
+def test_blocked_a_data_object_with_only_the_fmp_calendar_is_unknown():
+    """FMP alone can never prove CLEAR (#167): without Alpha Vantage the gate is UNKNOWN."""
+    data = data_for(NOW9)
+    del data.av_earnings_calendar
+    gate = events_from(data)("TSLA", NOW9, WINDOW9)
+    assert gate["status"] == "UNKNOWN"
+    assert "UNKNOWN (alphavantage)" in gate["reason"]
 
 
 @pytest.mark.parametrize("raw", [None, {}, {"fetched_at": "x", "from": "2026-11-09",
@@ -576,8 +599,18 @@ def test_blocked_a_data_object_without_an_earnings_calendar_is_unknown():
                                   "to": "2026-11-23", "reply": []}],
                          ids=["none", "empty", "bad-time", "bad-dates", "naive-time"])
 def test_blocked_a_broken_cache_record_is_unknown(raw):
-    gate = events_from(data_for(NOW9, earnings_calendar=lambda s, e: raw))("TSLA", NOW9, WINDOW9)
+    data = data_for(NOW9, av_earnings_calendar=lambda s, e: raw)
+    gate = events_from(data)("TSLA", NOW9, WINDOW9)
     assert gate["status"] == "UNKNOWN"
+    assert "UNKNOWN (alphavantage): earnings source unavailable:" in gate["reason"]
+
+
+@pytest.mark.parametrize("raw", [None, {}, {"fetched_at": "x", "from": "2026-11-09",
+                                           "to": "2026-11-23", "reply": []}],
+                         ids=["none", "empty", "bad-time"])
+def test_a_broken_fmp_cache_record_never_blocks_on_its_own(raw):
+    gate = events_from(data_for(NOW9, earnings_calendar=lambda s, e: raw))("TSLA", NOW9, WINDOW9)
+    assert gate["status"] == "CLEAR", gate["reason"]
 
 
 def test_blocked_a_halt_in_the_data_news_is_an_event_through_events_from():
@@ -606,8 +639,10 @@ def test_get_news_red_flag_shows_an_earnings_event_and_the_scheduled_catalyst():
     out, _ = s.execute("get_news", {"symbol": data.symbol})
     cal = out["earnings_calendar"]
     assert cal["status"] == "EVENT"
-    assert ("EVENT (fmp): earnings today 2026-11-03 (no report time given, confirmed)"
-            in cal["reason"])
+    assert ("EVENT (alphavantage): earnings today 2026-11-03 (no report time given, "
+            "estimated)" in cal["reason"])
+    assert ("EVENT (fmp): FMP calendar: earnings today 2026-11-03 (no report time given, "
+            "confirmed)" in cal["reason"])
     assert "earnings_scheduled" in out["catalysts"]
     assert out["catalysts"] == sorted(out["catalysts"])
 
@@ -632,14 +667,22 @@ def test_get_news_with_a_data_object_without_earnings_calendar_is_unknown_and_st
 
 
 def test_get_news_with_a_failing_calendar_is_unknown_and_still_works():
-    fake = FakeAllData(calendar_raises=RuntimeError("HTTP 429 from /stable/earnings-calendar"))
+    fake = FakeAllData(av_raises=RuntimeError("HTTP 429 from /query"))
     out, _ = SentimentSession("ABCD", NOON, fake).execute("get_news", {"symbol": "ABCD"})
     cal = out["earnings_calendar"]
     assert cal["status"] != "CLEAR"  # (the fixture's item 2.02 filed today is a SEC EVENT too)
     assert "earnings_scheduled" not in out["catalysts"]
-    why = "UNKNOWN (fmp): earnings source unavailable: HTTP 429 from /stable/earnings-calendar"
+    why = "UNKNOWN (alphavantage): earnings source unavailable: HTTP 429 from /query"
     assert why in cal["reason"]
     assert out["headlines"]  # the digest itself is intact
+
+
+def test_get_news_with_only_a_failing_fmp_calendar_adds_no_unknown():
+    fake = FakeAllData(calendar_raises=RuntimeError("HTTP 429 from /stable/earnings-calendar"))
+    out, _ = SentimentSession("ABCD", NOON, fake).execute("get_news", {"symbol": "ABCD"})
+    cal = out["earnings_calendar"]
+    assert "(fmp)" not in cal["reason"] and "(alphavantage)" not in cal["reason"]
+    assert out["headlines"]
 
 
 def test_get_news_with_a_failing_filings_source_still_reports_the_calendar():
@@ -717,7 +760,9 @@ def test_blocked_red_flag_every_model_says_buy_and_the_gate_still_refuses(monkey
     p = result.proposal
     assert p.ok is False and p.stage == "risk"
     assert "event gate EVENT:" in p.reason
-    assert "EVENT (fmp): earnings today 2026-11-03" in p.reason
+    assert ("EVENT (alphavantage): earnings today 2026-11-03 (no report time given, "
+            "estimated)") in p.reason
+    assert "EVENT (fmp): FMP calendar: earnings today 2026-11-03" in p.reason
     assert "EVENT (news): trading halt today: 'Ventara shares halted for volatility" in p.reason
     assert "earnings headline in the news" in p.reason
     assert "UNKNOWN (sec): no 8-K item 2.02 in the last 100 days" in p.reason
@@ -752,7 +797,7 @@ def test_clean_buy_with_the_same_fakes_gets_a_sized_ticket_and_a_clear_gate(monk
     assert p.ok, p.reason
     assert p.gate["status"] == "CLEAR" and p.verdict == {"verdict": "PASS", "reasons": []}
     assert p.order["symbol"] == "BRKO" and p.order["qty"] == SHARES["clean-buy"]
-    assert ("Event gate: CLEAR (no earnings through 2026-11-10 (FMP); "
+    assert ("Event gate: CLEAR (no earnings through 2026-11-10 (Alpha Vantage); "
             "last 8-K item 2.02 filed 2026-10-29") in result.ticket
     assert result.outcome.status == APPROVED and len(asked) == 1
     (entry,) = raw_lines(journal)
@@ -762,14 +807,24 @@ def test_clean_buy_with_the_same_fakes_gets_a_sized_ticket_and_a_clear_gate(monk
 def test_blocked_clean_buy_turns_into_a_refusal_when_the_calendar_fetch_fails(monkeypatch,
     tmp_path):
     scenario = load_scenario("clean-buy")
-    monkeypatch.setattr(ScenarioData, "earnings_calendar", lambda self, s, e: (_ for _ in ()).throw(
-        RuntimeError("HTTP 429 from /stable/earnings-calendar")))
+    monkeypatch.setattr(ScenarioData, "av_earnings_calendar",
+                        lambda self, s, e: (_ for _ in ()).throw(
+                            RuntimeError("HTTP 503 from /query")))
     result, journal, asked, _ = run_scenario(monkeypatch, tmp_path, "clean-buy")
     assert scenario.symbol == "BRKO"
     assert result.proposal.ok is False and result.proposal.gate["status"] == "UNKNOWN"
-    assert ("event gate UNKNOWN: UNKNOWN (fmp): earnings source unavailable: HTTP 429"
-            in result.proposal.reason)
+    assert ("event gate UNKNOWN: UNKNOWN (alphavantage): earnings source unavailable: "
+            "HTTP 503 from /query" in result.proposal.reason)
     assert result.outcome.status == "no_order" and asked == []
+
+
+def test_clean_buy_is_still_clear_when_only_the_fmp_fetch_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(ScenarioData, "earnings_calendar", lambda self, s, e: (_ for _ in ()).throw(
+        RuntimeError("HTTP 429 from /stable/earnings-calendar")))
+    result, journal, asked, _ = run_scenario(monkeypatch, tmp_path, "clean-buy")
+    assert result.proposal.ok, result.proposal.reason
+    assert result.proposal.gate["status"] == "CLEAR"
+    assert result.outcome.status == APPROVED and len(asked) == 1
 
 
 def test_blocked_clean_buy_with_a_halt_headline_added_is_refused(monkeypatch, tmp_path):
