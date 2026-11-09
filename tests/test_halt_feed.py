@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +28,7 @@ from tools.halt_feed import (
 from tools.http import get_bytes, get_json
 
 PUB = datetime(2026, 11, 3, 10, 59, tzinfo=NY)
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 URL = "https://feed.example.test/rss.aspx?feed=tradehalts&k=SECRET-QUERY"
 
 
@@ -505,9 +507,46 @@ def test_blocked_a_utf16_body_cannot_smuggle_a_doctype_past_the_check():
     assert parse_halt_feed(text.encode("utf-16"))["ok"] is False
 
 
-def test_blocked_a_bom_or_a_non_utf8_declaration():
-    assert parse_halt_feed(b"\xef\xbb\xbf" + feed([]))["reason"] == (
-        "halt feed has a byte-order mark (UTF-8 required)")
+def test_a_leading_utf8_bom_is_stripped_and_the_feed_parses():
+    """The live feed starts with EF BB BF; that must not make every halt check UNKNOWN."""
+    body = b"\xef\xbb\xbf" + feed([item("TSLA", "LUDP")])
+    assert body.startswith(b"\xef\xbb\xbf")
+    out = parse_halt_feed(body)
+    assert out["ok"] is True, out
+    assert out == parse_halt_feed(feed([item("TSLA", "LUDP")]))
+    assert [i["symbol"] for i in out["items"]] == ["TSLA"]
+
+
+def test_the_utf8_bom_fixture_passes():
+    fixture = FIXTURES / "nasdaq" / "halts_utf8_bom.xml"
+    raw = fixture.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf")
+    out = parse_halt_feed(raw)
+    assert out["ok"] is True, out
+    assert [(i["symbol"], i["reason"]) for i in out["items"]] == [("VNTR", "LUDP")]
+
+
+@pytest.mark.parametrize("bom", [b"\xff\xfe", b"\xfe\xff", b"\xff\xfe\x00\x00",
+                                 b"\x00\x00\xfe\xff"],
+                         ids=["utf16-le", "utf16-be", "utf32-le", "utf32-be"])
+def test_blocked_a_utf16_or_utf32_bom(bom):
+    assert parse_halt_feed(bom + feed([]))["reason"] == (
+        "halt feed has a UTF-16 or UTF-32 byte-order mark (UTF-8 required)")
+
+
+def test_blocked_two_utf8_boms():
+    assert parse_halt_feed(b"\xef\xbb\xbf\xef\xbb\xbf" + feed([]))["reason"] == (
+        "halt feed has more than one byte-order mark")
+
+
+def test_blocked_a_utf8_bom_does_not_open_the_doctype_or_encoding_checks():
+    doctype = b"\xef\xbb\xbf" + feed([]).replace(b"<rss ", b"<!DOCTYPE rss><rss ")
+    assert parse_halt_feed(doctype)["reason"] == "halt feed declares a DOCTYPE or entities"
+    latin = b"\xef\xbb\xbf" + feed([]).replace(b'encoding="utf-8"', b'encoding="iso-8859-1"')
+    assert parse_halt_feed(latin)["reason"] == "halt feed declares a non-UTF-8 encoding"
+
+
+def test_blocked_a_non_utf8_declaration():
     latin = feed([]).replace(b'encoding="utf-8"', b'encoding="iso-8859-1"')
     assert parse_halt_feed(latin)["reason"] == "halt feed declares a non-UTF-8 encoding"
 
