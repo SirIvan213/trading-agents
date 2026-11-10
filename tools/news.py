@@ -463,3 +463,157 @@ def digest(
             "filings": len(filing_list),
         },
     }
+
+
+# --------------------------------------------------------------------------
+# Earnings-report headlines for the event gate's news signal (#169)
+# --------------------------------------------------------------------------
+# The digest's "earnings" flag (HEADLINE_KEYWORDS) matches the bare word anywhere, which suits
+# the analyst's context but over-blocks as a gate signal: "Dow Jumps Over 600 Points;
+# Constellation Energy Posts Upbeat Earnings" is tagged with many symbols. The gate counts a
+# headline only when ONE clause of it names the company (or its ticker) AND a report-event
+# phrase. Clauses are split on ";" and "|", which roundups use to join separate stories.
+
+# Corporate words dropped from the END of a company name before matching ("Apple Inc." ->
+# "apple", "OneMain Holdings, Inc." -> "onemain"). They are only stripped as trailing words,
+# so a name that starts with one ("New York Times") keeps it.
+_NAME_SUFFIXES = frozenset({
+    "inc", "incorporated", "corp", "corporation", "co", "company", "companies", "ltd",
+    "limited", "plc", "llc", "lp", "llp", "sa", "nv", "ag", "se", "as", "asa", "ab", "spa",
+    "holdings", "holding", "group", "the", "class", "a", "b", "c", "common", "stock",
+    "ordinary", "shares", "adr", "ads", "new", "de", "del",
+})
+# A one-word short form (the first word of a longer name) must not be one of these: "General
+# Motors" must not match "general", nor "First Solar" match "first".
+_COMMON_FIRST_WORDS = frozenset({
+    "american", "first", "general", "united", "national", "international", "global", "new",
+    "north", "south", "east", "west", "western", "eastern", "central", "pacific", "atlantic",
+    "energy", "financial", "bank", "capital", "health", "healthcare", "technology",
+    "technologies", "digital", "data", "power", "home", "real", "royal", "standard", "smart",
+    "applied", "advanced", "public", "service", "services", "trust", "life", "great", "blue",
+    "green", "red", "black", "white", "gold", "golden", "silver", "star", "sun", "solar",
+    "community", "citizens", "peoples", "federal", "state", "us", "usa", "world", "big",
+})
+_TOKEN = re.compile(r"[A-Za-z0-9]+")
+_APOSTROPHES = re.compile(r"['’](?=[A-Za-z])")  # "McDonald's" -> "McDonalds"
+
+# Report-event phrases: a scheduled or released quarterly report, not the bare word.
+_W = r"(?:[\w$.,'’&-]+\s+)"  # one word and its trailing space (bounded repeats below)
+_QUARTER = (r"(?:q[1-4]|(?:first|second|third|fourth)[\s-]+quarter|quarterly|fiscal"
+            r"(?:[\s-]+year)?|fy\s?\d{2,4}|full[\s-]+year)")
+# "results" of a report, not of a trial, vote or probe ("Positive Results From Phase 3 Trial",
+# "results of shareholder vote")
+_RESULTS = r"results(?!\s+(?:from|of|in)\b)"
+_REPORT_EVENT = re.compile(
+    r"(?<![a-z0-9])(?:"
+    # "to report third-quarter earnings", "will announce results"
+    r"(?:to|will)\s+(?:report|announce|release|post)\s+" + _W + r"{0,6}?(?:earnings|eps|"
+    + _RESULTS + ")"
+    # "reports Q3 results", "reported fourth quarter earnings"
+    + r"|report(?:s|ed)?\s+" + _W + r"{0,6}?(?:earnings|eps|" + _RESULTS + ")"
+    # "announces third quarter 2026 financial results", "announced results for the quarter"
+    + r"|announce(?:s|d)?\s+" + _W + r"{0,6}?" + _RESULTS
+    # "posts upbeat earnings", "posted record quarterly profit" (not "loss": price moves)
+    + r"|post(?:s|ed)?\s+" + _W + r"{0,5}?(?:earnings|results|profit|eps)"
+    # "Q3 earnings", "third-quarter results", "fiscal year 2026 results"
+    r"|" + _QUARTER + r"\s+" + _W + r"{0,2}?(?:earnings|results|eps|profit)"
+    # "earnings call", "earnings release", "earnings report", "earnings beat"
+    r"|earnings\s+(?:call|calls|release|releases|report|reports|date|preview|beat|beats"
+    r"|miss|misses|surprise|lag|lags|top|tops)"
+    # "falls after earnings", "ahead of its Q3 earnings" (not "after earnings season", and not
+    # "on earnings optimism": "on" is left out)
+    r"|(?:after|ahead\s+of)\s+(?:its\s+)?(?:" + _QUARTER + r"\s+)?earnings"
+    r"(?!\s+(?:season|week|optimism|hopes|growth|power|fears|worries|momentum)\b)"
+    # "results due", "earnings due"
+    r"|(?:results|earnings)\s+due"
+    r"|(?:conference|investor)\s+call\s+to\s+discuss\s+" + _W + r"{0,4}?results"
+    # "beats estimates", "misses analyst expectations", "tops the $1.60 estimate"
+    r"|(?:beat|beats|beating|miss|misses|missed|missing|top|tops|topped|topping|exceed|exceeds"
+    r"|exceeded|lag|lags|lagged|surpass|surpasses|surpassed)\s+" + _W + r"{0,4}?"
+    r"(?:estimates?|expectations|forecasts?|consensus|views)"
+    r")(?![a-z0-9])",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT = re.compile(r"[;|]")
+_EXCHANGE_MARK = r"(?:NASDAQ|NYSE(?:\s+AMERICAN)?|NYSEAMERICAN|AMEX)\s*:\s*"
+
+
+def _words(text: str) -> list[str]:
+    return [w.lower() for w in _TOKEN.findall(text.replace("&", " and "))]
+
+
+def name_forms(name: object) -> list[tuple[str, ...]]:
+    """Word sequences that name the company in a headline: the name without trailing
+    corporate words, and its first word alone when that word is distinctive (4+ letters, not
+    a common word). [] for a name with nothing left. "&" reads as "and"; apostrophes are
+    dropped ("MCDONALD'S" and "MCDONALDS" give the same form)."""
+    if not isinstance(name, str):
+        return []
+    words = _words(_APOSTROPHES.sub("", name))
+    while words and words[-1] in _NAME_SUFFIXES:
+        words.pop()
+    if words and words[0] == "the":
+        words = words[1:]
+    if not words:
+        return []
+    forms = [tuple(words)]
+    if len(words) > 1 and len(words[0]) >= 4 and words[0] not in _COMMON_FIRST_WORDS:
+        forms.append((words[0],))
+    return forms
+
+
+# Linking words that stay lower case inside a name ("Bank of America", "Bank of New York").
+_LINK_WORDS = frozenset({"of", "the", "and", "de", "du", "la", "for", "in", "at", "on"})
+
+
+def _capitalised_tokens(clause: str) -> list[tuple[str, bool]]:
+    """(lower-case word, written as a name) for each word of the clause: a word with any
+    upper-case letter ("Apple", "eBay", "iRobot", "AT"), a number, or a linking word."""
+    out = []
+    for tok in _TOKEN.findall(clause.replace("&", " and ")):
+        low = tok.lower()
+        out.append((low, tok != low or tok[0].isdigit() or low in _LINK_WORDS))
+    return out
+
+
+def _names_company(clause: str, forms: list[tuple[str, ...]], tickers: set[str]) -> bool:
+    # The name must be written as a name (capitalised): "lower target ahead of ..." is not
+    # Target. Matched with and without apostrophes ("McDonald's" and "McDonalds").
+    for variant in {clause, _APOSTROPHES.sub("", clause)}:
+        toks = _capitalised_tokens(variant)
+        for form in forms:
+            n = len(form)
+            for i in range(len(toks) - n + 1):
+                window = toks[i:i + n]
+                if tuple(w for w, _ in window) == form and all(c for _, c in window):
+                    return True
+    for t in tickers:
+        # Case-sensitive, as a whole token. A ticker of 1-2 letters ("ON", "T") must carry a
+        # ticker marker ($ON, (ON), NASDAQ: ON) so a capitalised word never counts.
+        bare = re.escape(t)
+        marked = rf"(?:\$|\(|(?i:{_EXCHANGE_MARK})){bare}(?![A-Za-z0-9])"
+        if re.search(marked, clause):
+            return True
+        if len(t) >= 3 and re.search(rf"(?<![A-Za-z0-9$.]){bare}(?![A-Za-z0-9])", clause):
+            return True
+    return False
+
+
+def earnings_event_headline(headline: object, tickers: object, names: object) -> bool:
+    """True when ONE clause of `headline` names the company (a form of one of `names`, written
+    capitalised, or one of `tickers` as a ticker) AND a report-event phrase ("to report ...
+    earnings", "reports Q3 results", "announces ... results", "earnings call", "beats
+    estimates", ...). The bare word "earnings" is not enough, and neither is another
+    company's report in the same roundup (#169)."""
+    if not isinstance(headline, str) or not headline.strip():
+        return False
+    forms = [f for n in (names if isinstance(names, (list, tuple, set)) else [])
+             for f in name_forms(n)]
+    syms = {t.strip().upper() for t in (tickers if isinstance(tickers, (list, tuple, set))
+                                        else []) if isinstance(t, str) and t.strip()}
+    syms |= {s.replace(".", "-") for s in syms if "." in s} | {
+        s.replace("-", ".") for s in syms if "-" in s}
+    for clause in _CLAUSE_SPLIT.split(headline):
+        if _REPORT_EVENT.search(clause) and _names_company(clause, forms, syms):
+            return True
+    return False

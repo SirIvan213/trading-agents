@@ -13,7 +13,8 @@ requests:
     days] (billed on FMP's side; FMP_API_KEY), then cached on disk for the New York day;
   - Nasdaq Trader trade-halt feed: ONE fetch (free, no key; never more than once a minute);
   - per symbol: SEC EDGAR submissions (SEC_USER_AGENT; the CIK map once), Alpaca news for
-    the last 24 hours and the Alpaca asset (its listing exchange, #168) (ALPACA_API_KEY /
+    the last 24 hours (or back to the previous session's close if earlier, #169) and the
+    Alpaca asset (its listing exchange, #168) (ALPACA_API_KEY /
     ALPACA_SECRET_KEY).
 No Claude call, no order, no decision-journal write (the two calendar caches in
 journal/cache/ are the only files written). Only Ivan runs it with --live (CLAUDE.md rule 6).
@@ -96,7 +97,8 @@ def plan_lines(symbols: list[str]) -> list[str]:
         f"Nasdaq trade-halt feed: 1 fetch of {HALT_FEED_URL} (free; at most once a minute)",
         f"SEC EDGAR: the ticker->CIK map once, then 1 submissions call per symbol "
         f"({len(symbols)})",
-        f"Alpaca news: 1 call (or more pages) per symbol for the last 24 hours ({len(symbols)})",
+        f"Alpaca news: 1 call (or more pages) per symbol for the last 24 hours, or back to the "
+        f"previous session's close if earlier ({len(symbols)})",
         f"Alpaca assets (listing exchange, #168): 1 call per symbol ({len(symbols)})",
         f"keys: {keys}",
         "No Claude call, no order, no decision-journal write (only the two calendar cache "

@@ -433,8 +433,9 @@ def test_blocked_news_only_earnings_headline_is_an_event_when_sources_disagree()
     assert gate["halt"]["status"] == "CLEAR"
 
 
-def test_an_earnings_headline_older_than_24_hours_is_ignored():
-    item = news_item("TSLA", "Tesla earnings beat", NOW - timedelta(hours=30))
+def test_an_earnings_headline_before_the_previous_session_close_is_ignored():
+    """NOW is Monday 10:30: the window opens at Friday's 16:00 close (#169)."""
+    item = news_item("TSLA", "Tesla earnings beat", datetime(2026, 11, 6, 15, 0, tzinfo=NY))
     assert_clear(*run(news=news_ok([item])))
 
 

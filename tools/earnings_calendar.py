@@ -185,9 +185,11 @@ def parse_av_calendar(reply: object, fetched_at: datetime, start: date, end: dat
     """Validate an Alpha Vantage CSV reply and keep the reports dated in [start, end].
 
     Returns {"ok": True, "source": "alphavantage", "fetched_at", "from", "to", "rows",
-    "columns", "total_rows", "rows_after_end", "sorted_by_date"} with rows {"symbol", "date",
-    "time": None, "confirmed": False} (no report time or confirmed flag is documented, so
-    every date is an estimate), or {"ok": False, "reason"}.
+    "columns", "total_rows", "rows_after_end", "sorted_by_date", "names"} with rows {"symbol",
+    "date", "time": None, "confirmed": False} (no report time or confirmed flag is documented,
+    so every date is an estimate), or {"ok": False, "reason"}. `names` maps each listed symbol
+    (in range or not) to its company name from the `name` column, first one kept, cut to 120
+    characters; {} without that column (#169: the news signal matches names).
 
     Strict, because a reply that is partly wrong cannot prove a symbol clear. Not ok: a
     body that is not text, is empty or holds a NUL byte; a JSON body (Alpha Vantage's error and
@@ -230,6 +232,8 @@ def parse_av_calendar(reply: object, fetched_at: datetime, start: date, end: dat
             return {"ok": False, "reason": (
                 f"Alpha Vantage earnings calendar header has no {col} column")}
     i_sym, i_day = header.index("symbol"), header.index("reportDate")
+    i_name = header.index("name") if "name" in header else None
+    names: dict[str, str] = {}  # symbol -> company name, for the news signal (#169)
     rows: list[dict] = []
     total = after = 0
     previous: date | None = None
@@ -254,6 +258,9 @@ def parse_av_calendar(reply: object, fetched_at: datetime, start: date, end: dat
         if previous is not None and when < previous:
             sorted_by_date = False
         previous = when
+        # every listed company's name, also those reporting after the range (#169)
+        if i_name is not None and rec[i_name].strip():
+            names.setdefault(sym.upper(), rec[i_name].strip()[:120])
         if when < start:
             return {"ok": False, "reason": (
                 f"Alpha Vantage earnings calendar lists {sym[:16]!r} on {day}, before "
@@ -272,4 +279,4 @@ def parse_av_calendar(reply: object, fetched_at: datetime, start: date, end: dat
     return {"ok": True, "source": "alphavantage", "fetched_at": fetched_at.isoformat(),
             "from": start.isoformat(), "to": end.isoformat(), "rows": rows,
             "columns": header, "total_rows": total, "rows_after_end": after,
-            "sorted_by_date": sorted_by_date}
+            "sorted_by_date": sorted_by_date, "names": names}

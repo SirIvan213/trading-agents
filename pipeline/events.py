@@ -36,7 +36,12 @@ from tools.earnings_calendar import (
     parse_av_calendar,
     parse_fmp_calendar,
 )
-from tools.event_gate import CALENDAR_HORIZON_DAYS, NEWS_LOOKBACK_HOURS, event_gate
+from tools.event_gate import (
+    CALENDAR_HORIZON_DAYS,
+    NEWS_LOOKBACK_HOURS,
+    event_gate,
+    previous_session_close,
+)
 from tools.halt_feed import parse_halt_feed
 from tools.listing import parse_asset
 
@@ -281,15 +286,18 @@ def gate_inputs(data: Any, symbol: str, now: datetime, *, calendar: dict | None 
                 halts: dict | None = None, fmp_calendar: dict | None = None) -> dict:
     """The six gate inputs for `symbol` at `now`, each {"ok": True, ...} or {"ok": False,
     "reason"}: calendar (Alpha Vantage), fmp_calendar (FMP, secondary), filings (SEC), news
-    (Alpaca, 24 h), halts (Nasdaq feed) and listing (Alpaca asset, #168). `calendar`,
-    `fmp_calendar` and `halts` may be passed in when shared across symbols (smoke_events)."""
+    (Alpaca, 24 h or back to the previous session's close if earlier), halts (Nasdaq feed)
+    and listing (Alpaca asset, #168). `calendar`, `fmp_calendar` and `halts` may be passed
+    in when shared across symbols (smoke_events)."""
     today = now.astimezone(NY).date()
     try:
         filings: dict = {"ok": True, "submissions": data.submissions(symbol)}
     except Exception as exc:  # noqa: BLE001
         filings = {"ok": False, "reason": _failure(exc)}
     try:
-        start = now - timedelta(hours=NEWS_LOOKBACK_HOURS)
+        # 24 hours, or back to the previous session's close if that is earlier (a weekend):
+        # the earnings news signal looks back that far (#169)
+        start = min(now - timedelta(hours=NEWS_LOOKBACK_HOURS), previous_session_close(now))
         news: dict = {"ok": True, "news": data.news([symbol], start, now)}
     except Exception as exc:  # noqa: BLE001
         news = {"ok": False, "reason": _failure(exc)}
