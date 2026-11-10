@@ -91,7 +91,8 @@ def test_dry_run_with_an_env_file_never_prints_its_values(tmp_path, monkeypatch,
 def test_dry_run_plan_counts_one_call_per_symbol(capsys, no_live_data):
     main(["AAPL", "TSLA", "MSFT", "--no-dotenv"])
     out = capsys.readouterr().out
-    assert "1 submissions call per symbol (3)" in out and "for the last 24 hours (3)" in out
+    assert "1 submissions call per symbol (3)" in out
+    assert "back to the previous session's close if earlier (3)" in out
 
 
 # ============================ bad arguments ============================

@@ -622,11 +622,21 @@ def test_blocked_a_halt_in_the_data_news_is_an_event_through_events_from():
     assert gate["status"] == "EVENT" and "EVENT (news): trading halt today" in gate["reason"]
 
 
-def test_events_from_reads_a_24_hour_news_window_for_the_symbol():
+def test_events_from_reads_news_back_to_the_previous_session_close():
+    """24 hours, or back to the previous regular session's close when that is earlier: NOW9
+    is Monday 10:30, so Friday 16:00 (#169)."""
     seen = []
     data = data_for(NOW9, news=lambda syms, a, b: seen.append((syms, a, b)) or {"news": []})
     events_from(data)("TSLA", NOW9, WINDOW9)
-    assert seen == [(["TSLA"], NOW9 - timedelta(hours=24), NOW9)]
+    assert seen == [(["TSLA"], datetime(2026, 11, 6, 16, 0, tzinfo=NY), NOW9)]
+
+
+def test_events_from_reads_24_hours_of_news_midweek():
+    wed = datetime(2026, 11, 11, 10, 30, tzinfo=NY)
+    seen = []
+    data = data_for(wed, news=lambda syms, a, b: seen.append((syms, a, b)) or {"news": []})
+    events_from(data)("TSLA", wed, wed.replace(hour=15, minute=55))
+    assert seen == [(["TSLA"], wed - timedelta(hours=24), wed)]
 
 
 # ============================ E. get_news: the earnings_calendar field ============================

@@ -19,7 +19,8 @@ Earnings (`earnings_status`):
   EVENT: earnings dated today (any hour, confirmed or estimated, with or without a report
     time); earnings inside the window; an ESTIMATED date within ESTIMATE_TRADING_DAYS
     trading days (dates move); an item 2.02 filed today; or a secondary source's EVENT
-    (an earnings headline in the news digest, or a report on FMP's calendar).
+    (a headline published since the previous session's close in which this company reports
+    or schedules earnings, #169; or a report on FMP's calendar).
   UNKNOWN: calendar transport errors, malformed, stale or sparse replies, a reply that does
     not cover the window; SEC unavailable or malformed; no item 2.02 in the last
     COVERAGE_DAYS days.
@@ -44,7 +45,8 @@ Each finding keeps its own status and source, so EVENT and UNKNOWN reasons stay 
 the ticket and the journal. Inputs are tool output only, never model text (CLAUDE.md rule 2).
 
 Input shapes (each fetched by the caller; a failed fetch is {"ok": False, "reason"}):
-  calendar  tools.earnings_calendar.parse_av_calendar(...) (or parse_fmp_calendar) result
+  calendar  tools.earnings_calendar.parse_av_calendar(...) (or parse_fmp_calendar) result;
+            its "names" (symbol -> company name) also feed the news signal (#169)
   fmp_calendar  tools.earnings_calendar.parse_fmp_calendar(...) result (secondary)
   filings   {"ok": True, "submissions": <EDGAR submissions dict or None>}
   news      {"ok": True, "news": <Alpaca news reply {"news": [...]}>}
@@ -58,7 +60,7 @@ from zoneinfo import ZoneInfo
 from tools.halt_feed import HALT_CODES, resumed_before
 from tools.listing import listing_problem
 from tools.market_calendar import CalendarError, session_hours
-from tools.news import digest, headline_flags, parse_8k_filings
+from tools.news import earnings_event_headline, headline_flags, parse_8k_filings
 
 NY = ZoneInfo("America/New_York")
 CLEAR, EVENT, UNKNOWN = "CLEAR", "EVENT", "UNKNOWN"
@@ -77,6 +79,8 @@ MIN_CALENDAR_TRADING_DAYS = 3
 CALENDAR_SOURCES = {"alphavantage": "Alpha Vantage", "fmp": "FMP"}
 FUTURE_SKEW = timedelta(minutes=5)
 NEWS_LOOKBACK_HOURS = 24
+# The earnings news window where the market calendar has no coverage (#169)
+NEWS_FALLBACK_WINDOW = timedelta(hours=96)
 MAX_HALT_FEED_AGE = timedelta(minutes=3)   # our fetch of the feed (cached for 60 s)
 MAX_HALT_FEED_LAG = timedelta(minutes=10)  # the feed's own pubDate vs our fetch
 
@@ -317,27 +321,86 @@ def _sec_findings(symbol: str, now: datetime,
     return findings, True, last.astimezone(NY).date().isoformat()
 
 
-def _digest(symbol: str, now: datetime, news: object) -> dict | None:
-    """The news digest when the news fetch succeeded and is well formed, else None."""
-    if not isinstance(news, dict) or news.get("ok") is not True:
-        return None
-    reply = news.get("news")
-    if not isinstance(reply, dict) or not isinstance(reply.get("news"), list):
-        return None
-    try:
-        return digest(symbol, reply, [], now, lookback_hours=NEWS_LOOKBACK_HOURS)
-    except ValueError:
-        return None
+def company_names(symbol: str, sources: dict) -> list[str]:
+    """The company's names from tool output: the SEC filer's name and Alpha Vantage's name
+    for the symbol (or a share-class sibling). Never model text. Only exact repeats are
+    dropped: "BERKSHIRE HATHAWAY INC" and "Berkshire Hathaway Inc" are both kept (the same
+    name forms, so harmless)."""
+    names: list[str] = []
+    filings = sources.get("filings")
+    subs = filings.get("submissions") if isinstance(filings, dict) else None
+    if isinstance(subs, dict) and isinstance(subs.get("name"), str):
+        names.append(subs["name"])
+    cal = sources.get("calendar")
+    av_names = cal.get("names") if isinstance(cal, dict) and cal.get("ok") is True else None
+    if isinstance(av_names, dict):
+        for alias in sorted(_aliases(symbol, filings)):
+            name = av_names.get(alias) or av_names.get(alias.replace(".", "-"))
+            if isinstance(name, str) and name not in names:
+                names.append(name)
+    return names
+
+
+def previous_session_close(now: datetime) -> datetime:
+    """The close of the latest regular NYSE session that ended before `now` (16:00 ET, 13:00
+    on an early close). Monday 10:30 -> Friday 16:00; Monday 17:00 -> Monday 16:00. Where the
+    market calendar has no coverage, `now` - NEWS_FALLBACK_WINDOW (a wider window: the news
+    signal only ever adds a block)."""
+    ny_now = now.astimezone(NY)
+    day = ny_now.date()
+    for _ in range(15):  # the longest market closure is far shorter
+        try:
+            hours = session_hours(day)
+        except CalendarError:
+            return now - NEWS_FALLBACK_WINDOW
+        if hours is not None:
+            close = datetime.combine(day, hours[1], tzinfo=NY)
+            if close < ny_now:
+                return close
+        day -= timedelta(days=1)
+    return now - NEWS_FALLBACK_WINDOW
 
 
 def news_earnings_headlines(symbol: str, now: datetime, window_end: datetime,
                             sources: dict) -> list[str]:
-    """Secondary signal: headlines flagged "earnings" in the last 24 hours."""
-    dg = _digest(symbol, now, sources.get("news"))
-    if dg is None:
+    """Secondary signal (#169): a headline published since the previous regular session's
+    close (previous_session_close) in which one clause names this company (its SEC or Alpha
+    Vantage name, or its ticker or a share-class sibling's) AND a report-event phrase
+    (tools.news.earnings_event_headline). So Wednesday evening's "X to report Q3 earnings
+    Thursday" still counts on Thursday, and the morning after an after-close report may be
+    blocked too: acceptable for a block-only signal. The bare word "earnings", a market
+    roundup about another company, or a story from before the last close adds nothing.
+    Block-only: Alpha Vantage's calendar and the SEC item 2.02 check carry the earnings
+    proof; this only adds an EVENT they have not seen yet.
+
+    Scans EVERY raw news item for the symbol, not the de-duplicated digest: the digest keeps a
+    repeated headline's EARLIEST copy, so a story that also ran yesterday would hide today's
+    (the same reason as the halt scan). Items after `now` are ignored."""
+    news = sources.get("news")
+    reply = news.get("news") if isinstance(news, dict) and news.get("ok") is True else None
+    items = reply.get("news") if isinstance(reply, dict) else None
+    if not isinstance(items, list):
         return []  # a secondary source's failure never blocks on its own
-    return [f"earnings headline in the news: {h['headline']!r}"
-            for h in dg["headlines"] if "earnings" in h.get("flags", [])]
+    sym = symbol.strip().upper()
+    since = previous_session_close(now).astimezone(UTC)
+    now_utc = now.astimezone(UTC)
+    tickers = sorted(_aliases(symbol, sources.get("filings")))
+    names = company_names(symbol, sources)
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("symbols"), list):
+            continue
+        if sym not in {str(s).strip().upper() for s in item["symbols"]}:
+            continue
+        headline, when = item.get("headline"), _parse_time(item.get("created_at"))
+        if not isinstance(headline, str) or when is None:
+            continue
+        if not since < when.astimezone(UTC) <= now_utc:
+            continue
+        reason = f"earnings headline in the news: {headline.strip()[:160]!r}"
+        if reason not in out and earnings_event_headline(headline, tickers, names):
+            out.append(reason)
+    return out
 
 
 def fmp_calendar_events(symbol: str, now: datetime, window_end: datetime,

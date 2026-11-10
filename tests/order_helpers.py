@@ -175,13 +175,22 @@ def calendar_ok(now: datetime, rows=(), *, fetched_at: datetime | None = None,
                               start, end)
 
 
+# Real filer names for the common test symbols, so the news signal (#169) can match a headline
+# that names the company ("Tesla to report ...").
+FILER_NAMES = {"TSLA": "Tesla, Inc.", "AAPL": "Apple Inc.", "MSFT": "MICROSOFT CORP",
+               "OMH": "Ohmyhome Ltd", "OMF": "OneMain Holdings, Inc.",
+               "CEG": "Constellation Energy Corp",
+               "TKC": "TURKCELL ILETISIM HIZMETLERI A S", "VNTR": "Ventara Inc."}
+
+
 def submissions_202(now: datetime, days_ago: float = 30, items: str = "2.02,9.01",
                     symbol: str = "TSLA") -> dict:
     """EDGAR submissions with one 8-K carrying `items`, accepted `days_ago` days before `now`."""
     accepted = (now - timedelta(days=days_ago)).astimezone(ZoneInfo("UTC"))
     stamp = accepted.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     return {
-        "cik": "0000012345", "name": f"{symbol} (fixture)", "tickers": [symbol],
+        "cik": "0000012345", "name": FILER_NAMES.get(symbol, f"{symbol} (fixture)"),
+        "tickers": [symbol],
         "filings": {"recent": {
             "accessionNumber": ["0000012345-26-000001"], "filingDate": [stamp[:10]],
             "acceptanceDateTime": [stamp], "form": ["8-K"], "items": [items],
