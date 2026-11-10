@@ -10,7 +10,8 @@
   "companyfacts": "../../sec_companyfacts_tsla.json",
   "earnings_calendar": "../../fmp_earnings_calendar_tsla.json",
   "av_earnings_calendar": "../../av_earnings_calendar_tsla.csv",
-  "halts": "../../nasdaq_halts_tsla.xml"
+  "halts": "../../nasdaq_halts_tsla.xml",
+  "asset": "../../alpaca_asset_tsla.json"
  },
  "expected": {
   "action": null,

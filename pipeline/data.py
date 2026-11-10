@@ -10,6 +10,7 @@ from pipeline.market import NY, ny_today
 from tools.bars import fetch_bars
 from tools.earnings import cik_for_symbol, fetch_company_facts
 from tools.halt_feed import HaltFeedCache
+from tools.listing import fetch_asset, parse_asset
 from tools.news import fetch_cik_map, fetch_news, fetch_submissions
 from tools.scan import fetch_snapshots
 
@@ -83,6 +84,7 @@ class LiveData:
         self._lock = threading.Lock()  # analysts run in threads; fetch the map once
         self._calendar = calendar_cache or FmpCalendarCache()
         self._av_calendar = av_cache or _SHARED_AV_CACHE
+        self._assets: dict[str, dict] = {}  # listing per symbol, for this object's life
         self._halts = halt_cache or _SHARED_HALT_CACHE
 
     def _cik(self, symbol: str) -> str | None:
@@ -108,6 +110,21 @@ class LiveData:
     def company_facts(self, symbol: str) -> dict | None:
         cik = self._cik(symbol)
         return None if cik is None else fetch_company_facts(cik)
+
+    def listing(self, symbol: str) -> dict:
+        """The Alpaca asset for `symbol` (its listing exchange, #168). A reply that parses
+        ok is kept for this object's life (a listing does not change intraday); a failure or
+        a reply that does not parse is not."""
+        sym = symbol.strip().upper()
+        with self._lock:
+            cached = self._assets.get(sym)
+        if cached is not None:
+            return cached
+        asset = fetch_asset(sym)
+        if parse_asset(asset, sym).get("ok") is True:
+            with self._lock:
+                self._assets[sym] = asset
+        return asset
 
     def halt_feed(self) -> dict:
         """The Nasdaq Trader trade-halt feed {"fetched_at", "body"}: fetched at most once a

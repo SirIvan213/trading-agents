@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from pipeline.events import FmpCalendarCache, events_from
-from tests.fakes import av_csv, fresh_halt_feed, load_fixture
+from tests.fakes import asset_reply, av_csv, fresh_halt_feed, load_fixture
 from tests.order_helpers import NY, fmp_row, submissions_202, verdict_for
 from tools.earnings_calendar import fetch_fmp_earnings_calendar, parse_fmp_calendar
 
@@ -171,6 +171,7 @@ def chain(tmp_path, opener):
         earnings_calendar=cache.get,
         submissions=lambda sym: submissions_202(NOW, 30, symbol=sym),
         halt_feed=lambda: fresh_halt_feed(NOW),
+        listing=lambda sym: asset_reply(sym),
         news=lambda syms, s, e: {"news": [], "next_page_token": None})
     return events_from(data)("TSLA", NOW, NOW.replace(hour=15, minute=55))
 

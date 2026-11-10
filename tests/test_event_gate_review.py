@@ -18,6 +18,7 @@ from tests.order_helpers import (
     fmp_row,
     gate_for,
     halts_ok,
+    listing_ok,
     news_item,
     news_ok,
     submissions_202,
@@ -166,7 +167,8 @@ def test_blocked_a_halt_listed_under_another_spelling_of_the_symbol_is_found(lis
 
 def test_production_pause_is_not_a_trading_halt():
     item = news_item("TSLA", "Tesla paused Cybertruck production", NOW - timedelta(hours=1))
-    assert halt_status("TSLA", NOW, news_ok([item]), halts_ok(NOW))["status"] == "CLEAR"
+    assert halt_status("TSLA", NOW, news_ok([item]), halts_ok(NOW),
+                       listing_ok("TSLA"))["status"] == "CLEAR"
 
 
 # ============================ S2: item 2.02 today, whatever its time ============================

@@ -14,6 +14,7 @@ from typing import Any
 
 from agents.schemas import ExitPlanRecord, PlanContext, PlanLabels
 from pipeline.data import MarketData, session_window
+from pipeline.events import listing_input
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY, ny_today, run_scan
 from tools.bars import parse_bars, regular_session, summarize
@@ -387,6 +388,22 @@ def _plan_exit(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     return result, False
 
 
+def _listings(data: Any, syms: list[str]) -> dict[str, dict]:
+    """Each symbol's listing (#168). After a lookup fails for any reason other than an unknown
+    symbol (HTTP 404), the rest are not looked up: a hung or refusing host would otherwise
+    cost a timeout per symbol. Those symbols fail closed ("listing exchange unknown")."""
+    out: dict[str, dict] = {}
+    aborted = False
+    for sym in syms:
+        if aborted:
+            out[sym] = {"ok": False, "reason": "lookup skipped after an earlier failure"}
+            continue
+        out[sym] = listing_input(data, sym)
+        if out[sym].get("fetch_failed") is True:
+            aborted = not str(out[sym].get("reason", "")).startswith("HTTP 404")
+    return out
+
+
 def _scan(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     symbols = inp.get("symbols")
     if not isinstance(symbols, list) or not symbols:
@@ -398,7 +415,8 @@ def _scan(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     except ValueError:
         raise _Refusal("symbols must be valid tickers (letters and dots)") from None
     snaps = s.data.snapshots(syms)
-    return run_scan(snaps, s.criteria, s.limits, s.now), False
+    listings = _listings(s.data, syms)  # #168
+    return run_scan(snaps, s.criteria, s.limits, s.now, listings=listings), False
 
 
 _HANDLERS: dict[str, Callable[[ToolSession, dict], tuple[dict, bool]]] = {

@@ -5,12 +5,13 @@ Each scenario lives in tests/fixtures/scenarios/<name>/scenario.json:
      "files": {"bars", "snapshot", "news", "submissions", "companyfacts",
                "earnings_calendar", "av_earnings_calendar", "halts"},
                # relative paths; earnings_calendar = an FMP reply list,
-               # av_earnings_calendar = an Alpha Vantage CSV, halts = the Nasdaq feed XML
+               # av_earnings_calendar = an Alpha Vantage CSV, halts = the Nasdaq feed XML,
+               # asset = the Alpaca asset (listing exchange, #168)
      "expected": {"action": "BUY" | "PASS" | null, "fatal_bear": true | false | null, "why"}}
 File paths are relative to the scenario folder and must stay inside tests/fixtures/.
 `ScenarioData` serves them through the same methods the live data classes have (bars,
 snapshots, news, submissions, company_facts, earnings_calendar, av_earnings_calendar,
-halt_feed); it makes no network calls.
+halt_feed, listing); it makes no network calls.
 
 The expected outcome is a label for humans reading the smoke output. It never feeds an
 agent, a prompt, sizing or the risk check.
@@ -30,7 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
 SCENARIOS_DIR = FIXTURES / "scenarios"
 FILE_KEYS = ("bars", "snapshot", "news", "submissions", "companyfacts", "earnings_calendar",
-             "av_earnings_calendar", "halts")
+             "av_earnings_calendar", "halts", "asset")
 # raw files, not JSON: the halt feed is XML, the Alpha Vantage calendar CSV
 TEXT_KEYS = frozenset({"halts", "av_earnings_calendar"})
 HALT_FEED_LAG = timedelta(seconds=30)  # the scenario's feed fetch, just before its clock
@@ -107,6 +108,7 @@ class ScenarioData:
         self._calendar = load["earnings_calendar"]
         self._av_calendar = load["av_earnings_calendar"].decode("utf-8")
         self._halts = load["halts"]
+        self._asset = load["asset"]
 
     def bars(self, symbol: str, start: datetime, end: datetime) -> dict:
         if symbol.upper() != self.symbol:
@@ -137,6 +139,13 @@ class ScenarioData:
         rows = [r for r in self._calendar
                 if isinstance(r, dict) and lo <= str(r.get("date", "")) <= hi]
         return {"fetched_at": fetched.isoformat(), "from": lo, "to": hi, "reply": rows}
+
+    def listing(self, symbol: str) -> dict:
+        """The saved Alpaca asset for the scenario symbol, as LiveData returns it. Any other
+        symbol raises, like Alpaca's HTTP 404."""
+        if symbol.strip().upper() != self.symbol:
+            raise RuntimeError(f"HTTP 404 from /v2/assets/{symbol.strip().upper()[:16]}")
+        return self._asset
 
     def av_earnings_calendar(self, start: date, end: date) -> dict:
         """The saved (synthetic) Alpha Vantage CSV, as LiveData returns it: fetched at 08:30 ET

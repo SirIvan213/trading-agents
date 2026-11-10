@@ -35,6 +35,9 @@ Halts (`halt_status`), from two REQUIRED sources (#112, #144):
   - news headlines: a headline flagged "halt" dated today is EVENT; a failed or malformed news
     fetch, or any item that cannot be read, is UNKNOWN ("cannot rule out a halt").
   CLEAR only when BOTH load cleanly and neither shows a halt.
+  The feed's coverage is proven only for Nasdaq, NYSE and NYSE American listings (#168): a
+  symbol whose listing (tools.listing.parse_asset) is missing, failed, or on another venue is
+  UNKNOWN ("listing"), since a halt there might never reach the feed.
 
 `event_gate` combines both: EVENT if any EVENT, CLEAR only if both are CLEAR, else UNKNOWN.
 Each finding keeps its own status and source, so EVENT and UNKNOWN reasons stay distinct in
@@ -53,6 +56,7 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from tools.halt_feed import HALT_CODES, resumed_before
+from tools.listing import listing_problem
 from tools.market_calendar import CalendarError, session_hours
 from tools.news import digest, headline_flags, parse_8k_filings
 
@@ -499,16 +503,23 @@ def _feed_halt_findings(symbol: str, now: datetime, halts: object) -> list[Findi
     return findings
 
 
-def halt_status(symbol: str, now: datetime, news: object, halts: object = None) -> dict:
+def halt_status(symbol: str, now: datetime, news: object, halts: object = None,
+                listing: object = None) -> dict:
     """{"status": CLEAR|EVENT|UNKNOWN, "findings": [...]}. Never raises.
 
     Two required sources: the Nasdaq halt feed (`halts`, #144) and news headlines (`news`).
     EVENT if either shows a halt; CLEAR only when both load cleanly with none; otherwise
-    UNKNOWN. A missing feed result (None) is UNKNOWN, never "no halts"."""
+    UNKNOWN. A missing feed result (None) is UNKNOWN, never "no halts". `listing`
+    (tools.listing.parse_asset result) must prove a Nasdaq, NYSE or NYSE American listing, or
+    the halt check is UNKNOWN (#168); a missing listing (None) is UNKNOWN too."""
     if not _compact(symbol) or not _aware(now):
         return {"status": UNKNOWN, "findings": [_finding(
             "halt", "gate", UNKNOWN, "event gate called without a symbol or now")]}
     findings = _feed_halt_findings(symbol, now, halts) + _news_halt_findings(symbol, now, news)
+    problem = listing_problem(listing, symbol)
+    if problem:
+        findings.append(_finding("halt", "listing", UNKNOWN,
+                                 f"{problem}: cannot rule out a halt"))
     if any(f["status"] == EVENT for f in findings):
         status = EVENT
     elif findings:
@@ -521,6 +532,7 @@ def halt_status(symbol: str, now: datetime, news: object, halts: object = None) 
 def event_gate(
     symbol: str, now: datetime, window_end: datetime, *, calendar: object, filings: object,
     news: object, halts: object = None, fmp_calendar: object = None,
+    listing: object = None,
     secondary: tuple[tuple[str, SecondarySignal], ...] = SECONDARY_EARNINGS_SIGNALS,
 ) -> dict:
     """The combined gate result risk_check requires: {"status", "symbol", "checked_at",
@@ -528,7 +540,7 @@ def event_gate(
     CLEAR only when earnings and halt are both CLEAR, else UNKNOWN. Never raises."""
     earn = earnings_status(symbol, now, window_end, calendar=calendar, filings=filings,
                            news=news, fmp_calendar=fmp_calendar, secondary=secondary)
-    halt = halt_status(symbol, now, news, halts)
+    halt = halt_status(symbol, now, news, halts, listing)
     findings = earn["findings"] + halt["findings"]
     if any(f["status"] == EVENT for f in findings):
         status = EVENT

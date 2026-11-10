@@ -33,13 +33,41 @@ def merged_bars() -> dict:
     return {"bars": items}
 
 
-class FakeMarketData:
+def asset_reply(symbol: str, exchange: str = "NASDAQ", status: str = "active") -> dict:
+    """An Alpaca /v2/assets/{symbol} reply (SYNTHETIC, documented shape; #168)."""
+    return {"id": "00000000-0000-4000-8000-000000000001", "class": "us_equity",
+            "exchange": exchange, "symbol": symbol.strip().upper(),
+            "name": f"{symbol.strip().upper()} Inc. Common Stock", "status": status,
+            "tradable": True, "marginable": True, "shortable": True, "easy_to_borrow": True,
+            "fractionable": True}
+
+
+class ListingFake:
+    """`listing(symbol)` for the fakes (#168): Nasdaq unless `exchanges` names another venue
+    for the symbol; `listing_raises` makes every lookup fail."""
+
+    exchanges: dict[str, str] | None = None
+    listing_raises: Exception | None = None
+
+    def listing(self, symbol: str) -> dict:
+        calls = getattr(self, "calls", None)
+        if isinstance(calls, list):
+            calls.append(("listing", symbol))
+        if self.listing_raises:
+            raise self.listing_raises
+        sym = symbol.strip().upper()
+        return asset_reply(sym, (self.exchanges or {}).get(sym, "NASDAQ"))
+
+
+class FakeMarketData(ListingFake):
     """MarketData over saved fixtures. Records every call. Optionally raises."""
 
-    def __init__(self, raises: Exception | None = None, snapshots: dict | None = None) -> None:
+    def __init__(self, raises: Exception | None = None, snapshots: dict | None = None,
+                 exchanges: dict[str, str] | None = None) -> None:
         self.calls: list[tuple] = []
         self.raises = raises
         self._snaps = snapshots
+        self.exchanges = exchanges
 
     def bars(self, symbol: str, start: datetime, end: datetime) -> dict:
         self.calls.append(("bars", symbol, start, end))
@@ -215,7 +243,7 @@ class HaltFeedFake:
         return fresh_halt_feed(self._halt_now or NOW, self.halt_items)
 
 
-class FakeFilingsData(HaltFeedFake):
+class FakeFilingsData(HaltFeedFake, ListingFake):
     """NewsData + FilingsData over saved fixtures (ABCD, CIK 12345). Records every call."""
 
     def __init__(

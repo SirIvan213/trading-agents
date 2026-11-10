@@ -416,11 +416,14 @@ def test_scan_naive_now_raises():
         scan(snaps(), ScanCriteria(), LIMITS, now=datetime(2026, 11, 3, 14, 41))
 
 
+GAPA_LISTING = {"GAPA": {"ok": True, "symbol": "GAPA", "exchange": "NASDAQ"}}  # #168
+
+
 def test_run_scan_halted_looking_snapshot_rejected_both_reasons():
     """Today's dailyBar, but the last trade and quote are 7 minutes old (a halt)."""
     halted = snaps(trade_t="2026-11-03T14:34:00Z", quote_t="2026-11-03T14:34:00Z")
     now = datetime(2026, 11, 3, 14, 41, tzinfo=UTC)
-    out = market.run_scan(halted, ScanCriteria(), LIMITS, now)
+    out = market.run_scan(halted, ScanCriteria(), LIMITS, now, listings=GAPA_LISTING)
     assert out["candidates"] == []
     assert out["rejected"][0]["reasons"] == [
         "stale trade (420s old, max 120s)", "stale quote (420s old, max 120s)"]
@@ -428,7 +431,7 @@ def test_run_scan_halted_looking_snapshot_rejected_both_reasons():
 
 def test_run_scan_live_snapshot_accepted():
     now = datetime(2026, 11, 3, 14, 41, tzinfo=UTC)
-    out = market.run_scan(snaps(), ScanCriteria(), LIMITS, now)
+    out = market.run_scan(snaps(), ScanCriteria(), LIMITS, now, listings=GAPA_LISTING)
     assert [c["symbol"] for c in out["candidates"]] == ["GAPA"]
 
 

@@ -17,6 +17,7 @@ from pipeline.scenarios import ScenarioData, load_scenario, scenario_names
 from tests.fakes import (
     NOON,
     FakeAllData,
+    asset_reply,
     av_csv,
     background_rows,
     fresh_halt_feed,
@@ -30,6 +31,7 @@ from tests.order_helpers import (
     filings_ok,
     gate_for,
     halts_ok,
+    listing_ok,
     news_item,
     news_ok,
     raw_lines,
@@ -316,7 +318,7 @@ def test_blocked_a_feed_event_beats_a_news_failure():
 
 def test_halt_status_is_feed_findings_then_news_findings():
     h = halt_status("TSLA", T0, news_ok([halt_headline()]),
-                    halts_ok(T0, [hi("TSLA", "T1", halt_date=TODAY)]))
+                    halts_ok(T0, [hi("TSLA", "T1", halt_date=TODAY)]), listing_ok("TSLA"))
     assert h["status"] == "EVENT"
     assert [f["source"] for f in h["findings"]] == ["nasdaq", "news"]
 
@@ -343,7 +345,8 @@ def data_for(now, **over):
                                         "reply": background_rows(s, e)},
         submissions=lambda sym: filings_ok(now, symbol=sym)["submissions"],
         news=lambda syms, a, b: {"news": [], "next_page_token": None},
-        halt_feed=lambda: fresh_halt_feed(now))
+        halt_feed=lambda: fresh_halt_feed(now),
+        listing=lambda sym: asset_reply(sym))
     d.update(over)
     return SimpleNamespace(**d)
 
@@ -441,7 +444,7 @@ def test_gate_inputs_passes_shared_halts_and_calendar_through():
                          fmp_calendar=sentinel_f)
     assert inputs["halts"] is sentinel_h and inputs["calendar"] is sentinel_c
     assert inputs["fmp_calendar"] is sentinel_f and calls == []
-    assert set(inputs) == {"calendar", "fmp_calendar", "filings", "news", "halts"}
+    assert set(inputs) == {"calendar", "fmp_calendar", "filings", "news", "halts", "listing"}
 
 
 def test_gate_inputs_reads_the_feed_once_per_call_for_each_symbol_when_not_shared():

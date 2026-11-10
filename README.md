@@ -72,6 +72,11 @@ halts. It returns one of three results, and **only CLEAR lets an order through**
 - **UNKNOWN**: a source failed, was malformed, stale or too sparse, or could not prove the
   symbol clear (for example no 8-K item 2.02 in the last 100 days).
 
+**Listing restriction (#168).** The halt feed is only proven to cover Nasdaq, NYSE and NYSE
+American listings: a live check saw no NYSE Arca or Cboe item in it. Until one is seen, the
+scan rejects any other listing (from Alpaca's asset endpoint, never guessed from the ticker),
+and the gate reads UNKNOWN for it.
+
 `risk_check` blocks EVENT and UNKNOWN. The reason names the kind and the source, e.g.
 `event gate EVENT: EVENT (alphavantage): estimated earnings date ...` against
 `event gate UNKNOWN: UNKNOWN (alphavantage): earnings source unavailable: ...`. The order
