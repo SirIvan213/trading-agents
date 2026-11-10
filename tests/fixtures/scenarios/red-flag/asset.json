@@ -1,0 +1,13 @@
+{
+ "id": "00000000-0000-4000-8000-086078084082",
+ "class": "us_equity",
+ "exchange": "NASDAQ",
+ "symbol": "VNTR",
+ "name": "Ventara Inc. Common Stock",
+ "status": "active",
+ "tradable": true,
+ "marginable": true,
+ "shortable": true,
+ "easy_to_borrow": true,
+ "fractionable": true
+}

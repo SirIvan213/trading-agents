@@ -36,14 +36,16 @@ def test_ny_today_naive_raises():
 def test_run_scan_passes_ny_date(monkeypatch):
     seen = {}
 
-    def spy(snapshots, criteria, limits, avg_volume=None, today=None, now=None):
-        seen.update(today=today, avg=avg_volume, now=now)
+    def spy(snapshots, criteria, limits, avg_volume=None, today=None, now=None,
+            listings=None):
+        seen.update(today=today, avg=avg_volume, now=now, listings=listings)
         return {"candidates": [], "rejected": [], "criteria": {}}
 
     monkeypatch.setattr(market, "scan", spy)
     now = datetime(2026, 11, 5, 2, 30, tzinfo=UTC)
     market.run_scan({}, ScanCriteria(), load_limits(), now, avg_volume={"A": 1})
-    assert seen == {"today": date(2026, 11, 4), "avg": {"A": 1}, "now": now}
+    # no listings given: run_scan passes an empty map, so every symbol fails closed (#168)
+    assert seen == {"today": date(2026, 11, 4), "avg": {"A": 1}, "now": now, "listings": {}}
 
 
 def _snap(day_t: str) -> dict:
@@ -69,7 +71,8 @@ def test_run_scan_end_to_end_rejects_yesterdays_bar_premarket():
 
 def test_run_scan_end_to_end_accepts_todays_bar_premarket():
     snaps = {"GAPA": _snap("2026-11-04T05:00:00Z")}
-    out = market.run_scan(snaps, ScanCriteria(), load_limits(), PREMARKET)
+    listings = {"GAPA": {"ok": True, "symbol": "GAPA", "exchange": "NASDAQ"}}  # #168
+    out = market.run_scan(snaps, ScanCriteria(), load_limits(), PREMARKET, listings=listings)
     assert [c["symbol"] for c in out["candidates"]] == ["GAPA"]
     assert out["rejected"] == []
 

@@ -12,8 +12,9 @@ requests:
   - FMP earnings calendar (block-only secondary, #145): ONE range call for [today, today + 7
     days] (billed on FMP's side; FMP_API_KEY), then cached on disk for the New York day;
   - Nasdaq Trader trade-halt feed: ONE fetch (free, no key; never more than once a minute);
-  - per symbol: SEC EDGAR submissions (SEC_USER_AGENT; the CIK map once) and Alpaca news for
-    the last 24 hours (ALPACA_API_KEY / ALPACA_SECRET_KEY).
+  - per symbol: SEC EDGAR submissions (SEC_USER_AGENT; the CIK map once), Alpaca news for
+    the last 24 hours and the Alpaca asset (its listing exchange, #168) (ALPACA_API_KEY /
+    ALPACA_SECRET_KEY).
 No Claude call, no order, no decision-journal write (the two calendar caches in
 journal/cache/ are the only files written). Only Ivan runs it with --live (CLAUDE.md rule 6).
 
@@ -96,6 +97,7 @@ def plan_lines(symbols: list[str]) -> list[str]:
         f"SEC EDGAR: the ticker->CIK map once, then 1 submissions call per symbol "
         f"({len(symbols)})",
         f"Alpaca news: 1 call (or more pages) per symbol for the last 24 hours ({len(symbols)})",
+        f"Alpaca assets (listing exchange, #168): 1 call per symbol ({len(symbols)})",
         f"keys: {keys}",
         "No Claude call, no order, no decision-journal write (only the two calendar cache "
         "files).",
@@ -179,6 +181,9 @@ def _raw_for(symbol: str, inputs: dict) -> list[str]:
     mine = [i for i in ((halts.get("feed") or {}).get("items") or [])
             if compact_ticker(i.get("symbol")) == compact_ticker(symbol)] if halts.get("ok") else []
     out.append(f"  nasdaq halt items for {symbol}: {mine if mine else 'none'}")
+    listing = inputs.get("listing") or {}
+    out.append(f"  listing: {listing.get('exchange')}" if listing.get("ok") is True
+               else f"  listing: NOT OK: {listing.get('reason')}")
     return out
 
 

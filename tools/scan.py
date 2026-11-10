@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from tools.config import Limits
 from tools.http import get_json
+from tools.listing import listing_problem
 from tools.symbols import SYMBOL_RE as _SHARED_SYMBOL_RE
 from tools.symbols import normalize_symbol
 
@@ -270,6 +271,7 @@ def scan(
     avg_volume: dict[str, int] | None = None,
     today: date | None = None,
     now: datetime | None = None,
+    listings: dict | None = None,
 ) -> dict:
     """Filter snapshots into candidates; every rejection carries explicit reasons.
 
@@ -288,6 +290,11 @@ def scan(
     Pass `now` (timezone-aware) to also reject a symbol whose latestTrade or latestQuote "t"
     is missing or older than criteria.max_quote_age_s, as "stale trade" / "stale quote"
     (issue #12: a halted stock stops trading and quoting).
+
+    Listing (#168): pass `listings` ({symbol: tools.listing.parse_asset(...) result}) to reject
+    any symbol that is not proven listed on Nasdaq, NYSE or NYSE American, with the reason
+    from tools.listing.listing_problem (a symbol missing from `listings` is rejected too).
+    pipeline.market.run_scan, the sanctioned path, always applies this check.
     """
     if now is not None and (now.tzinfo is None or now.utcoffset() is None):
         raise ValueError("now must be timezone-aware")
@@ -312,6 +319,10 @@ def scan(
         seen.add(sym)
         if sym in blocked:
             reasons.append("blocked symbol")
+        if listings is not None:
+            problem = listing_problem(listings.get(sym), sym)
+            if problem:
+                reasons.append(problem)
         m, why = _metrics(snap, avgs, sym)
         if m is None:
             reasons.append(why)

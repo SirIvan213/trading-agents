@@ -233,6 +233,15 @@ def write_text(folder: str, name: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def asset(symbol: str, name: str, exchange: str = "NASDAQ") -> dict:
+    """An Alpaca /v2/assets/{symbol} reply (SYNTHETIC, in the documented shape; #168)."""
+    digits = "".join(f"{ord(c):03d}" for c in symbol)[:12].ljust(12, "0")
+    return {"id": f"00000000-0000-4000-8000-{digits}",
+            "class": "us_equity", "exchange": exchange, "symbol": symbol, "name": name,
+            "status": "active", "tradable": True, "marginable": True, "shortable": True,
+            "easy_to_borrow": True, "fractionable": True}
+
+
 def write(folder: str, name: str, obj: dict | list) -> None:
     path = HERE / folder / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -263,6 +272,7 @@ def build() -> None:
     write_text("clean-buy", "av_earnings_calendar.csv", av_calendar())
     write_text("clean-buy", "halts.xml", halt_feed(OTHER_HALTS))
     write("clean-buy", "companyfacts.json", company_facts(9900001, "Brookfield Optics", 0.05))
+    write("clean-buy", "asset.json", asset("BRKO", "Brookfield Optics Inc. Common Stock"))
 
     # ---- red-flag: VNTR, the same chart shifted, a five-minute halt in the bars, a halt
     # headline and third-quarter earnings scheduled inside the trade window. Q3 is NOT yet
@@ -293,6 +303,7 @@ def build() -> None:
         halt_item("VNTR", "Ventara Inc.", "NASDAQ", "11/03/2026", "10:05:00.214", "LUDP",
                   ("11/03/2026", "10:10:00", "10:10:00")),
         *OTHER_HALTS]))
+    write("red-flag", "asset.json", asset("VNTR", "Ventara Inc. Common Stock"))
     write("red-flag", "companyfacts.json",
           company_facts(9900002, "Ventara", 0.08, filed_before="2026-10-01"))
 
@@ -323,6 +334,10 @@ def build() -> None:
     (FIXTURES / "fmp_earnings_calendar_tsla.json").write_text(
         json.dumps(OTHER_REPORTS, indent=1) + "\n", encoding="utf-8")
     (FIXTURES / "av_earnings_calendar_tsla.csv").write_text(av_calendar(), encoding="utf-8")
+    write("extended-chase", "asset.json",
+          asset("CHSW", "Chasewater Labs Inc. Common Stock", "NYSE"))
+    (FIXTURES / "alpaca_asset_tsla.json").write_text(json.dumps(
+        asset("TSLA", "Tesla, Inc. Common Stock"), indent=1) + "\n", encoding="utf-8")
     write("extended-chase", "companyfacts.json",
           company_facts(9900003, "Chasewater Labs", 0.05))
 

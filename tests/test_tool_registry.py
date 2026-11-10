@@ -214,16 +214,19 @@ def test_scan_exactly_50_allowed():
 def test_scan_goes_through_run_scan_with_ny_date(monkeypatch):
     seen = {}
 
-    def fake_run_scan(snaps, criteria, limits, now, avg_volume=None):
-        seen.update(snaps=snaps, now=now)
+    def fake_run_scan(snaps, criteria, limits, now, avg_volume=None, listings=None):
+        seen.update(snaps=snaps, now=now, listings=listings)
         return {"candidates": [], "rejected": [], "criteria": {}}
 
     monkeypatch.setattr(reg, "run_scan", fake_run_scan)
     data = FakeMarketData()
     _, err = make(data).execute("scan", {"symbols": ["gapa", "GAPA", "gapb"]})
     assert err is False
-    assert data.calls == [("snapshots", ["GAPA", "GAPB"])]
+    assert data.calls == [("snapshots", ["GAPA", "GAPB"]), ("listing", "GAPA"),
+                          ("listing", "GAPB")]
     assert seen["now"] == NOW and set(seen["snaps"]) == {"GAPA", "GAPB"}
+    assert seen["listings"] == {s: {"ok": True, "symbol": s, "exchange": "NASDAQ"}
+                                for s in ("GAPA", "GAPB")}  # #168
 
 
 def test_scan_real_pipeline_rejects_stale_bars_premarket():

@@ -26,6 +26,7 @@ from tests.fakes import (
     NOON,
     FakeAllData,
     FakeClient,
+    asset_reply,
     av_csv,
     background_rows,
     fresh_halt_feed,
@@ -530,7 +531,8 @@ def data_for(now, **over):
                                         "reply": background_rows(s, e)},
         submissions=lambda sym: filings_ok(now, symbol=sym)["submissions"],
         news=lambda syms, a, b: {"news": [], "next_page_token": None},
-        halt_feed=lambda: fresh_halt_feed(now))
+        halt_feed=lambda: fresh_halt_feed(now),
+        listing=lambda sym: asset_reply(sym))
     d.update(over)
     return SimpleNamespace(**d)
 

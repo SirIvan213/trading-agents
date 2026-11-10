@@ -8,7 +8,7 @@ import pytest
 
 from pipeline.data import LiveData
 from pipeline.events import AV_INVALID_RETRY_AFTER, AvCalendarCache, calendar_input, events_from
-from tests.fakes import av_csv, fresh_halt_feed
+from tests.fakes import asset_reply, av_csv, fresh_halt_feed
 from tests.order_helpers import NY, calendar_ok, fmp_row, gate_for, submissions_202, verdict_for
 from tools.earnings_calendar import fetch_av_earnings_calendar, parse_av_calendar
 from tools.http import get_bytes
@@ -63,6 +63,7 @@ def gate_of(reply: str):
                                            "reply": reply},
         submissions=lambda sym: submissions_202(NOW, 30, symbol=sym),
         halt_feed=lambda: fresh_halt_feed(NOW),
+        listing=lambda sym: asset_reply(sym),
         news=lambda syms, s, e: {"news": [], "next_page_token": None})
     return events_from(data)("MSFT", NOW, NOW.replace(hour=15, minute=55))
 
@@ -97,6 +98,7 @@ def test_blocked_a_short_body_ends_unknown_through_the_cache_and_the_gate(tmp_pa
     data = SimpleNamespace(av_earnings_calendar=cache.get,
                            submissions=lambda sym: submissions_202(NOW, 30, symbol=sym),
                            halt_feed=lambda: fresh_halt_feed(NOW),
+                           listing=lambda sym: asset_reply(sym),
                            news=lambda syms, s, e: {"news": [], "next_page_token": None})
     gate = events_from(data)("MSFT", NOW, NOW.replace(hour=15, minute=55))
     assert gate["status"] == "UNKNOWN"

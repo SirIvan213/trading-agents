@@ -1,0 +1,13 @@
+{
+ "id": "00000000-0000-4000-8000-066082075079",
+ "class": "us_equity",
+ "exchange": "NASDAQ",
+ "symbol": "BRKO",
+ "name": "Brookfield Optics Inc. Common Stock",
+ "status": "active",
+ "tradable": true,
+ "marginable": true,
+ "shortable": true,
+ "easy_to_borrow": true,
+ "fractionable": true
+}

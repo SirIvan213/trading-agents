@@ -223,16 +223,29 @@ def window_end_for(now: datetime) -> datetime:
     return now.astimezone(NY).replace(hour=15, minute=55, second=0, microsecond=0)
 
 
+def listing_ok(symbol: str, exchange: str = "NASDAQ") -> dict:
+    """A clean listing input for the gate (#168): parse_asset over a synthetic Alpaca asset."""
+    from tests.fakes import asset_reply
+    from tools.listing import parse_asset
+    return parse_asset(asset_reply(symbol, exchange), symbol)
+
+
 def gate_for(symbol: str, now: datetime, *, calendar=None, filings=None, news=None,
-             halts=None, window_end: datetime | None = None, **kw) -> dict:
-    """A real event_gate result; every input defaults to its clear form."""
+             halts=None, listing=None, window_end: datetime | None = None, **kw) -> dict:
+    """A real event_gate result; every input defaults to its clear form. listing=None means
+    the default (a matching Nasdaq listing); to test a missing listing, call event_gate."""
     from tools.event_gate import event_gate
+    if listing is None:
+        # Built directly (not via parse_asset), so a test of another rule with a malformed
+        # symbol still gets a matching Nasdaq listing.
+        listing = {"ok": True, "symbol": symbol.strip().upper() if isinstance(symbol, str)
+                   else "", "exchange": "NASDAQ"}
     return event_gate(
         symbol, now, window_end or window_end_for(now),
         calendar=calendar if calendar is not None else calendar_ok(now),
         filings=filings if filings is not None else filings_ok(now, symbol=symbol),
         news=news if news is not None else news_ok(),
-        halts=halts if halts is not None else halts_ok(now), **kw)
+        halts=halts if halts is not None else halts_ok(now), listing=listing, **kw)
 
 
 def clear_gate(symbol: str, now: datetime) -> dict:

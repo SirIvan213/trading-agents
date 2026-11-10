@@ -1,0 +1,13 @@
+{
+ "id": "00000000-0000-4000-8000-067072083087",
+ "class": "us_equity",
+ "exchange": "NYSE",
+ "symbol": "CHSW",
+ "name": "Chasewater Labs Inc. Common Stock",
+ "status": "active",
+ "tradable": true,
+ "marginable": true,
+ "shortable": true,
+ "easy_to_borrow": true,
+ "fractionable": true
+}

@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from pipeline.events import AV_RETRY_AFTER, AvCalendarCache, _failure, events_from
-from tests.fakes import av_csv, fresh_halt_feed
+from tests.fakes import asset_reply, av_csv, fresh_halt_feed
 from tests.order_helpers import NY, submissions_202, verdict_for
 from tools.earnings_calendar import AV_MAX_BYTES, fetch_av_earnings_calendar, parse_av_calendar
 
@@ -306,6 +306,7 @@ def make_data(cache):
         av_earnings_calendar=cache.get,
         submissions=lambda sym: submissions_202(NOW, 30, symbol=sym),
         halt_feed=lambda: fresh_halt_feed(NOW),
+        listing=lambda sym: asset_reply(sym),
         news=lambda syms, s, e: {"news": [], "next_page_token": None})
 
 

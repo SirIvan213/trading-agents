@@ -12,6 +12,7 @@ empty:
   data.submissions(symbol)                                                    (SEC coverage)
   data.news([symbol], start, end)                                             (halts, signal)
   data.halt_feed() -> {"fetched_at", "body"}         (Nasdaq trade-halt feed, halts, #144)
+  data.listing(symbol) -> Alpaca asset reply           (listing exchange, #168)
 
 `AvCalendarCache` and `FmpCalendarCache` fetch their calendar once per New York day and keep
 it on disk (journal/cache/, git-ignored). A failed fetch or a reply that does not validate is
@@ -37,6 +38,7 @@ from tools.earnings_calendar import (
 )
 from tools.event_gate import CALENDAR_HORIZON_DAYS, NEWS_LOOKBACK_HOURS, event_gate
 from tools.halt_feed import parse_halt_feed
+from tools.listing import parse_asset
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "journal" / "cache"
 # After a failed Alpha Vantage fetch, wait this long before asking again: a free key allows
@@ -261,12 +263,26 @@ def halts_input(data: Any) -> dict:
         return {"ok": False, "reason": _failure(exc)}
 
 
+def listing_input(data: Any, symbol: str) -> dict:
+    """The symbol's listing (#168): tools.listing.parse_asset(data.listing(symbol)) or
+    {"ok": False, "reason"} (no source, a fetch error, a malformed reply). A lookup that
+    raised also carries "fetch_failed": True, so a caller looking up many symbols can stop."""
+    fetch = getattr(data, "listing", None)
+    if not callable(fetch):
+        return {"ok": False, "reason": "no listing source", "fetch_failed": True}
+    try:
+        reply = fetch(symbol)
+    except Exception as exc:  # noqa: BLE001 - every failure is an UNKNOWN input
+        return {"ok": False, "reason": _failure(exc), "fetch_failed": True}
+    return parse_asset(reply, symbol)
+
+
 def gate_inputs(data: Any, symbol: str, now: datetime, *, calendar: dict | None = None,
                 halts: dict | None = None, fmp_calendar: dict | None = None) -> dict:
-    """The five gate inputs for `symbol` at `now`, each {"ok": True, ...} or {"ok": False,
+    """The six gate inputs for `symbol` at `now`, each {"ok": True, ...} or {"ok": False,
     "reason"}: calendar (Alpha Vantage), fmp_calendar (FMP, secondary), filings (SEC), news
-    (Alpaca, 24 h) and halts (Nasdaq feed). `calendar`, `fmp_calendar` and `halts` may be
-    passed in when shared across symbols (smoke_events)."""
+    (Alpaca, 24 h), halts (Nasdaq feed) and listing (Alpaca asset, #168). `calendar`,
+    `fmp_calendar` and `halts` may be passed in when shared across symbols (smoke_events)."""
     today = now.astimezone(NY).date()
     try:
         filings: dict = {"ok": True, "submissions": data.submissions(symbol)}
@@ -283,6 +299,7 @@ def gate_inputs(data: Any, symbol: str, now: datetime, *, calendar: dict | None 
                          else fmp_calendar_input(data, today)),
         "filings": filings, "news": news,
         "halts": halts if halts is not None else halts_input(data),
+        "listing": listing_input(data, symbol),
     }
 
 
