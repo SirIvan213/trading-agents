@@ -112,7 +112,7 @@ def test_127_day_state_rejects_a_clock_that_is_not_aware(tmp_path, bad):
 
 def test_127_day_state_counts_today_as_before(tmp_path):
     j = journal_with(tmp_path / "j.jsonl",
-                     [*sent_order(T0, "10.00"), *sent_order(T0 - timedelta(days=1))])
+                     [*sent_order(T0, "10.00"), *closed_trade(T0 - timedelta(days=1))])
     state = j.day_state(T0)
     assert state.trades_today == 1 and str(state.risk_used_today) == "10.00"
 
@@ -420,7 +420,7 @@ def test_109_a_stop_out_records_the_loss_the_symbol_and_frees_the_position(tmp_p
     s = state_of(tmp_path, a, *events_for(a, *FILLED, ("closed", {"closed_by": "stop",
                                                                    "realized_pnl": "-48.50"})))
     assert s.open_positions == 0 and s.trades_today == 1
-    assert s.risk_used_today == D("49.84") and s.realized_loss_today == D("48.50")
+    assert s.risk_used_today == D("48.50") and s.realized_loss_today == D("48.50")  # #188
     assert s.stopped_out_symbols == frozenset({"BRKO"})
 
 
@@ -445,14 +445,15 @@ def test_109_a_profit_is_not_a_realized_loss_and_does_not_offset_one(tmp_path):
                *closed_trade(MON - timedelta(hours=1), "40", pnl="+90.00", symbol="BBB")]
     s = state_of(tmp_path, *entries)
     assert s.realized_loss_today == D("30.00") and s.trades_today == 2
-    assert s.risk_used_today == D("80") and s.open_positions == 0
+    assert s.risk_used_today == D("30.00") and s.open_positions == 0  # #188: the loss only
 
 
 def test_109_an_open_order_from_an_earlier_day_still_counts_as_open(tmp_path):
-    """An overnight position (filled on Friday, never closed) blocks Monday."""
+    """An overnight position (filled on Friday, never closed) blocks Monday, and its worst
+    case counts in Monday's risk (#188)."""
     a = approved_entry(MON - timedelta(days=3), "49.84")
     s = state_of(tmp_path, a, *events_for(a, *FILLED))
-    assert s.open_positions == 1 and s.trades_today == 0 and s.risk_used_today == 0
+    assert s.open_positions == 1 and s.trades_today == 0 and s.risk_used_today == D("49.84")
 
 
 def test_109_an_unsent_approval_from_an_earlier_day_is_not_open(tmp_path):
@@ -707,7 +708,7 @@ def test_b1_a_decision_after_a_crash_leaves_the_journal_repairable(monkeypatch, 
 
 def test_s1_an_overnight_position_closed_this_morning_counts_today(tmp_path):
     """Approved and filled on Friday, stopped out on Monday morning: Monday's loss and
-    stop-out, though not Monday's trade or risk."""
+    stop-out and Monday's risk (#188), though not Monday's trade."""
     a = approved_entry(MON - timedelta(days=3), "49.84", symbol="GAPA")
     cid = a["client_order_id"]
     events = [*events_for(a, *FILLED),
@@ -716,7 +717,7 @@ def test_s1_an_overnight_position_closed_this_morning_counts_today(tmp_path):
     s = state_of(tmp_path, a, *events)
     assert s.realized_loss_today == D("120.00")
     assert s.stopped_out_symbols == frozenset({"GAPA"})
-    assert s.trades_today == 0 and s.risk_used_today == 0 and s.open_positions == 0
+    assert s.trades_today == 0 and s.risk_used_today == D("120.00") and s.open_positions == 0
 
 
 def test_s1_a_trade_closed_yesterday_does_not_count_today(tmp_path):
@@ -724,6 +725,7 @@ def test_s1_a_trade_closed_yesterday_does_not_count_today(tmp_path):
     s = state_of(tmp_path, a, *events_for(a, *FILLED, ("closed", {"closed_by": "stop",
                                                                    "realized_pnl": "-120"})))
     assert s.realized_loss_today == 0 and s.stopped_out_symbols == frozenset()
+    assert s.risk_used_today == 0
 
 
 def test_lock_timeouts_raise_the_journal_lock_timeout_subclass(tmp_path, monkeypatch):

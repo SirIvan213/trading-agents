@@ -133,20 +133,21 @@ def test_a_full_trade_stopped_out():
     assert (s.status, s.filled_qty, s.avg_price, s.closed_by, s.realized_pnl) == (
         CLOSED, 8, D("364.20"), "stop", D("-48.00"))
     assert s.stopped_out and not s.open and not s.released
-    assert s.realized_loss == D("48.00") and s.committed_risk == D("49.84")
+    assert s.realized_loss == D("48.00") and s.open_risk == 0  # #188: its loss counts
     assert s.last_at == T
 
 
-def test_a_gap_through_the_stop_counts_the_larger_realized_loss():
+def test_a_gap_through_the_stop_is_its_whole_realized_loss():
     s = state_after(ev(SUBMITTING), ev(SUBMITTED), ev(FILLED, filled_qty=8, avg_price="364"),
                     ev(CLOSED, closed_by="stop", realized_pnl="-75.50"))
-    assert s.committed_risk == D("75.50") and s.realized_loss == D("75.50")
+    assert s.realized_loss == D("75.50") and s.open_risk == 0
 
 
-def test_a_winner_keeps_its_max_loss_counted():
+def test_a_closed_winner_carries_no_risk_and_no_loss():
+    """#188: once closed, a trade counts only its realized loss; a profit counts nothing."""
     s = state_after(ev(SUBMITTING), ev(SUBMITTED), ev(FILLED, filled_qty=8, avg_price="364"),
                     ev(CLOSED, closed_by="target", realized_pnl="47.00"))
-    assert s.committed_risk == D("49.84") and s.realized_loss == 0 and not s.stopped_out
+    assert s.open_risk == 0 and s.realized_loss == 0 and not s.stopped_out
 
 
 @pytest.mark.parametrize("events", [
@@ -157,14 +158,14 @@ def test_a_winner_keeps_its_max_loss_counted():
 ], ids=["rejected", "cancelled", "expired", "send-unknown-cancelled"])
 def test_risk_is_released_only_by_a_confirmed_zero_fill(events):
     s = state_after(*events)
-    assert s.released and not s.open and s.committed_risk == 0
+    assert s.released and not s.open and s.open_risk == 0
 
 
 @pytest.mark.parametrize("status", [APPROVED, SUBMITTING, SUBMITTED, SEND_UNKNOWN,
                                     PARTIALLY_FILLED, FILLED, CANCELLED, EXPIRED])
 def test_risk_stays_counted_and_the_order_stays_open_until_closed_or_released(status):
     s = state_after(*PATHS[status])
-    assert s.open and not s.released and s.committed_risk == D("49.84")
+    assert s.open and not s.released and s.open_risk == D("49.84")
 
 
 def test_partial_fills_accumulate_then_fill():

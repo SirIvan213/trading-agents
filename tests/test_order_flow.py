@@ -229,11 +229,13 @@ def test_risk_block_when_journal_is_at_max_trades_per_day(ledger, journal):
 
 def test_risk_block_on_daily_loss_limit_boundary(ledger, tmp_path):
     # worst-case loss of this order is 49.84 (#68); 100.16 used makes exactly 150.00: allowed
-    # (an earlier trade today, closed at a profit: its max_loss stays counted, #109)
-    j_ok = journal_with(tmp_path / "a.jsonl", closed_trade(T0 - timedelta(hours=1), "100.16"))
+    # (an earlier trade today in another symbol, stopped out: its realized loss counts, #188)
+    j_ok = journal_with(tmp_path / "a.jsonl", closed_trade(
+        T0 - timedelta(hours=1), "100.16", pnl="-100.16", closed_by="stop", symbol="AAPL"))
     assert propose(ledger, "plan-1", journal=j_ok, clock=clock_at(T0), quotes=quotes_at(T0),
         events=events_clear()).ok
-    j_bad = journal_with(tmp_path / "b.jsonl", closed_trade(T0 - timedelta(hours=1), "100.17"))
+    j_bad = journal_with(tmp_path / "b.jsonl", closed_trade(
+        T0 - timedelta(hours=1), "100.17", pnl="-100.17", closed_by="stop", symbol="AAPL"))
     refused(propose(ledger, "plan-1", journal=j_bad, clock=clock_at(T0),
             quotes=quotes_at(T0), events=events_clear()), "risk", "daily limit")
 

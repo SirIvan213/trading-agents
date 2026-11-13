@@ -27,9 +27,10 @@ Event entries: {"status", "client_order_id", "at": aware ISO time, ...}.
   rejected: no fill.
   closed: "closed_by" ("stop", "target" or "flatten") and "realized_pnl" (the whole trade's
     realized profit or loss, negative for a loss).
-Risk (decisions on #109): an order's risk is its sized worst-case `max_loss`, counted from
-approval until the broker confirms a ZERO fill (rejected, or cancelled/expired with nothing
-filled). A closed trade counts the larger of max_loss and its realized loss.
+Risk (decisions on #109 and #188): while an order is open or pending its risk is its sized
+worst-case `max_loss`, counted until the broker confirms a ZERO fill (rejected, or
+cancelled/expired with nothing filled) or the trade closes. A closed trade then counts its
+realized loss (nothing for a profit) on the day it closed, whenever it was opened.
 An approval that was never sent counts (open, with its risk) only until its plan expires:
 `expires_at` on the approved entry (plan as_of + max_plan_age_s), or the end of its New
 York day for an entry without one. It then releases both and is journaled "expired". It
@@ -133,7 +134,8 @@ class OrderState:
     @property
     def released(self) -> bool:
         """The broker confirmed a ZERO fill: rejected, or cancelled/expired with nothing
-        filled. Only then does the order stop counting toward the day's risk."""
+        filled. Until then (or until it closes, #188) it counts its max_loss in the day's
+        risk."""
         return self.status in (REJECTED, CANCELLED, EXPIRED) and self.filled_qty == 0
 
     @property
@@ -153,13 +155,11 @@ class OrderState:
         return ZERO
 
     @property
-    def committed_risk(self) -> Decimal:
-        """Risk this order uses from the daily budget: 0 once released, otherwise its sized
-        worst-case max_loss, or its realized loss when that was larger (a gap through the
-        stop)."""
-        if self.released:
-            return ZERO
-        return max(self.max_loss, self.realized_loss)
+    def open_risk(self) -> Decimal:
+        """The worst-case risk an order still carries: its sized max_loss while it is open or
+        pending, 0 once closed or released (#188: a closed trade counts its realized loss
+        instead). Clock-free, like `open`: day_state applies an unsent approval's expiry."""
+        return self.max_loss if self.open else ZERO
 
     @property
     def stopped_out(self) -> bool:

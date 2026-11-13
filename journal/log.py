@@ -260,12 +260,14 @@ class Journal:
 
           - trades_today: every order approved today that was SENT (reached submitting),
             whatever happened to it afterwards; an approval never sent takes no slot;
-          - risk_used_today: each of today's orders at its sized worst-case max_loss (or its
-            realized loss, if larger), released only when the broker confirmed a zero fill;
+          - risk_used_today (#188, Ivan's decision): the realized losses of every trade
+            CLOSED today, whenever it was opened, plus the sized worst-case max_loss of
+            everything open or pending, from any day (a live unsent approval included). A
+            confirmed zero fill releases an order; a profit adds nothing;
           - open_positions: orders that may hold a position now, from ANY day (an overnight
-            one blocks too). An approval not sent yet counts (open, with its risk on its
-            approval day) only until its plan expires (OrderState.live_unsent), whether or
-            not its "expired" event is written yet;
+            one blocks too). An approval not sent yet counts (open, with its risk) only until
+            its plan expires (OrderState.live_unsent), whether or not its "expired" event is
+            written yet;
           - realized_loss_today: the losses of trades CLOSED today, whenever approved (an
             overnight position closed this morning counts: the daily loss stop);
           - stopped_out_symbols: symbols whose trade was closed by its stop today.
@@ -286,18 +288,18 @@ class Journal:
             if o.status == APPROVED:
                 if o.live_unsent(now):
                     opened += 1
-                    if day == today:
-                        risk += o.committed_risk
+                    risk += o.open_risk
                 continue
             if o.open:
                 opened += 1
+                risk += o.open_risk
             if o.status == CLOSED and o.last_at is not None and \
                     o.last_at.astimezone(NY).date() == today:
                 lost += o.realized_loss
+                risk += o.realized_loss
                 if o.stopped_out:
                     stopped.add(o.symbol)
             if day == today:
                 trades += 1 if o.sent else 0
-                risk += o.committed_risk
         return DayState(trades_today=trades, risk_used_today=risk, open_positions=opened,
                         realized_loss_today=lost, stopped_out_symbols=frozenset(stopped))

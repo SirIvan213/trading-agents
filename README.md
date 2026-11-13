@@ -135,8 +135,9 @@ and `expired`.
 
 - **Trades:** every order sent today uses a slot, whatever happens to it
   (`max_trades_per_day`). An approval never sent takes none.
-- **Risk:** each of today's orders counts at its sized worst-case `max_loss` (or its realized
-  loss, if larger) until the broker confirms a zero fill (`daily_loss_limit`).
+- **Risk** (`daily_loss_limit`): today's realized losses, counting every position closed
+  today whenever it was opened, plus the sized worst-case `max_loss` of everything open or
+  pending. A confirmed zero fill releases an order; a profit adds nothing.
 - **Open positions:** an order that may hold a position, from any day, blocks a new entry
   while `max_open_positions` (1) are open. An approval not sent yet counts, with its risk,
   only until its plan expires (`as_of + max_plan_age_s`); it is then journaled `expired`.
