@@ -136,13 +136,26 @@ class Journal:
                     f"journal write failed ({type(exc).__name__})") from None
 
     def entries(self) -> list[dict]:
-        """Every entry, oldest first. Raises JournalError for an unreadable or corrupt file."""
+        """Every entry, oldest first. Raises JournalError for an unreadable or corrupt file.
+
+        Reads under the journal's lock (#128), like every write, so a reader never sees
+        another process's half-written last line. A last line WITHOUT its newline is
+        therefore not a write in progress but one a crash cut off: it is refused (fail
+        closed), and `python -m journal.repair` moves it aside after a human looks."""
+        with self.exclusive():
+            return self._read_entries()
+
+    def _read_entries(self) -> list[dict]:
         if not self.path.exists():
             return []
         try:
             text = self.path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             raise JournalError(f"journal unreadable ({type(exc).__name__})") from None
+        if text and not text.endswith("\n"):
+            raise JournalError(
+                "journal's last line was cut off (no newline): a write did not finish. "
+                "Run `python -m journal.repair` to move it aside")
         out = []
         for n, line in enumerate(text.splitlines(), 1):
             if not line.strip():

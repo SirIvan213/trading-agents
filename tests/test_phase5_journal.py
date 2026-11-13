@@ -4,13 +4,18 @@ it needs now that a reconciler will write alongside the approval path: an out-of
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
 
+import journal.log as jl
 import pipeline.order_flow as of
 from journal.log import APPROVED, Journal, JournalError
+from journal.repair import main as repair_main
+from journal.repair import repair, torn_tail
 from pipeline.order_flow import propose
 from tests.order_helpers import (
     T0,
@@ -101,3 +106,127 @@ def test_127_journal_lines_are_plain_json(tmp_path):
     j = journal_with(tmp_path / "j.jsonl", [approved_entry(T0)])
     (line,) = j.path.read_text(encoding="utf-8").splitlines()
     assert json.loads(line)["status"] == APPROVED
+
+
+# ======================= #128: reads under the lock; a cut-off last line =======================
+
+def test_128_a_reader_waits_for_a_writer_and_never_sees_half_a_line(tmp_path):
+    path = tmp_path / "j.jsonl"
+    writer, reader = Journal(path), Journal(path)  # two objects: the cross-process lock
+    entry = json.dumps({"status": "pass", "run_id": "r1"}) + "\n"
+    started, seen = threading.Event(), []
+
+    def write_slowly():
+        with writer.exclusive():
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(entry[:10])
+                fh.flush()
+                started.set()
+                time.sleep(0.3)
+                fh.write(entry[10:])
+
+    t = threading.Thread(target=write_slowly)
+    t.start()
+    started.wait(5)
+    seen.append(reader.entries())  # blocks until the writer releases the lock
+    t.join(5)
+    assert seen == [[{"status": "pass", "run_id": "r1"}]]
+
+
+def test_128_a_read_that_cannot_take_the_lock_raises_and_propose_refuses(limits, tmp_path,
+                                                                      monkeypatch):
+    monkeypatch.setattr(jl, "LOCK_TIMEOUT_S", 0.2)
+    path = tmp_path / "j.jsonl"
+    holder = Journal(path)
+    hold, release = threading.Event(), threading.Event()
+
+    def keep_lock():
+        with holder.exclusive():
+            hold.set()
+            release.wait(5)
+
+    t = threading.Thread(target=keep_lock)
+    t.start()
+    hold.wait(5)
+    try:
+        with pytest.raises(JournalError, match="lock timed out"):
+            Journal(path).entries()
+        p = propose(sealed_ledger(), "plan-1", journal=Journal(path), clock=lambda: T0,
+                    quotes=quotes_at(T0), events=events_clear())
+        assert p.ok is False and p.stage == "journal" and "lock timed out" in p.reason
+    finally:
+        release.set()
+        t.join(5)
+
+
+def cut_off(path, complete=1):
+    """A journal with `complete` whole approved lines, then a line a crash cut off."""
+    lines = [json.dumps(approved_entry(T0)) + "\n" for _ in range(complete)]
+    path.write_text("".join(lines) + '{"status": "approved_not_sent", "max_lo',
+                    encoding="utf-8")
+
+
+def test_128_a_cut_off_last_line_is_refused_with_the_repair_command(limits, tmp_path):
+    path = tmp_path / "j.jsonl"
+    cut_off(path)
+    with pytest.raises(JournalError, match=r"python -m journal\.repair"):
+        Journal(path).entries()
+    p = propose(sealed_ledger(), "plan-1", journal=Journal(path), clock=lambda: T0,
+                quotes=quotes_at(T0), events=events_clear())
+    assert p.ok is False and p.stage == "journal" and "cut off" in p.reason
+
+
+def test_128_a_complete_last_line_that_parses_is_still_required_to_end_the_file(tmp_path):
+    """Even valid JSON without its newline is a write that did not finish."""
+    path = tmp_path / "j.jsonl"
+    path.write_text(json.dumps(approved_entry(T0)), encoding="utf-8")
+    with pytest.raises(JournalError, match="cut off"):
+        Journal(path).entries()
+
+
+def test_128_an_empty_or_missing_journal_reads_as_empty(tmp_path):
+    assert Journal(tmp_path / "missing.jsonl").entries() == []
+    (tmp_path / "empty.jsonl").write_text("", encoding="utf-8")
+    assert Journal(tmp_path / "empty.jsonl").entries() == []
+
+
+def test_128_repair_dry_run_changes_nothing(tmp_path, capsys):
+    path = tmp_path / "j.jsonl"
+    cut_off(path)
+    before = path.read_bytes()
+    assert repair_main(["--path", str(path)]) == 1
+    assert path.read_bytes() == before and list(tmp_path.glob("*.torn-*")) == []
+    assert "Re-run with --yes" in capsys.readouterr().out
+
+
+def test_128_repair_moves_the_cut_off_line_aside_and_keeps_every_complete_line(tmp_path):
+    path = tmp_path / "j.jsonl"
+    cut_off(path, complete=2)
+    tail = torn_tail(path)
+    out = repair(Journal(path), apply=True, now=datetime(2026, 11, 13, 15, 0, tzinfo=UTC))
+    assert out["torn_bytes"] == len(tail) > 0
+    side = tmp_path / "j.jsonl.torn-20261113T150000000000Z"
+    assert out["moved_to"] == str(side) and side.read_bytes() == tail
+    entries = Journal(path).entries()
+    assert len(entries) == 2 and all(e["status"] == APPROVED for e in entries)
+    assert Journal(path).day_state(T0).trades_today == 2  # the cut-off approval is not counted
+
+
+def test_128_repair_never_overwrites_an_earlier_fragment(tmp_path):
+    path = tmp_path / "j.jsonl"
+    cut_off(path)
+    when = datetime(2026, 11, 13, 15, 0, tzinfo=UTC)
+    (tmp_path / "j.jsonl.torn-20261113T150000000000Z").write_bytes(b"earlier")
+    with pytest.raises(JournalError, match="repair failed"):
+        repair(Journal(path), apply=True, now=when)
+    assert (tmp_path / "j.jsonl.torn-20261113T150000000000Z").read_bytes() == b"earlier"
+    with pytest.raises(JournalError, match="cut off"):
+        Journal(path).entries()  # nothing was truncated
+
+
+def test_128_repair_of_a_whole_journal_is_a_no_op(tmp_path, capsys):
+    path = tmp_path / "j.jsonl"
+    path.write_text(json.dumps(approved_entry(T0)) + "\n", encoding="utf-8")
+    assert repair_main(["--path", str(path), "--yes"]) == 0
+    assert "nothing to repair" in capsys.readouterr().out
+    assert list(tmp_path.glob("*.torn-*")) == []
