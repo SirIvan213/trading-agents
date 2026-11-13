@@ -63,6 +63,9 @@ class Limits:
     # entry is a noise stop. Enforced in exit_plan, build_order and risk_check.
     min_risk_pct: Decimal = Decimal("0.25")
     max_order_quote_age_s: int = 15
+    # Open positions at once (#109, Phase 5): risk_check blocks a new entry while this many
+    # orders may hold a position (journal/orders.py OrderState.open). A missing key means 1.
+    max_open_positions: int = 1
 
 
 def _hhmm(s: str) -> time:
@@ -186,6 +189,9 @@ def validate_limits(limits: Limits) -> None:
     n = limits.max_trades_per_day
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         problems.append(f"max_trades_per_day must be an integer of at least 1, got {n!r}")
+    m = limits.max_open_positions
+    if isinstance(m, bool) or not isinstance(m, int) or m < 1:
+        problems.append(f"max_open_positions must be an integer of at least 1, got {m!r}")
     try:
         if limits.max_reward_multiple < limits.min_reward_to_risk:
             problems.append("max_reward_multiple must not be below min_reward_to_risk")
@@ -295,6 +301,7 @@ def limits_from_dict(d: dict) -> Limits:
         slippage_pct=_dec(d, "slippage_pct", "0.10"),
         min_risk_pct=_dec(d, "min_risk_pct", "0.25"),
         max_order_quote_age_s=_whole(d.get("max_order_quote_age_s", 15), "max_order_quote_age_s"),
+        max_open_positions=_whole(d.get("max_open_positions", 1), "max_open_positions"),
     )
     validate_limits(limits)
     return limits

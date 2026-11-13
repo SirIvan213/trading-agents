@@ -759,6 +759,8 @@ def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=
 
     def ask(question):
         asked.append(question)
+        if callable(answers):  # #129: a test may act at the moment of the answer
+            return answers(question)
         return (answers or "yes")
 
     result = run_decision(symbol, data=data, clients=client, journal=journal, clock=clock,

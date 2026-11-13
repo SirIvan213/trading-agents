@@ -144,12 +144,16 @@ orchestrator, the Bull/Bear debate, and the Trader with the plan ledger, the
 approval step and the journal ("approved, not sent"). The Trader is long only:
 it BUYs one tool-produced plan by `plan_id`, or PASSes.
 
-**Now:** validating Phase 4 with the smoke scenarios
-(`python -m pipeline.smoke_debate --scenario clean-buy|extended-chase|tsla|red-flag`).
-Only Ivan runs them with `--billed`.
+**Now: Phase 5, paper trading, is in progress.** Its gate (the open issues labeled
+`before-phase-5`) was clear on 2026-11-13. The build follows the agreed plan, one PR
+at a time, in the Phase 5 milestone:
+1. journal order lifecycle and day totals (#109, #127, #128, #129);
+2. the Alpaca paper broker client (#154, with #136, #138, #139);
+3. sending approved orders (#136, #148);
+4. reconciling fills and positions (#155);
+5. the flatten job (#135);
+6. the scheduler `run_day` (#156, #157, with #141, #131).
 
-**Next:** Phase 5, paper trading: the Alpaca paper broker, scheduled runs, and
-sending approved orders. It is gated by the open issues labeled
-`before-phase-5`: check `gh issue list --label before-phase-5 --state open`
-and fix them first or tell Ivan which remain. Work the Phase 5 build itself
-delivers sits in the Phase 5 milestone without that label.
+Nothing is sent to a broker until PR 3. The smoke scenarios
+(`python -m pipeline.smoke_debate --scenario clean-buy|extended-chase|tsla|red-flag`)
+still validate the decision path; only Ivan runs them with `--billed`.

@@ -12,8 +12,9 @@ Flow:
   2. render_ticket(): the order in plain words.
   3. approve(): show the ticket and require the typed word "yes" for that exact order. Then
      re-check at a NEW wall-clock `now` (freshness, build_order, check_order). Stale, blocked
-     or changed means no order. An approved order is journaled "approved_not_sent"; nothing
-     is sent to a broker in Phase 4.
+     or changed means no order. An approved order is journaled "approved_not_sent" with its
+     deterministic client_order_id (journal/orders.py); nothing is sent to a broker yet
+     (sending is Phase 5 PR 3).
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from agents.orchestrator import load_checked_limits
 from agents.schemas import ExitPlanRecord
 from journal.log import APPROVED, Journal, JournalError
+from journal.orders import OrderError, client_order_id
 from pipeline.events import EventSource
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
@@ -80,7 +82,8 @@ class Proposal:
 @dataclass(frozen=True)
 class Outcome:
     """What happened at approval. status is one of: "approved_not_sent", "declined",
-    "refused_after_approval", "changed_after_approval", "no_order"."""
+    "refused_after_approval", "changed_after_approval", "no_order", and from
+    pipeline.decide (#129) "journal_locked" / "journal_error" (nothing approved)."""
 
     status: str
     reason: str | None
@@ -94,10 +97,19 @@ def _iso(now: datetime) -> str:
     return now.astimezone(NY).isoformat()
 
 
+def _checked_at(now: object) -> str:
+    """`now` in New York time, or as given when it cannot be converted (naive, not a datetime,
+    or too close to the date-range limits, #127): a refusal still needs a timestamp."""
+    try:
+        return _iso(now)  # type: ignore[arg-type]
+    except (OverflowError, ValueError, TypeError, AttributeError):
+        return str(now)
+
+
 def _expires_at(plan: ExitPlanRecord, max_age_s: int) -> str | None:
     try:
         return _iso(datetime.fromisoformat(plan.as_of) + timedelta(seconds=max_age_s))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -122,21 +134,32 @@ def propose(
     or a usable quote there is no order (stage "quote" when the source fails, "size" when the
     quote is missing, stale, crossed or the price moved past the slippage allowance).
 
+    A plan that already has an order in the journal (its client_order_id, #109) is refused
+    at stage "journal": one order per plan.
+
     The event gate (#112) is read from `events` (symbol, now, today's flat-by) and passed to
     check_order. Without an events source the result is missing and check_order BLOCKs; a
-    source that raises is refused at stage "events". The result rides on the Proposal."""
+    source that raises is refused at stage "events". The result rides on the Proposal.
+
+    A clock that is naive, or aware but too close to the date-range limits to convert to New
+    York time (#127), is refused at stage "plan"."""
     now = clock()
     run_id = ledger.run_id if isinstance(ledger, PlanLedger) else ""
+    checked_at = _checked_at(now)
 
     def refuse(
         stage: str, reason: str, plan: ExitPlanRecord | None = None,
         sized: dict | None = None, verdict: dict | None = None, gate: dict | None = None,
     ) -> Proposal:
-        return Proposal(False, stage, reason, run_id, plan_id, plan, sized, verdict, _iso(now),
-                        gate=gate)
+        return Proposal(False, stage, reason, run_id, plan_id, plan, sized, verdict,
+                        checked_at, gate=gate)
 
-    if now.tzinfo is None or now.utcoffset() is None:
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
         return refuse("plan", "clock must be timezone-aware")
+    try:
+        _iso(now)
+    except (OverflowError, ValueError):
+        return refuse("plan", "clock is outside the supported date range")
     try:
         limits = load_checked_limits()
     except ValueError:
@@ -155,8 +178,14 @@ def propose(
     if sized.get("ok") is not True:
         return refuse("size", str(sized.get("reason", "order could not be built")), plan, sized)
     try:
+        # One order per plan (#109): the client_order_id is derived from the run and the plan,
+        # so a second approval of the same plan would be a second order with the same id.
+        if client_order_id(run_id, plan.plan_id) in journal.orders():
+            return refuse("journal", "this plan already has an order (one order per plan)",
+                          plan, sized)
+        journal.expire_unsent(now)  # unsent approvals past their plan's expiry (#109)
         state = journal.day_state(now)
-    except JournalError as exc:
+    except (JournalError, OrderError) as exc:
         return refuse("journal", str(exc), plan, sized)
     gate: dict | None = None
     if events is not None:
@@ -168,7 +197,7 @@ def propose(
     if verdict.get("verdict") != "PASS":
         return refuse("risk", "; ".join(verdict.get("reasons", [])) or "blocked",
                       plan, sized, verdict, gate)
-    return Proposal(True, None, None, run_id, plan_id, plan, sized, verdict, _iso(now),
+    return Proposal(True, None, None, run_id, plan_id, plan, sized, verdict, checked_at,
                     _expires_at(plan, limits.max_plan_age_s), gate)
 
 
@@ -292,5 +321,7 @@ def approve(
         approved_at = datetime.fromisoformat(again.checked_at)
         age = _plan_age_s(again.plan, approved_at) if again.plan else None
         journal.append(
-            _entry(again, APPROVED, None, approved_at=again.checked_at, plan_age_s=age))
+            _entry(again, APPROVED, None, approved_at=again.checked_at, plan_age_s=age,
+                   client_order_id=client_order_id(again.run_id, again.plan_id),
+                   expires_at=again.expires_at))
         return Outcome(APPROVED, None, p, again, again.checked_at, age)

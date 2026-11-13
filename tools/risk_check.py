@@ -28,6 +28,10 @@ ORDER_FIELDS = frozenset(
 class DayState:
     trades_today: int = 0
     risk_used_today: Decimal = Decimal("0")  # sum of max-loss-at-stop of today's entries
+    # Phase 5 (#109), from the journal's order lifecycle (journal/orders.py):
+    open_positions: int = 0  # orders that may hold a position now (any day)
+    realized_loss_today: Decimal = Decimal("0")  # today's closed trades' losses, positive
+    stopped_out_symbols: frozenset[str] = frozenset()  # symbols stopped out today
 
 
 def _state_problem(state: object) -> str | None:
@@ -41,6 +45,15 @@ def _state_problem(state: object) -> str | None:
     risk = state.risk_used_today
     if not isinstance(risk, Decimal) or not risk.is_finite() or risk < 0:
         return "day state risk_used_today must be a finite, non-negative Decimal"
+    opened = state.open_positions
+    if isinstance(opened, bool) or not isinstance(opened, int) or opened < 0:
+        return "day state open_positions must be a non-negative whole number"
+    lost = state.realized_loss_today
+    if not isinstance(lost, Decimal) or not lost.is_finite() or lost < 0:
+        return "day state realized_loss_today must be a finite, non-negative Decimal"
+    stopped = state.stopped_out_symbols
+    if not isinstance(stopped, frozenset) or not all(isinstance(s, str) for s in stopped):
+        return "day state stopped_out_symbols must be a frozenset of symbols"
     return None
 
 
@@ -90,7 +103,11 @@ def check_order(
     `order` is the bracket order written by tools.size.size_position.
     `now` must be timezone-aware; it is converted to New York time. A naive or non-datetime
     `now`, or a DayState whose trades_today is not a non-negative int or whose
-    risk_used_today is not a finite, non-negative Decimal, is an early BLOCK (#31).
+    risk_used_today is not a finite, non-negative Decimal, is an early BLOCK (#31); likewise a
+    bad open_positions, realized_loss_today or stopped_out_symbols.
+    From the journal's order lifecycle (#109): `limits.max_open_positions` open positions, a
+    realized loss today at or over `limits.daily_loss_limit` (the daily loss stop), and a
+    symbol stopped out today (no same-day re-entry) each add a BLOCK reason.
     `limits.trading_enabled` other than True (the kill switch, #32) and `limits.paper` other
     than True each add a BLOCK reason.
     `gate` is the event-gate result (tools.event_gate.event_gate, #112). Only a fresh CLEAR for
@@ -217,6 +234,17 @@ def check_order(
         reasons.append(
             f"already {state.trades_today} trades today (max {limits.max_trades_per_day})"
         )
+    # Phase 5 (#109): one position at a time, the daily loss stop, no re-entry after a stop.
+    if state.open_positions >= limits.max_open_positions:
+        reasons.append(
+            f"already {state.open_positions} open position(s) "
+            f"(max {limits.max_open_positions})")
+    if state.realized_loss_today >= limits.daily_loss_limit:
+        reasons.append(
+            f"daily loss stop: realized loss {state.realized_loss_today:.2f} today reached "
+            f"the daily limit {limits.daily_loss_limit}; no new entries")
+    if symbol and symbol in state.stopped_out_symbols:
+        reasons.append(f"{symbol} was stopped out today: no re-entry")
 
     # NYSE calendar (#11): holidays, early closes (13:00, entry window ending before the
     # 12:55 flat-by) and an uncovered year all BLOCK.

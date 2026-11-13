@@ -34,7 +34,7 @@ from agents.llm import AgentConfig, config_for
 from agents.orchestrator import AGENTS, load_checked_limits, run_analysts
 from agents.schemas import DebateRecord, DecisionPacket
 from agents.trader import TraderRun, forced_pass, run_trader
-from journal.log import Journal
+from journal.log import Journal, JournalError, JournalLockTimeout
 from pipeline.events import events_from
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
@@ -82,6 +82,37 @@ def _elapsed_s(start: datetime, now: datetime) -> float:
     return round((now - start).total_seconds(), 3)
 
 
+JOURNAL_LOCKED = "journal_locked"
+JOURNAL_ERROR = "journal_error"
+RECORD_ATTEMPTS = 2  # the record of a failed approval is written with one retry (#129)
+
+
+def _journal_failed(proposal: Proposal, journal: Journal, exc: JournalError,
+                    clock: Clock) -> Outcome:
+    """The outcome when approve() raised JournalError (#129): "journal_locked" for a lock
+    timeout, else "journal_error". Nothing is approved. The attempt is journaled, retried
+    once; if both writes fail, the outcome's reason says it was not recorded."""
+    status = JOURNAL_LOCKED if isinstance(exc, JournalLockTimeout) else JOURNAL_ERROR
+    reason = f"journal unavailable after the answer, nothing approved: {exc}"
+    try:
+        at = clock().astimezone(NY).isoformat()
+    except Exception:  # noqa: BLE001 - the record must not fail on the clock
+        at = None
+    entry = {"status": status, "reason": reason, "run_id": proposal.run_id,
+             "plan_id": proposal.plan_id,
+             "symbol": proposal.plan.symbol if proposal.plan else None,
+             "proposal_checked_at": proposal.checked_at, "checked_at": at}
+    for _ in range(RECORD_ATTEMPTS):
+        try:
+            journal.append(entry)
+            break
+        except JournalError:
+            continue
+    else:
+        reason += " (and the attempt could not be journaled)"
+    return Outcome(status, reason, proposal)
+
+
 def run_decision(
     symbol: str,
     *,
@@ -96,7 +127,9 @@ def run_decision(
 ) -> DecisionResult:
     """Run one decision. `ask=None` stops after the ticket (no approval, nothing journaled
     as approved). A PASS, or a BUY that cannot be sized or fails the risk check, ends with
-    no order.
+    no order. If the journal cannot be locked or written during approval (#129), the outcome
+    is "journal_locked" (or "journal_error"), nothing is approved, and the attempt is
+    journaled (one retry).
 
     Raises ValueError before any API call for: a bad symbol, an invalid limits config, a bad
     agent config or debate rounds, a naive clock, or `timeout_s` not below
@@ -165,8 +198,14 @@ def run_decision(
     if ask is None:
         return result
     t0 = time.monotonic()
-    result.outcome = approve(result.proposal, ledger, journal=journal, ask=ask, clock=clock,
-                             quotes=quotes, events=events)
+    try:
+        result.outcome = approve(result.proposal, ledger, journal=journal, ask=ask,
+                                 clock=clock, quotes=quotes, events=events)
+    except JournalError as exc:
+        # #129: the journal lock timed out (or a write failed) after the answer. Nothing is
+        # approved, since an approval exists only once its entry is written, but the attempt
+        # must still leave a record: one entry, written with one retry.
+        result.outcome = _journal_failed(result.proposal, journal, exc, clock)
     timings["approval"] = int((time.monotonic() - t0) * 1000)
     budget["plan_age_at_approval_s"] = result.outcome.plan_age_s
     return result

@@ -119,14 +119,43 @@ How the calendars are fetched and checked:
 - **Approval.** The first live call to each needs Ivan's explicit approval (CLAUDE.md rule
   6). Tests never call either.
 
+## Decision journal
+
+Every decision is a line in `journal/decisions.jsonl` (git-ignored). An approved order is
+written as `approved_not_sent` with a deterministic `client_order_id` (from the run id and the
+plan id: one order per plan). From Phase 5, everything that happens to it is appended as an
+order event; nothing is ever rewritten, and an order's state is the replay of its events
+(`journal/orders.py`):
+
+`approved_not_sent` → `submitting` → `submitted` / `rejected` / `send_unknown` →
+`partially_filled` / `filled` → `closed` (by `stop`, `target` or `flatten`), plus `cancelled`
+and `expired`.
+
+`risk_check` reads the day's totals from that replay (`Journal.day_state`):
+
+- **Trades:** every order sent today uses a slot, whatever happens to it
+  (`max_trades_per_day`). An approval never sent takes none.
+- **Risk:** each of today's orders counts at its sized worst-case `max_loss` (or its realized
+  loss, if larger) until the broker confirms a zero fill (`daily_loss_limit`).
+- **Open positions:** an order that may hold a position, from any day, blocks a new entry
+  while `max_open_positions` (1) are open. An approval not sent yet counts, with its risk,
+  only until its plan expires (`as_of + max_plan_age_s`); it is then journaled `expired`.
+- **Daily loss stop:** the realized losses of trades closed today (an overnight position
+  included) reaching `daily_loss_limit` stop new entries. Profits don't offset them.
+- **No re-entry:** a symbol stopped out today cannot be bought again that day.
+
+A malformed entry or an impossible order history fails closed: no order passes. Reads and
+writes take the journal's lock. A last line cut off by a crash blocks reading until a human
+runs `python -m journal.repair` (a dry run; `--yes` moves the fragment to a side file).
+
 ## Status
 
 - [x] Phase 0: repo, rules, subagents, CI
 - [x] Phase 1: tools (`bars`, `scan`, `news`, `exit_plan`, `size`, `risk_check`)
 - [x] Phase 2: first agent (Technical Analyst)
 - [x] Phase 3: parallel analysts + orchestrator
-- [ ] Phase 4: bull/bear debate + trader
-- [ ] Phase 5: paper trading, scheduling, decision journal
+- [x] Phase 4: bull/bear debate + trader
+- [ ] Phase 5: paper trading, scheduling, decision journal (in progress)
 - [ ] Phase 6: evaluation and optimization
 
 ## Follow-ups and known gaps

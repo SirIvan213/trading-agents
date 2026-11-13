@@ -1,7 +1,9 @@
 """Decision journal: one JSON object per line in journal/decisions.jsonl (git-ignored).
 
-Phase 4 sends nothing to a broker. An approved order is written here with status
-"approved_not_sent"; sending is Phase 5. Today's DayState for risk_check is read back from
+An approved order is written here with status "approved_not_sent" and its deterministic
+client_order_id; from Phase 5 everything that happens to it afterwards (submitting,
+submitted, fills, closed ...) is appended as an order event, and its state is derived by
+replaying them (journal/orders.py, #109). Today's DayState for risk_check is read back from
 these entries, fail-closed: an unreadable journal blocks the order instead of resetting the
 day's count.
 
@@ -16,19 +18,37 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from journal.orders import (
+    APPROVED,
+    CLOSED,
+    EXPIRED,
+    OrderError,
+    OrderState,
+    apply_event,
+    replay,
+)
 from tools.risk_check import DayState
 
 NY = ZoneInfo("America/New_York")
 DEFAULT_PATH = Path(__file__).resolve().parent / "decisions.jsonl"
-APPROVED = "approved_not_sent"
+__all__ = ["APPROVED", "DEFAULT_PATH", "Journal", "JournalError", "JournalLockTimeout",
+           "LOCK_TIMEOUT_S"]
 
 
 class JournalError(RuntimeError):
     """The journal could not be read or written."""
+
+
+class JournalLockTimeout(JournalError):
+    """The journal's lock could not be taken in time (another writer holds it)."""
+
+
+CUT_OFF = ("journal's last line was cut off (no newline): a write did not finish. "
+           "Run `python -m journal.repair` to move it aside")
 
 
 LOCK_TIMEOUT_S = 10.0
@@ -95,7 +115,7 @@ class Journal:
             timeout_s = LOCK_TIMEOUT_S
         deadline = time.monotonic() + timeout_s
         if not self._tx_lock.acquire(timeout=max(timeout_s, 0)):
-            raise JournalError("journal lock timed out")
+            raise JournalLockTimeout("journal lock timed out")
         try:
             try:
                 self.lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,7 +125,7 @@ class Journal:
             try:
                 while not _try_lock(fh):
                     if time.monotonic() >= deadline:
-                        raise JournalError("journal lock timed out")
+                        raise JournalLockTimeout("journal lock timed out")
                     time.sleep(0.01)
                 self._holder = me
                 try:
@@ -124,9 +144,13 @@ class Journal:
     def append(self, entry: dict) -> None:
         """Append one entry under the cross-process lock, so concurrent writers (other
         processes or Journal objects) can never overwrite each other's line. Raises
-        JournalError if it cannot be written or the lock cannot be taken."""
+        JournalError if it cannot be written or the lock cannot be taken, and (#128) if the
+        journal's last line was cut off by a crash: appending would glue the new entry onto
+        that fragment, making a bad line mid-file that journal.repair can no longer move."""
         line = json.dumps(entry, sort_keys=True, default=str)
         with self.exclusive():
+            if self._ends_cut_off():
+                raise JournalError(CUT_OFF)
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 with self.path.open("a", encoding="utf-8") as fh:
@@ -135,14 +159,39 @@ class Journal:
                 raise JournalError(
                     f"journal write failed ({type(exc).__name__})") from None
 
+    def _ends_cut_off(self) -> bool:
+        """True when the journal exists, is not empty and does not end with a newline."""
+        try:
+            with self.path.open("rb") as fh:
+                fh.seek(0, 2)
+                if fh.tell() == 0:
+                    return False
+                fh.seek(-1, 2)
+                return fh.read(1) != b"\n"
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise JournalError(f"journal unreadable ({type(exc).__name__})") from None
+
     def entries(self) -> list[dict]:
-        """Every entry, oldest first. Raises JournalError for an unreadable or corrupt file."""
+        """Every entry, oldest first. Raises JournalError for an unreadable or corrupt file.
+
+        Reads under the journal's lock (#128), like every write, so a reader never sees
+        another process's half-written last line. A last line WITHOUT its newline is
+        therefore not a write in progress but one a crash cut off: it is refused (fail
+        closed), and `python -m journal.repair` moves it aside after a human looks."""
+        with self.exclusive():
+            return self._read_entries()
+
+    def _read_entries(self) -> list[dict]:
         if not self.path.exists():
             return []
         try:
             text = self.path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             raise JournalError(f"journal unreadable ({type(exc).__name__})") from None
+        if text and not text.endswith("\n"):
+            raise JournalError(CUT_OFF)
         out = []
         for n, line in enumerate(text.splitlines(), 1):
             if not line.strip():
@@ -156,30 +205,99 @@ class Journal:
             out.append(obj)
         return out
 
-    def day_state(self, now: datetime) -> DayState:
-        """Trades and risk already committed today (New York date of `now`).
+    def orders(self) -> dict[str, OrderState]:
+        """Every order in the journal, by client_order_id, as its entries replay
+        (journal/orders.py). Raises JournalError for a corrupt journal or an impossible
+        lifecycle."""
+        try:
+            return replay(self.entries())
+        except OrderError as exc:
+            raise JournalError(f"journal order history is invalid: {exc}") from None
 
-        Counts every "approved_not_sent" entry approved today, even though nothing was sent:
-        fail-closed, an approval uses up the day's trade and risk budget. Raises JournalError
-        for a corrupt journal or a malformed approved entry.
-        """
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise JournalError("now must be timezone-aware")
-        today = now.astimezone(NY).date()
-        trades, risk = 0, Decimal("0")
-        for e in self.entries():
-            if e.get("status") != APPROVED:
-                continue
+    def record_order_event(self, client_order_id: str, status: str, at: datetime,
+                           **fields: object) -> OrderState:
+        """Append one lifecycle event for an approved order and return its new state. Under
+        the lock, the journal is replayed and the event checked first (a known order, a
+        possible step, valid fields), so an impossible event is never written. Raises
+        JournalError otherwise, or if the journal cannot be read, locked or written."""
+        if not isinstance(at, datetime) or at.tzinfo is None or at.utcoffset() is None:
+            raise JournalError("order event time must be timezone-aware")
+        try:
+            stamp = at.astimezone(NY).isoformat()
+        except (OverflowError, ValueError):
+            raise JournalError("order event time is outside the supported date range") from None
+        entry = {**fields, "status": status, "client_order_id": client_order_id, "at": stamp}
+        with self.exclusive():
+            current = self.orders().get(client_order_id)
+            if current is None:
+                raise JournalError(f"no approved order {str(client_order_id)[:40]}")
             try:
-                when = datetime.fromisoformat(str(e["approved_at"]))
-                if when.tzinfo is None:
-                    raise ValueError
-                max_loss = Decimal(str(e["max_loss"]))
-                if not max_loss.is_finite() or max_loss < 0:
-                    raise ValueError
-            except (KeyError, ValueError, InvalidOperation):
-                raise JournalError("journal has a malformed approved entry") from None
-            if when.astimezone(NY).date() == today:
-                trades += 1
-                risk += max_loss
-        return DayState(trades_today=trades, risk_used_today=risk)
+                new = apply_event(current, entry)
+            except OrderError as exc:
+                raise JournalError(f"order event refused: {exc}") from None
+            self.append(entry)
+        return new
+
+    def expire_unsent(self, now: datetime) -> list[str]:
+        """Journal every approval that was never sent and whose plan has expired at `now`
+        as "expired" (filled_qty 0), releasing its position slot and its risk (Ivan's
+        decision on #109). Returns the client_order_ids expired. Under the lock; raises
+        JournalError if the journal cannot be read or written."""
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            raise JournalError("now must be timezone-aware")
+        done: list[str] = []
+        with self.exclusive():
+            for cid, o in self.orders().items():
+                if o.status == APPROVED and not o.live_unsent(now):
+                    self.record_order_event(cid, EXPIRED, now, filled_qty=0,
+                                            reason="plan expired before the order was sent")
+                    done.append(cid)
+        return done
+
+    def day_state(self, now: datetime) -> DayState:
+        """Today's trades, risk, open positions, realized losses and stop-outs (New York
+        date of `now`), replayed from the order lifecycle (journal/orders.py, #109):
+
+          - trades_today: every order approved today that was SENT (reached submitting),
+            whatever happened to it afterwards; an approval never sent takes no slot;
+          - risk_used_today: each of today's orders at its sized worst-case max_loss (or its
+            realized loss, if larger), released only when the broker confirmed a zero fill;
+          - open_positions: orders that may hold a position now, from ANY day (an overnight
+            one blocks too). An approval not sent yet counts (open, with its risk on its
+            approval day) only until its plan expires (OrderState.live_unsent), whether or
+            not its "expired" event is written yet;
+          - realized_loss_today: the losses of trades CLOSED today, whenever approved (an
+            overnight position closed this morning counts: the daily loss stop);
+          - stopped_out_symbols: symbols whose trade was closed by its stop today.
+
+        Fail-closed: raises JournalError for a corrupt journal, a malformed approved entry or
+        an impossible order history, so no order passes on totals that cannot be trusted.
+        """
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            raise JournalError("now must be timezone-aware")
+        try:
+            today = now.astimezone(NY).date()
+        except (OverflowError, ValueError):  # #127: an aware clock at the date-range limits
+            raise JournalError("now is outside the supported date range") from None
+        trades, risk, lost, opened = 0, Decimal("0"), Decimal("0"), 0
+        stopped: set[str] = set()
+        for o in self.orders().values():
+            day = o.approved_at.astimezone(NY).date()
+            if o.status == APPROVED:
+                if o.live_unsent(now):
+                    opened += 1
+                    if day == today:
+                        risk += o.committed_risk
+                continue
+            if o.open:
+                opened += 1
+            if o.status == CLOSED and o.last_at is not None and \
+                    o.last_at.astimezone(NY).date() == today:
+                lost += o.realized_loss
+                if o.stopped_out:
+                    stopped.add(o.symbol)
+            if day == today:
+                trades += 1 if o.sent else 0
+                risk += o.committed_risk
+        return DayState(trades_today=trades, risk_used_today=risk, open_positions=opened,
+                        realized_loss_today=lost, stopped_out_symbols=frozenset(stopped))
