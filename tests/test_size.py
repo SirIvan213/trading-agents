@@ -17,7 +17,7 @@ TSLA = Plan("tsla", entry=D("364.18"), stop=D("358.32"), target=D("370.04"))
 
 
 def test_sizes_to_max_loss():
-    r = size_position(TSLA, LIMITS)
+    r = size_position(TSLA, LIMITS, slippage=D("0"))
     assert r["ok"]
     assert r["shares"] == 8  # 50 / 5.86 = 8.53 -> 8
     assert r["max_loss"] == "46.88"
@@ -27,37 +27,37 @@ def test_sizes_to_max_loss():
 
 def test_position_cap_decides_when_tighter():
     limits = replace(LIMITS, max_position_value=D("1000"))
-    r = size_position(TSLA, limits)
+    r = size_position(TSLA, limits, slippage=D("0"))
     assert r["shares"] == 2  # 1000 / 364.18 = 2.7
     assert r["decided_by"] == "max_position_value"
 
 
 def test_stop_too_far_is_a_refusal():
     wide = replace(TSLA, stop=D("300.00"))  # 64.18 a share > $50
-    r = size_position(wide, LIMITS)
+    r = size_position(wide, LIMITS, slippage=D("0"))
     assert not r["ok"]
     assert "max_loss_per_trade" in r["reason"]
 
 
 def test_rejects_stop_at_or_above_entry():
-    assert not size_position(replace(TSLA, stop=D("364.18")), LIMITS)["ok"]
-    assert not size_position(replace(TSLA, stop=D("365.00")), LIMITS)["ok"]
+    assert not size_position(replace(TSLA, stop=D("364.18")), LIMITS, slippage=D("0"))["ok"]
+    assert not size_position(replace(TSLA, stop=D("365.00")), LIMITS, slippage=D("0"))["ok"]
 
 
 def test_rejects_target_at_or_below_entry():
-    assert not size_position(replace(TSLA, target=D("364.18")), LIMITS)["ok"]
+    assert not size_position(replace(TSLA, target=D("364.18")), LIMITS, slippage=D("0"))["ok"]
 
 
 # ---------- symbol handling (issue #5) ----------
 
 def test_plan_symbol_is_stripped_and_uppercased():
-    r = size_position(Plan(" gme ", D("20.00"), D("19.00"), D("21.00")), LIMITS)
+    r = size_position(Plan(" gme ", D("20.00"), D("19.00"), D("21.00")), LIMITS, slippage=D("0"))
     assert r["ok"] and r["order"]["symbol"] == "GME"
 
 
 @pytest.mark.parametrize("symbol", ["", "   ", "\n", None, 5, ["AAPL"]], ids=repr)
 def test_missing_or_non_string_symbol_is_refused(symbol):
-    r = size_position(Plan(symbol, D("20.00"), D("19.00"), D("21.00")), LIMITS)
+    r = size_position(Plan(symbol, D("20.00"), D("19.00"), D("21.00")), LIMITS, slippage=D("0"))
     assert r == {"ok": False, "reason": "symbol is required"}
 
 

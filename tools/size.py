@@ -27,12 +27,13 @@ def _floor_shares(amount: Decimal, per_share: Decimal) -> int:
     return int((amount / per_share).to_integral_value(rounding=ROUND_FLOOR))
 
 
-def size_position(plan: Plan, limits: Limits, slippage: Decimal = Decimal("0")) -> dict:
+def size_position(plan: Plan, limits: Limits, *, slippage: Decimal) -> dict:
     """Return {"ok", "shares", "decided_by", "risk_per_share", "slippage", "max_loss", "order"}
     or a refusal.
 
-    `slippage` (issue #68) is the per-share allowance for a market fill above plan.entry
-    (tools/slippage.py). The max-loss cap uses (entry - stop) + slippage per share, and the
+    `slippage` (issue #68) is the per-share allowance for a fill above plan.entry
+    (tools/slippage.py). It is a REQUIRED keyword-only argument (#138): no order may be sized
+    without its allowance. The max-loss cap uses (entry - stop) + slippage per share, and the
     position-value and cash caps use entry + slippage, so a fill up to entry + slippage stays
     within every limit. "max_loss" is that worst case; "risk_per_share" stays the planned
     entry - stop. The order carries "slippage" so risk_check can re-check it.

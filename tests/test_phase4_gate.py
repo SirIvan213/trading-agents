@@ -784,8 +784,14 @@ def _params(fn, defaults_ok=frozenset()):
 
 
 def test_size_position_signature_pinned():
-    # #68: the only addition is `slippage`, a tool-computed allowance (tools.slippage).
-    assert _params(size_position, defaults_ok={"slippage"}) == ["plan", "limits", "slippage"]
+    # #68: the only addition is `slippage`, a tool-computed allowance (tools.slippage); #138
+    # makes it a REQUIRED keyword-only argument (no default of 0)
+    sig = inspect.signature(size_position)
+    assert list(sig.parameters) == ["plan", "limits", "slippage"]
+    plan_p, limits_p, slip_p = sig.parameters.values()
+    assert plan_p.kind == limits_p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert slip_p.kind == inspect.Parameter.KEYWORD_ONLY
+    assert all(p.default is inspect.Parameter.empty for p in sig.parameters.values())
 
 
 def test_plan_fields_pinned():
@@ -929,9 +935,11 @@ def test_two_confidences_same_plan_same_order():
 def test_size_position_has_no_way_to_receive_confidence():
     with pytest.raises(TypeError):
         size_position(REAL_PLAN, LIMITS, confidence=0.99)  # type: ignore[call-arg]
-    # the third positional is the slippage allowance (#68): a confidence-like float there is
-    # not a Decimal, so it is refused, never used as a size or a price
-    refused = size_position(REAL_PLAN, LIMITS, 0.99)  # type: ignore[arg-type]
+    # there is no third positional (#138): the allowance is keyword-only, so a confidence-like
+    # float cannot be passed positionally, and as slippage it is not a Decimal, so refused
+    with pytest.raises(TypeError):
+        size_position(REAL_PLAN, LIMITS, 0.99)  # type: ignore[misc]
+    refused = size_position(REAL_PLAN, LIMITS, slippage=0.99)  # type: ignore[arg-type]
     assert refused == {"ok": False, "reason": "slippage must be a finite, non-negative Decimal"}
     with pytest.raises(TypeError):
         build_order(plan_record(), LIMITS, FRESH, QUOTE, confidence=0.99)  # type: ignore[call-arg]

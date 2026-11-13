@@ -1,0 +1,22 @@
+[
+ {
+  "asset_id": "00000000-0000-4000-8000-000000000042",
+  "symbol": "TSLA",
+  "exchange": "NASDAQ",
+  "asset_class": "us_equity",
+  "asset_marginable": true,
+  "avg_entry_price": "364.20",
+  "qty": "8",
+  "qty_available": "0",
+  "side": "long",
+  "market_value": "2915.20",
+  "cost_basis": "2913.60",
+  "unrealized_pl": "1.60",
+  "unrealized_plpc": "0.0005",
+  "unrealized_intraday_pl": "1.60",
+  "unrealized_intraday_plpc": "0.0005",
+  "current_price": "364.40",
+  "lastday_price": "360.00",
+  "change_today": "0.0122"
+ }
+]

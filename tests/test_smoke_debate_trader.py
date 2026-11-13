@@ -13,6 +13,7 @@ from tests.debate_helpers import bear_json, bull_json, reply
 from tests.fakes import FakeClient, api_error
 from tests.order_helpers import plan
 from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (autouse fixtures)
+from tests.test_smoke_scenarios import PLANS
 from tools.config import CONFIG_DIR, load_limits
 
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
@@ -57,7 +58,7 @@ def smoke(monkeypatch, tmp_path):
     def fake_analysts(*a, **k):
         rec.analyst_calls.append(k)
         ledger = k["ledger"]
-        p = plan(as_of=now.isoformat())
+        p = plan(as_of=now.isoformat(), **PLANS["tsla"])
         ledger.record(p)
         ledger.seal(accept=True)
         return make_packet([p])
@@ -93,7 +94,8 @@ def test_buy_prints_trader_section_and_ticket_and_never_writes_the_real_journal(
     assert "-- Order ticket (smoke: NO approval step, nothing journaled or sent) --" in out
     assert "the fixture's as_of" in out
     ticket = out.split("-- Order ticket")[1]
-    for part in ("ORDER TICKET", "Buy 8 shares of TSLA", "358.32", "370.04", "49.84",
+    # (8 x (5.86 + 0.25 allowance) = 48.88 worst case, #68)
+    for part in ("ORDER TICKET", "Buy 8 shares of TSLA", "242.79", "254.51", "48.88",
                  "NOT sent to a broker", "plan-1"):
         assert part in ticket, part
     assert "Type yes" not in out  # no approval step
@@ -114,7 +116,8 @@ def test_ticket_is_sized_from_the_ledger_at_the_fixture_clock(smoke, capsys, mon
     """A stale plan relative to the fixture clock prints NO ORDER, proving the clock is used."""
     def stale_analysts(*a, **k):
         ledger = k["ledger"]
-        p = plan(as_of=(smoke.now.replace(hour=9, minute=0)).isoformat())  # two hours old
+        p = plan(as_of=(smoke.now.replace(hour=9, minute=0)).isoformat(),  # two hours old
+                 **PLANS["tsla"])
         ledger.record(p)
         ledger.seal(accept=True)
         return make_packet([p])
