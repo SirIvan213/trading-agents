@@ -18,7 +18,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -206,11 +206,21 @@ class Journal:
         return new
 
     def day_state(self, now: datetime) -> DayState:
-        """Trades and risk already committed today (New York date of `now`).
+        """Today's trades, risk, open positions, realized losses and stop-outs (New York
+        date of `now`), replayed from the order lifecycle (journal/orders.py, #109):
 
-        Counts every "approved_not_sent" entry approved today, even though nothing was sent:
-        fail-closed, an approval uses up the day's trade and risk budget. Raises JournalError
-        for a corrupt journal or a malformed approved entry.
+          - trades_today: every order approved today, whatever happened to it (a submitted
+            order uses a trade slot);
+          - risk_used_today: each of today's orders at its sized worst-case max_loss (or its
+            realized loss, if larger), released only when the broker confirmed a zero fill;
+          - open_positions: orders that may hold a position now, from ANY day (an overnight
+            one blocks too). An order approved but never sent counts only on its approval
+            day: it can never be sent later, its plan having expired;
+          - realized_loss_today: the losses of today's closed trades (the daily loss stop);
+          - stopped_out_symbols: symbols whose trade today was closed by its stop.
+
+        Fail-closed: raises JournalError for a corrupt journal, a malformed approved entry or
+        an impossible order history, so no order passes on totals that cannot be trusted.
         """
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise JournalError("now must be timezone-aware")
@@ -218,21 +228,18 @@ class Journal:
             today = now.astimezone(NY).date()
         except (OverflowError, ValueError):  # #127: an aware clock at the date-range limits
             raise JournalError("now is outside the supported date range") from None
-        trades, risk = 0, Decimal("0")
-        for e in self.entries():
-            if e.get("status") != APPROVED:
+        trades, risk, lost, opened = 0, Decimal("0"), Decimal("0"), 0
+        stopped: set[str] = set()
+        for o in self.orders().values():
+            day = o.approved_at.astimezone(NY).date()
+            if o.open and (o.status != APPROVED or day == today):
+                opened += 1
+            if day != today:
                 continue
-            try:
-                when = datetime.fromisoformat(str(e["approved_at"]))
-                if when.tzinfo is None:
-                    raise ValueError
-                max_loss = Decimal(str(e["max_loss"]))
-                if not max_loss.is_finite() or max_loss < 0:
-                    raise ValueError
-                day = when.astimezone(NY).date()
-            except (KeyError, ValueError, InvalidOperation, OverflowError):
-                raise JournalError("journal has a malformed approved entry") from None
-            if day == today:
-                trades += 1
-                risk += max_loss
-        return DayState(trades_today=trades, risk_used_today=risk)
+            trades += 1
+            risk += o.committed_risk
+            lost += o.realized_loss
+            if o.stopped_out:
+                stopped.add(o.symbol)
+        return DayState(trades_today=trades, risk_used_today=risk, open_positions=opened,
+                        realized_loss_today=lost, stopped_out_symbols=frozenset(stopped))

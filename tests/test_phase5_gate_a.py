@@ -379,7 +379,7 @@ def race(monkeypatch, tmp_path, lim: Limits, *, lock: bool):
 
     monkeypatch.setattr(Journal, "day_state", slow_day_state)
     path = tmp_path / "j.jsonl"
-    led = sealed_ledger()
+    leds = [sealed_ledger(), sealed_ledger()]  # two runs: a plan gets one order (#109)
     barrier = threading.Barrier(2, timeout=5)
 
     def ask(_):
@@ -388,7 +388,7 @@ def race(monkeypatch, tmp_path, lim: Limits, *, lock: bool):
 
     props = [propose(led, "plan-1", journal=Journal(path), clock=clock_at(T0), quotes=quotes_at(T0),
         events=events_clear())
-             for _ in range(2)]
+             for led in leds]
     assert all(p.ok for p in props)
     armed.set()
     outs: list = [None, None]
@@ -396,7 +396,7 @@ def race(monkeypatch, tmp_path, lim: Limits, *, lock: bool):
 
     def worker(i):
         try:
-            outs[i] = approve(props[i], led, journal=Journal(path), ask=ask, clock=clock_at(T0),
+            outs[i] = approve(props[i], leds[i], journal=Journal(path), ask=ask, clock=clock_at(T0),
                     quotes=quotes_at(T0), events=events_clear())
         except Exception as exc:  # noqa: BLE001 - surfaced by the assertion below
             errs.append(exc)

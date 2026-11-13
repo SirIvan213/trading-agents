@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import replace as _replace
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal as D
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -15,20 +17,25 @@ import journal.log as jl
 import pipeline.decide as decide
 import pipeline.order_flow as of
 from journal.log import APPROVED, Journal, JournalError
+from journal.orders import client_order_id
 from journal.repair import main as repair_main
 from journal.repair import repair, torn_tail
 from pipeline.order_flow import Outcome, propose
 from tests.order_helpers import (
     T0,
     approved_entry,
+    closed_trade,
     events_clear,
+    gate_for_order,
     journal_with,
     quotes_at,
     sealed_ledger,
+    sized_order,
 )
 from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (autouse fixtures)
 from tests.test_phase5_gate_d import run_scenario
-from tools.config import CONFIG_DIR, load_limits
+from tools.config import CONFIG_DIR, limits_from_dict, load_limits
+from tools.risk_check import DayState, check_order
 
 NY = ZoneInfo("America/New_York")
 LIMITS = load_limits(CONFIG_DIR / "limits.example.json")
@@ -86,7 +93,7 @@ def test_127_day_state_rejects_an_approved_entry_stamped_at_the_date_range_edge(
     entry = approved_entry(T0)
     entry["approved_at"] = "9999-12-31T23:59:00-12:00"
     j = journal_with(tmp_path / "j.jsonl", [entry])
-    with pytest.raises(JournalError, match="malformed approved entry"):
+    with pytest.raises(JournalError, match="approved_at is not an aware ISO time"):
         j.day_state(T0)
 
 
@@ -341,3 +348,226 @@ def test_129_a_normal_approval_is_unchanged(monkeypatch, tmp_path):
     result, journal, _, _ = run_scenario(monkeypatch, tmp_path, "clean-buy")
     assert result.outcome.status == APPROVED
     assert [e["status"] for e in journal.entries()] == [APPROVED]
+
+
+# ======================= #109: day totals from the order lifecycle =======================
+
+MON = datetime(2026, 11, 16, 10, 30, tzinfo=NY)  # a Monday
+
+
+def events_for(entry, *steps):
+    """Lifecycle events after `entry` (an approved entry): (status, fields) pairs."""
+    cid, out = entry["client_order_id"], []
+    when = datetime.fromisoformat(entry["approved_at"])
+    for i, (status, fields) in enumerate(steps, 1):
+        out.append({"status": status, "client_order_id": cid,
+                    "at": (when + timedelta(seconds=i)).isoformat(), **fields})
+    return out
+
+
+SUBMITTED = [("submitting", {}), ("submitted", {})]
+FILLED = [*SUBMITTED, ("filled", {"filled_qty": 8, "avg_price": "100.00"})]
+
+
+def state_of(tmp_path, *entries, now=MON):
+    return journal_with(tmp_path / "j.jsonl", list(entries)).day_state(now)
+
+
+def test_109_an_approval_today_uses_a_slot_its_risk_and_an_open_position(tmp_path):
+    s = state_of(tmp_path, approved_entry(MON - timedelta(minutes=5), "49.84"))
+    assert (s.trades_today, s.risk_used_today, s.open_positions) == (1, D("49.84"), 1)
+    assert s.realized_loss_today == 0 and s.stopped_out_symbols == frozenset()
+
+
+@pytest.mark.parametrize("steps", [
+    [("submitting", {})], [*SUBMITTED], [("submitting", {}), ("send_unknown", {})],
+    [*SUBMITTED, ("partially_filled", {"filled_qty": 3, "avg_price": "100"})], [*FILLED],
+    [*SUBMITTED, ("partially_filled", {"filled_qty": 3, "avg_price": "100"}),
+     ("cancelled", {})],
+], ids=["submitting", "submitted", "send_unknown", "partial", "filled", "partial-cancelled"])
+def test_109_an_order_that_may_hold_a_position_counts_open_and_keeps_its_risk(tmp_path, steps):
+    a = approved_entry(MON - timedelta(minutes=5), "49.84")
+    s = state_of(tmp_path, a, *events_for(a, *steps))
+    assert s.open_positions == 1 and s.trades_today == 1 and s.risk_used_today == D("49.84")
+
+
+@pytest.mark.parametrize("steps", [
+    [("submitting", {}), ("rejected", {})], [*SUBMITTED, ("cancelled", {})],
+    [*SUBMITTED, ("expired", {"filled_qty": 0})],
+    [("submitting", {}), ("send_unknown", {}), ("cancelled", {})],
+], ids=["rejected", "cancelled", "expired", "send_unknown-cancelled"])
+def test_109_a_confirmed_zero_fill_releases_risk_but_keeps_the_trade_slot(tmp_path, steps):
+    a = approved_entry(MON - timedelta(minutes=5), "49.84")
+    s = state_of(tmp_path, a, *events_for(a, *steps))
+    assert s.trades_today == 1 and s.risk_used_today == 0 and s.open_positions == 0
+
+
+def test_109_a_stop_out_records_the_loss_the_symbol_and_frees_the_position(tmp_path):
+    a = approved_entry(MON - timedelta(minutes=30), "49.84", symbol="BRKO")
+    s = state_of(tmp_path, a, *events_for(a, *FILLED, ("closed", {"closed_by": "stop",
+                                                                   "realized_pnl": "-48.50"})))
+    assert s.open_positions == 0 and s.trades_today == 1
+    assert s.risk_used_today == D("49.84") and s.realized_loss_today == D("48.50")
+    assert s.stopped_out_symbols == frozenset({"BRKO"})
+
+
+def test_109_a_gap_loss_larger_than_max_loss_is_what_counts(tmp_path):
+    a = approved_entry(MON - timedelta(minutes=30), "49.84")
+    s = state_of(tmp_path, a, *events_for(a, *FILLED, ("closed", {"closed_by": "stop",
+                                                                   "realized_pnl": "-80.00"})))
+    assert s.risk_used_today == D("80.00") and s.realized_loss_today == D("80.00")
+
+
+@pytest.mark.parametrize("closed_by", ["target", "flatten"])
+def test_109_only_a_stop_bars_re_entry(tmp_path, closed_by):
+    a = approved_entry(MON - timedelta(minutes=30), "49.84")
+    s = state_of(tmp_path, a, *events_for(a, *FILLED, ("closed", {"closed_by": closed_by,
+                                                                   "realized_pnl": "-3.00"})))
+    assert s.stopped_out_symbols == frozenset() and s.realized_loss_today == D("3.00")
+
+
+def test_109_a_profit_is_not_a_realized_loss_and_does_not_offset_one(tmp_path):
+    entries = [*closed_trade(MON - timedelta(hours=2), "40", pnl="-30.00", closed_by="stop",
+                             symbol="AAA"),
+               *closed_trade(MON - timedelta(hours=1), "40", pnl="+90.00", symbol="BBB")]
+    s = state_of(tmp_path, *entries)
+    assert s.realized_loss_today == D("30.00") and s.trades_today == 2
+    assert s.risk_used_today == D("80") and s.open_positions == 0
+
+
+def test_109_an_open_order_from_an_earlier_day_still_counts_as_open(tmp_path):
+    """An overnight position (filled on Friday, never closed) blocks Monday."""
+    a = approved_entry(MON - timedelta(days=3), "49.84")
+    s = state_of(tmp_path, a, *events_for(a, *FILLED))
+    assert s.open_positions == 1 and s.trades_today == 0 and s.risk_used_today == 0
+
+
+def test_109_an_unsent_approval_from_an_earlier_day_is_not_open(tmp_path):
+    """It can never be sent: its plan expired. One that reached submitting still counts."""
+    old = approved_entry(MON - timedelta(days=1), "49.84")
+    assert state_of(tmp_path, old).open_positions == 0
+    a = approved_entry(MON - timedelta(days=1), "49.84")
+    later = tmp_path / "later"
+    later.mkdir()
+    assert state_of(later, a, *events_for(a, ("submitting", {}))).open_positions == 1
+
+
+def test_109_an_impossible_history_fails_closed(tmp_path):
+    a = approved_entry(MON - timedelta(minutes=5), "49.84")
+    j = journal_with(tmp_path / "j.jsonl",
+                     [a, *events_for(a, ("filled", {"filled_qty": 8, "avg_price": "1"}))])
+    with pytest.raises(JournalError, match="order history is invalid"):
+        j.day_state(MON)
+
+
+# ======================= #109: the risk rules in check_order =======================
+
+def chk(state, limits=LIMITS, symbol="TSLA", now=MON):
+    o = sized_order(symbol)
+    return check_order(o, limits, state, now, gate_for_order(o, now))
+
+
+def test_109_a_clean_day_passes():
+    assert chk(DayState()) == {"verdict": "PASS", "reasons": []}
+
+
+def test_109_one_open_position_blocks_a_new_entry():
+    r = chk(DayState(trades_today=1, risk_used_today=D("49.84"), open_positions=1))
+    assert r == {"verdict": "BLOCK", "reasons": ["already 1 open position(s) (max 1)"]}
+
+
+def test_109_max_open_positions_is_a_limit():
+    lim = _replace(LIMITS, max_open_positions=2)
+    assert chk(DayState(open_positions=1), lim)["verdict"] == "PASS"
+    assert "already 2 open position(s) (max 2)" in chk(DayState(open_positions=2),
+                                                       lim)["reasons"]
+
+
+@pytest.mark.parametrize("lost,blocks", [("149.99", False), ("150.00", True),
+                                         ("212.00", True)])
+def test_109_the_daily_loss_stop(lost, blocks):
+    r = chk(DayState(realized_loss_today=D(lost)))
+    reason = (f"daily loss stop: realized loss {D(lost):.2f} today reached the daily limit "
+              "150.00; no new entries")
+    assert (reason in r["reasons"]) is blocks
+
+
+def test_109_no_same_day_re_entry_after_a_stop_out():
+    state = DayState(stopped_out_symbols=frozenset({"TSLA"}))
+    assert "TSLA was stopped out today: no re-entry" in chk(state)["reasons"]
+    assert chk(state, symbol="AAPL")["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("over,why", [
+    ({"open_positions": -1}, "open_positions must be a non-negative whole number"),
+    ({"open_positions": True}, "open_positions must be a non-negative whole number"),
+    ({"open_positions": 1.0}, "open_positions must be a non-negative whole number"),
+    ({"realized_loss_today": D("-1")}, "realized_loss_today must be a finite"),
+    ({"realized_loss_today": D("NaN")}, "realized_loss_today must be a finite"),
+    ({"realized_loss_today": 1.5}, "realized_loss_today must be a finite"),
+    ({"stopped_out_symbols": {"TSLA"}}, "stopped_out_symbols must be a frozenset"),
+    ({"stopped_out_symbols": frozenset({1})}, "stopped_out_symbols must be a frozenset"),
+], ids=lambda x: x if isinstance(x, str) else None)
+def test_109_a_bad_day_state_is_an_early_block(over, why):
+    r = chk(_replace(DayState(), **over))
+    assert r["verdict"] == "BLOCK" and any(why in x for x in r["reasons"])
+
+
+@pytest.mark.parametrize("raw,ok", [(1, True), (3, True), (0, False), (-1, False),
+                                    (True, False), ("2", True), (1.5, False)])
+def test_109_max_open_positions_config(raw, ok):
+    d = json.loads((CONFIG_DIR / "limits.example.json").read_text(encoding="utf-8"))
+    assert d["max_open_positions"] == 1  # the decided value ships in the example
+    d["max_open_positions"] = raw
+    if ok:
+        assert limits_from_dict(d).max_open_positions == int(raw)
+    else:
+        with pytest.raises(ValueError, match="max_open_positions"):
+            limits_from_dict(d)
+
+
+def test_109_a_missing_max_open_positions_means_one():
+    d = json.loads((CONFIG_DIR / "limits.example.json").read_text(encoding="utf-8"))
+    del d["max_open_positions"]
+    assert limits_from_dict(d).max_open_positions == 1
+
+
+# ======================= #109: end to end through propose =======================
+
+def proposal(tmp_path, entries):
+    j = journal_with(tmp_path / "j.jsonl", entries)
+    return propose(sealed_ledger(), "plan-1", journal=j, clock=lambda: T0,
+                   quotes=quotes_at(T0), events=events_clear())
+
+
+def test_109_propose_refuses_while_todays_order_is_open(limits, tmp_path):
+    a = approved_entry(T0 - timedelta(minutes=5), "10.00", symbol="AAPL")
+    p = proposal(tmp_path, [a, *events_for(a, *FILLED)])
+    assert p.ok is False and p.stage == "risk"
+    assert "already 1 open position(s) (max 1)" in p.reason
+
+
+def test_109_propose_passes_once_that_order_is_closed(limits, tmp_path):
+    p = proposal(tmp_path, closed_trade(T0 - timedelta(minutes=30), "10.00", symbol="AAPL"))
+    assert p.ok, p.reason
+
+
+def test_109_propose_refuses_after_the_daily_loss_stop(limits, tmp_path):
+    entries = [*closed_trade(T0 - timedelta(hours=2), "40", pnl="-90.00", closed_by="stop",
+                             symbol="AAA"),
+               *closed_trade(T0 - timedelta(hours=1), "40", pnl="-60.00", closed_by="stop",
+                             symbol="BBB")]
+    p = proposal(tmp_path, entries)
+    assert p.ok is False and p.stage == "risk"
+    assert "daily loss stop: realized loss 150.00 today reached the daily limit" in p.reason
+
+
+def test_109_propose_refuses_a_re_entry_after_a_stop_out(limits, tmp_path):
+    p = proposal(tmp_path, closed_trade(T0 - timedelta(hours=1), "10.00", pnl="-9.00",
+                                        closed_by="stop", symbol="TSLA"))
+    assert p.ok is False and "TSLA was stopped out today: no re-entry" in p.reason
+
+
+def test_109_the_same_run_and_plan_always_get_the_same_client_order_id():
+    led = sealed_ledger()
+    assert client_order_id(led.run_id, "plan-1") == client_order_id(led.run_id, "plan-1")

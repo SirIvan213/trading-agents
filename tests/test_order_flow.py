@@ -29,6 +29,7 @@ from tests.order_helpers import (
     T0,
     StepClock,
     approved_entry,
+    closed_trade,
     events_clear,
     journal_with,
     plan,
@@ -213,11 +214,13 @@ def test_market_closed_weekend_is_blocked(journal):
 
 def test_risk_block_when_journal_is_at_max_trades_per_day(ledger, journal):
     n = LIMITS.max_trades_per_day
-    for i in range(n - 1):  # one below the limit: still passes
-        journal.append(approved_entry(T0 - timedelta(minutes=i + 1)))
+    for i in range(n - 1):  # one below the limit: still passes (each trade is closed)
+        for e in closed_trade(T0 - timedelta(minutes=10 * (i + 1))):
+            journal.append(e)
     assert propose(ledger, "plan-1", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0),
         events=events_clear()).ok
-    journal.append(approved_entry(T0 - timedelta(minutes=n + 1)))
+    for e in closed_trade(T0 - timedelta(minutes=10 * (n + 1))):
+        journal.append(e)
     p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0), quotes=quotes_at(T0),
         events=events_clear())
     refused(p, "risk", f"already {n} trades today")
@@ -225,10 +228,11 @@ def test_risk_block_when_journal_is_at_max_trades_per_day(ledger, journal):
 
 def test_risk_block_on_daily_loss_limit_boundary(ledger, tmp_path):
     # worst-case loss of this order is 49.84 (#68); 100.16 used makes exactly 150.00: allowed
-    j_ok = journal_with(tmp_path / "a.jsonl", [approved_entry(T0, "100.16")])
+    # (an earlier trade today, closed at a profit: its max_loss stays counted, #109)
+    j_ok = journal_with(tmp_path / "a.jsonl", closed_trade(T0 - timedelta(hours=1), "100.16"))
     assert propose(ledger, "plan-1", journal=j_ok, clock=clock_at(T0), quotes=quotes_at(T0),
         events=events_clear()).ok
-    j_bad = journal_with(tmp_path / "b.jsonl", [approved_entry(T0, "100.17")])
+    j_bad = journal_with(tmp_path / "b.jsonl", closed_trade(T0 - timedelta(hours=1), "100.17"))
     refused(propose(ledger, "plan-1", journal=j_bad, clock=clock_at(T0),
             quotes=quotes_at(T0), events=events_clear()), "risk", "daily limit")
 
@@ -624,7 +628,6 @@ def test_approved_entry_carries_the_deterministic_client_order_id(ledger, journa
 
 
 def test_no_journal_entry_ever_holds_confidence_reasoning_or_evidence(ledger, journal):
-    approved(ledger, journal)
     approve(good(ledger, journal), ledger, journal=journal, ask=lambda _: "no", clock=clock_at(T0),
             quotes=quotes_at(T0), events=events_clear())
     approve(good(ledger, journal), ledger, journal=journal, ask=yes,
@@ -670,18 +673,35 @@ def test_journal_write_failure_after_approval_raises_and_counts_nothing(ledger, 
     assert j.day_state(T0).trades_today == 0
 
 
-def test_third_approval_of_the_day_blocks_the_fourth(ledger, journal):
-    """End to end through the journal: approvals consume the day's trade budget."""
-    for i in range(LIMITS.max_trades_per_day):  # 3 x 46.88 = 140.64, inside the 150 limit
-        t = T0 + timedelta(seconds=i)
-        p = propose(ledger, "plan-1", journal=journal, clock=clock_at(t), quotes=quotes_at(t),
+def test_third_approval_of_the_day_blocks_the_fourth(journal):
+    """End to end through the journal: approvals consume the day's trade budget. Each trade
+    is a new run (a plan gets one order) and is closed before the next (one position at a
+    time, #109)."""
+    from journal.orders import client_order_id
+    for i in range(LIMITS.max_trades_per_day):  # 3 x 49.84 = 149.52, inside the 150 limit
+        led, t = sealed_ledger(), T0 + timedelta(seconds=i)
+        p = propose(led, "plan-1", journal=journal, clock=clock_at(t), quotes=quotes_at(t),
             events=events_clear())
-        assert p.ok
-        assert approve(p, ledger, journal=journal, ask=yes, clock=clock_at(t),
+        assert p.ok, p.reason
+        assert approve(p, led, journal=journal, ask=yes, clock=clock_at(t),
                 quotes=quotes_at(t), events=events_clear()).status == APPROVED
-    p = propose(ledger, "plan-1", journal=journal, clock=clock_at(T0 + timedelta(seconds=9)),
-            quotes=quotes_at(T0 + timedelta(seconds=9)), events=events_clear())
-    assert p.ok is False and p.stage == "risk"
+        cid = client_order_id(led.run_id, "plan-1")
+        journal.record_order_event(cid, "submitting", t)
+        journal.record_order_event(cid, "submitted", t)
+        journal.record_order_event(cid, "filled", t, filled_qty=8, avg_price="364.18")
+        journal.record_order_event(cid, "closed", t, closed_by="target", realized_pnl="5.00")
+    t = T0 + timedelta(seconds=9)
+    p = propose(sealed_ledger(), "plan-1", journal=journal, clock=clock_at(t),
+                quotes=quotes_at(t), events=events_clear())
+    refused(p, "risk", f"already {LIMITS.max_trades_per_day} trades today")
+
+
+def test_a_plan_is_approved_at_most_once(ledger, journal):
+    """#109: the second approval of the same run and plan would reuse its client_order_id."""
+    approved(ledger, journal)
+    refused(propose(ledger, "plan-1", journal=journal, clock=clock_at(T0),
+                    quotes=quotes_at(T0), events=events_clear()),
+            "journal", "this plan already has an order (one order per plan)")
 
 
 # ===================== no model data can reach the order flow =====================

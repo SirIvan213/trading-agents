@@ -107,26 +107,31 @@ def test_naive_now_is_refused(j):
         j.day_state(datetime(2026, 10, 19, 10, 15))
 
 
+def _broken(**over):
+    """A full approved entry for T0's day with one field broken (or removed: value None)."""
+    e = approved_entry(datetime(2026, 10, 19, 10, 15, tzinfo=NY), "1.00")
+    for k, v in over.items():
+        if v is _DROP:
+            e.pop(k, None)
+        else:
+            e[k] = v
+    return e
+
+
+_DROP = object()
 MALFORMED = [
-    pytest.param({"status": APPROVED, "max_loss": "1.00"}, id="no-approved_at"),
-    pytest.param({"status": APPROVED, "approved_at": "2026-10-19T10:15:00-04:00"},
-                 id="no-max_loss"),
-    pytest.param({"status": APPROVED, "approved_at": "2026-10-19T10:15:00",
-                  "max_loss": "1.00"}, id="naive-approved_at"),
-    pytest.param({"status": APPROVED, "approved_at": "yesterday", "max_loss": "1.00"},
-                 id="bad-approved_at"),
-    pytest.param({"status": APPROVED, "approved_at": "2026-10-19T10:15:00-04:00",
-                  "max_loss": "abc"}, id="max_loss-text"),
-    pytest.param({"status": APPROVED, "approved_at": "2026-10-19T10:15:00-04:00",
-                  "max_loss": None}, id="max_loss-null"),
-    pytest.param({"status": APPROVED, "approved_at": "2026-10-19T10:15:00-04:00",
-                  "max_loss": "-1.00"}, id="max_loss-negative"),
-    pytest.param({"status": APPROVED, "approved_at": "2026-10-19T10:15:00-04:00",
-                  "max_loss": "NaN"}, id="max_loss-nan"),
-    pytest.param({"status": APPROVED, "approved_at": "2026-10-19T10:15:00-04:00",
-                  "max_loss": "Infinity"}, id="max_loss-inf"),
-    pytest.param({"status": APPROVED, "approved_at": None, "max_loss": "1.00"},
-                 id="approved_at-null"),
+    pytest.param(_broken(approved_at=_DROP), id="no-approved_at"),
+    pytest.param(_broken(max_loss=_DROP), id="no-max_loss"),
+    pytest.param(_broken(approved_at="2026-10-19T10:15:00"), id="naive-approved_at"),
+    pytest.param(_broken(approved_at="yesterday"), id="bad-approved_at"),
+    pytest.param(_broken(max_loss="abc"), id="max_loss-text"),
+    pytest.param(_broken(max_loss=None), id="max_loss-null"),
+    pytest.param(_broken(max_loss="-1.00"), id="max_loss-negative"),
+    pytest.param(_broken(max_loss="NaN"), id="max_loss-nan"),
+    pytest.param(_broken(max_loss="Infinity"), id="max_loss-inf"),
+    pytest.param(_broken(approved_at=None), id="approved_at-null"),
+    pytest.param(_broken(order=_DROP), id="no-order"),
+    pytest.param(_broken(run_id=_DROP), id="no-run_id"),
 ]
 
 
@@ -134,7 +139,7 @@ MALFORMED = [
 def test_malformed_approved_entry_fails_closed(j, entry):
     j.append(approved_entry(T0, "1.00"))
     j.append(entry)
-    with pytest.raises(JournalError, match="malformed approved entry"):
+    with pytest.raises(JournalError, match="order history is invalid"):
         j.day_state(T0)
 
 

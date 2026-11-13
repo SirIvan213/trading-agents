@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from agents.orchestrator import load_checked_limits
 from agents.schemas import ExitPlanRecord
 from journal.log import APPROVED, Journal, JournalError
-from journal.orders import client_order_id
+from journal.orders import OrderError, client_order_id
 from pipeline.events import EventSource
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
@@ -134,6 +134,9 @@ def propose(
     or a usable quote there is no order (stage "quote" when the source fails, "size" when the
     quote is missing, stale, crossed or the price moved past the slippage allowance).
 
+    A plan that already has an order in the journal (its client_order_id, #109) is refused
+    at stage "journal": one order per plan.
+
     The event gate (#112) is read from `events` (symbol, now, today's flat-by) and passed to
     check_order. Without an events source the result is missing and check_order BLOCKs; a
     source that raises is refused at stage "events". The result rides on the Proposal.
@@ -175,8 +178,13 @@ def propose(
     if sized.get("ok") is not True:
         return refuse("size", str(sized.get("reason", "order could not be built")), plan, sized)
     try:
+        # One order per plan (#109): the client_order_id is derived from the run and the plan,
+        # so a second approval of the same plan would be a second order with the same id.
+        if client_order_id(run_id, plan.plan_id) in journal.orders():
+            return refuse("journal", "this plan already has an order (one order per plan)",
+                          plan, sized)
         state = journal.day_state(now)
-    except JournalError as exc:
+    except (JournalError, OrderError) as exc:
         return refuse("journal", str(exc), plan, sized)
     gate: dict | None = None
     if events is not None:
