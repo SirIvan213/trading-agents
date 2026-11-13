@@ -263,15 +263,18 @@ def test_stale_is_reported_before_price_moved():
 
 # ======================= sizing with the allowance =======================
 
-def test_size_position_default_slippage_is_zero_and_unchanged():
-    r = size_position(Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS)
+def test_size_position_has_no_default_slippage():
+    """#138: no order may be sized without its allowance; an explicit zero still works."""
+    with pytest.raises(TypeError):
+        size_position(Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS)  # type: ignore[call-arg]
+    r = size_position(Plan("TSLA", D("364.18"), D("358.32"), D("370.04")), LIMITS, slippage=D("0"))
     assert r["shares"] == 8 and r["max_loss"] == "46.88" and r["slippage"] == "0"
     assert r["order"]["slippage"] == "0"
 
 
 def test_example_20_19_spread_2c_is_49_shares_not_50():
     entry, stop = D("20.00"), D("19.00")
-    flat = size_position(Plan("AAPL", entry, stop, D("21.00")), LIMITS)
+    flat = size_position(Plan("AAPL", entry, stop, D("21.00")), LIMITS, slippage=D("0"))
     assert flat["shares"] == 50 and flat["max_loss"] == "50.00"  # the old, optimistic size
     allowance = slip("20.00", quote("19.98", "20.00"))["allowance"]
     assert allowance == "0.02"
@@ -297,7 +300,7 @@ def test_tsla_spread_5c_gives_allowance_37c_8_shares_max_loss_49_84():
 def test_position_cap_uses_entry_plus_slippage():
     lim = replace(LIMITS, max_position_value=D("1000"), max_loss_per_trade=D("1000"))
     p = Plan("AAPL", D("20.00"), D("19.00"), D("21.00"))
-    assert size_position(p, lim)["shares"] == 50  # 1000 / 20
+    assert size_position(p, lim, slippage=D("0"))["shares"] == 50  # 1000 / 20
     r = size_position(p, lim, slippage=D("0.50"))
     assert r["shares"] == 48 and r["decided_by"] == "max_position_value"  # 1000 / 20.50
     assert 48 * D("20.50") <= 1000 < 49 * D("20.50")
@@ -307,7 +310,7 @@ def test_cash_cap_uses_entry_plus_slippage():
     lim = replace(LIMITS, account_cash=D("1000"), cash_buffer_pct=D("0"),
                   max_position_value=D("100000"), max_loss_per_trade=D("1000"))
     p = Plan("AAPL", D("20.00"), D("19.00"), D("21.00"))
-    assert size_position(p, lim)["shares"] == 50
+    assert size_position(p, lim, slippage=D("0"))["shares"] == 50
     r = size_position(p, lim, slippage=D("0.50"))
     assert r["shares"] == 48 and r["decided_by"] == "cash_after_buffer"
 
@@ -315,7 +318,7 @@ def test_cash_cap_uses_entry_plus_slippage():
 def test_stop_wider_than_the_budget_after_slippage_is_refused():
     # risk 49.90 fits one share under 50.00; with a 0.20 allowance the worst loss is 50.10
     p = Plan("AAPL", D("100.00"), D("50.10"), D("160.00"))
-    assert size_position(p, LIMITS)["shares"] == 1
+    assert size_position(p, LIMITS, slippage=D("0"))["shares"] == 1
     r = size_position(p, LIMITS, slippage=D("0.20"))
     assert r["ok"] is False and "max_loss_per_trade" in r["reason"]
 

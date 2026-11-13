@@ -214,7 +214,7 @@ def test_34_size_position_refuses_an_invalid_symbol(raw):
 
 
 def test_34_size_position_empty_symbol_still_says_required():
-    out = size_position(Plan("  ", D("100.00"), D("99.00"), D("102.00")), LIMITS)
+    out = size_position(Plan("  ", D("100.00"), D("99.00"), D("102.00")), LIMITS, slippage=D("0"))
     assert out == {"ok": False, "reason": "symbol is required"}
 
 
