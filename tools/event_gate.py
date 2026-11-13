@@ -34,7 +34,9 @@ Halts (`halt_status`), from two REQUIRED sources (#112, #144):
     dated today (incl. LULD LUDP / LUDS), any older halt still listed without a resumption,
     or a future-dated one, is EVENT. A failed, malformed, cut-short or stale feed is UNKNOWN.
   - news headlines: a headline flagged "halt" dated today is EVENT; a failed or malformed news
-    fetch, or any item that cannot be read, is UNKNOWN ("cannot rule out a halt").
+    fetch, or any item that cannot be read, is UNKNOWN ("cannot rule out a halt"). Except
+    (#182): an item whose timestamp parses to a time before today's New York midnight is
+    skipped, however malformed, as it cannot be today's halt; an unparseable time still counts.
   CLEAR only when BOTH load cleanly and neither shows a halt.
   The feed's coverage is proven only for Nasdaq, NYSE and NYSE American listings (#168): a
   symbol whose listing (tools.listing.parse_asset) is missing, failed, or on another venue is
@@ -479,7 +481,12 @@ def _news_halt_findings(symbol: str, now: datetime, news: object) -> list[Findin
     suspended ...) dated today in New York is EVENT. A failed or malformed fetch, or ANY item
     that cannot be read (not an object, no symbols list, a symbols list without this symbol in
     any spelling, no headline, no valid time), is UNKNOWN: the fetch was for this symbol, so
-    such an item might be today's halt. Clean news with no halt today adds nothing."""
+    such an item might be today's halt. Clean news with no halt today adds nothing.
+
+    Except (#182): an item whose `created_at` parses to a time BEFORE today's New York
+    midnight is skipped, however malformed the rest of it is. It cannot be today's halt, and
+    since #169 the fetch reaches back to the previous session's close (a Monday sees Friday
+    evening). An item whose time does not parse still counts as unreadable."""
     sym = _compact(symbol)
     ok = isinstance(news, dict) and news.get("ok") is True
     reply = news.get("news") if ok else None
@@ -489,9 +496,19 @@ def _news_halt_findings(symbol: str, now: datetime, news: object) -> list[Findin
         return [_finding("halt", "news", UNKNOWN,
                          f"news unavailable ({why}): cannot rule out a halt today")]
     today = now.astimezone(NY).date()
+    midnight = datetime.combine(today, datetime.min.time(), tzinfo=NY).astimezone(UTC)
     findings: list[Finding] = []
     unreadable = 0
     for item in items:
+        # The item's time in UTC, or None when it is missing, does not parse, or cannot be
+        # converted (a year-1 or year-9999 stamp overflows): all of those are unreadable.
+        when = _parse_time(item.get("created_at")) if isinstance(item, dict) else None
+        try:
+            when_utc = when.astimezone(UTC) if when is not None else None
+        except OverflowError:
+            when_utc = None
+        if when_utc is not None and when_utc < midnight:
+            continue  # #182: before today in New York, so not today's halt
         if not isinstance(item, dict) or not isinstance(item.get("symbols"), list):
             unreadable += 1
             continue
@@ -500,11 +517,11 @@ def _news_halt_findings(symbol: str, now: datetime, news: object) -> list[Findin
             # another spelling) is a mismatch we cannot read, not proof of "no halt".
             unreadable += 1
             continue
-        headline, when = item.get("headline"), _parse_time(item.get("created_at"))
-        if not isinstance(headline, str) or not headline.strip() or when is None:
+        headline = item.get("headline")
+        if not isinstance(headline, str) or not headline.strip() or when_utc is None:
             unreadable += 1
             continue
-        if "halt" in headline_flags(headline) and when.astimezone(NY).date() == today:
+        if "halt" in headline_flags(headline) and when_utc.astimezone(NY).date() == today:
             findings.append(_finding("halt", "news", EVENT,
                                      f"trading halt today: {headline.strip()[:160]!r}"))
     if unreadable:
