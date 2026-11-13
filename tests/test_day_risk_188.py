@@ -100,3 +100,13 @@ def test_a_live_unsent_approval_and_a_pending_send_count_at_their_worst_case(tmp
 def test_a_loss_closed_yesterday_does_not_count_today(tmp_path):
     entries = closed_trade(T0 - timedelta(days=1), "49.84", pnl="-140.00", closed_by="stop")
     assert journal_with(tmp_path / "j.jsonl", entries).day_state(T0).risk_used_today == 0
+
+
+def test_a_live_unsent_approval_from_late_yesterday_counts_after_midnight(tmp_path):
+    """Approved 23:58, its plan expires 00:03: at 00:01 it still holds its worst case."""
+    late = datetime(2026, 10, 18, 23, 58, tzinfo=NY)
+    a = approved_entry(late, "49.84")  # expires 00:03
+    j = journal_with(tmp_path / "j.jsonl", [a])
+    s = j.day_state(datetime(2026, 10, 19, 0, 1, tzinfo=NY))
+    assert s.risk_used_today == D("49.84") and s.open_positions == 1 and s.trades_today == 0
+    assert j.day_state(datetime(2026, 10, 19, 0, 3, tzinfo=NY)).risk_used_today == 0

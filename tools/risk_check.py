@@ -27,7 +27,8 @@ ORDER_FIELDS = frozenset(
 @dataclass(frozen=True)
 class DayState:
     trades_today: int = 0
-    risk_used_today: Decimal = Decimal("0")  # sum of max-loss-at-stop of today's entries
+    # #188: today's realized losses plus the worst-case max_loss of everything open or pending
+    risk_used_today: Decimal = Decimal("0")
     # Phase 5 (#109), from the journal's order lifecycle (journal/orders.py):
     open_positions: int = 0  # orders that may hold a position now (any day)
     realized_loss_today: Decimal = Decimal("0")  # today's closed trades' losses, positive

@@ -708,7 +708,7 @@ def test_b1_a_decision_after_a_crash_leaves_the_journal_repairable(monkeypatch, 
 
 def test_s1_an_overnight_position_closed_this_morning_counts_today(tmp_path):
     """Approved and filled on Friday, stopped out on Monday morning: Monday's loss and
-    stop-out, though not Monday's trade or risk."""
+    stop-out and Monday's risk (#188), though not Monday's trade."""
     a = approved_entry(MON - timedelta(days=3), "49.84", symbol="GAPA")
     cid = a["client_order_id"]
     events = [*events_for(a, *FILLED),
@@ -725,6 +725,7 @@ def test_s1_a_trade_closed_yesterday_does_not_count_today(tmp_path):
     s = state_of(tmp_path, a, *events_for(a, *FILLED, ("closed", {"closed_by": "stop",
                                                                    "realized_pnl": "-120"})))
     assert s.realized_loss_today == 0 and s.stopped_out_symbols == frozenset()
+    assert s.risk_used_today == 0
 
 
 def test_lock_timeouts_raise_the_journal_lock_timeout_subclass(tmp_path, monkeypatch):

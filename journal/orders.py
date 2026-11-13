@@ -134,7 +134,8 @@ class OrderState:
     @property
     def released(self) -> bool:
         """The broker confirmed a ZERO fill: rejected, or cancelled/expired with nothing
-        filled. Only then does the order stop counting toward the day's risk."""
+        filled. Until then (or until it closes, #188) it counts its max_loss in the day's
+        risk."""
         return self.status in (REJECTED, CANCELLED, EXPIRED) and self.filled_qty == 0
 
     @property

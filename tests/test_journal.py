@@ -81,13 +81,14 @@ def test_empty_journal_is_an_empty_day(j):
     assert (s.trades_today, s.risk_used_today) == (0, D("0"))
 
 
-def test_counts_only_todays_approvals_and_sums_max_loss(j):
+def test_counts_only_todays_sent_orders_and_sums_their_open_risk(j):
     yesterday = T0 - timedelta(days=1)
     tomorrow = T0 + timedelta(days=1)
     for e in [
         *sent_order(T0 - timedelta(hours=1), "46.88"),
         *sent_order(T0, "10.00"),
-        *closed_trade(yesterday, "99.00"),  # another day, closed: not counted
+        *closed_trade(yesterday, "99.00", pnl="-99.00", closed_by="stop"),  # closed
+        # yesterday: neither its trade nor its loss counts today
         *closed_trade(tomorrow, "99.00"),
         {"status": "declined", "approved_at": T0.isoformat(), "max_loss": "77"},
         {"status": "refused_after_approval", "max_loss": "77"},
