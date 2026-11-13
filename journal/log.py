@@ -163,9 +163,12 @@ class Journal:
         fail-closed, an approval uses up the day's trade and risk budget. Raises JournalError
         for a corrupt journal or a malformed approved entry.
         """
-        if now.tzinfo is None or now.utcoffset() is None:
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise JournalError("now must be timezone-aware")
-        today = now.astimezone(NY).date()
+        try:
+            today = now.astimezone(NY).date()
+        except (OverflowError, ValueError):  # #127: an aware clock at the date-range limits
+            raise JournalError("now is outside the supported date range") from None
         trades, risk = 0, Decimal("0")
         for e in self.entries():
             if e.get("status") != APPROVED:
@@ -177,9 +180,10 @@ class Journal:
                 max_loss = Decimal(str(e["max_loss"]))
                 if not max_loss.is_finite() or max_loss < 0:
                     raise ValueError
-            except (KeyError, ValueError, InvalidOperation):
+                day = when.astimezone(NY).date()
+            except (KeyError, ValueError, InvalidOperation, OverflowError):
                 raise JournalError("journal has a malformed approved entry") from None
-            if when.astimezone(NY).date() == today:
+            if day == today:
                 trades += 1
                 risk += max_loss
         return DayState(trades_today=trades, risk_used_today=risk)

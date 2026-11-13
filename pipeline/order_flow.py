@@ -94,10 +94,19 @@ def _iso(now: datetime) -> str:
     return now.astimezone(NY).isoformat()
 
 
+def _checked_at(now: object) -> str:
+    """`now` in New York time, or as given when it cannot be converted (naive, not a datetime,
+    or too close to the date-range limits, #127): a refusal still needs a timestamp."""
+    try:
+        return _iso(now)  # type: ignore[arg-type]
+    except (OverflowError, ValueError, TypeError, AttributeError):
+        return str(now)
+
+
 def _expires_at(plan: ExitPlanRecord, max_age_s: int) -> str | None:
     try:
         return _iso(datetime.fromisoformat(plan.as_of) + timedelta(seconds=max_age_s))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -124,19 +133,27 @@ def propose(
 
     The event gate (#112) is read from `events` (symbol, now, today's flat-by) and passed to
     check_order. Without an events source the result is missing and check_order BLOCKs; a
-    source that raises is refused at stage "events". The result rides on the Proposal."""
+    source that raises is refused at stage "events". The result rides on the Proposal.
+
+    A clock that is naive, or aware but too close to the date-range limits to convert to New
+    York time (#127), is refused at stage "plan"."""
     now = clock()
     run_id = ledger.run_id if isinstance(ledger, PlanLedger) else ""
+    checked_at = _checked_at(now)
 
     def refuse(
         stage: str, reason: str, plan: ExitPlanRecord | None = None,
         sized: dict | None = None, verdict: dict | None = None, gate: dict | None = None,
     ) -> Proposal:
-        return Proposal(False, stage, reason, run_id, plan_id, plan, sized, verdict, _iso(now),
-                        gate=gate)
+        return Proposal(False, stage, reason, run_id, plan_id, plan, sized, verdict,
+                        checked_at, gate=gate)
 
-    if now.tzinfo is None or now.utcoffset() is None:
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
         return refuse("plan", "clock must be timezone-aware")
+    try:
+        _iso(now)
+    except (OverflowError, ValueError):
+        return refuse("plan", "clock is outside the supported date range")
     try:
         limits = load_checked_limits()
     except ValueError:
@@ -168,7 +185,7 @@ def propose(
     if verdict.get("verdict") != "PASS":
         return refuse("risk", "; ".join(verdict.get("reasons", [])) or "blocked",
                       plan, sized, verdict, gate)
-    return Proposal(True, None, None, run_id, plan_id, plan, sized, verdict, _iso(now),
+    return Proposal(True, None, None, run_id, plan_id, plan, sized, verdict, checked_at,
                     _expires_at(plan, limits.max_plan_age_s), gate)
 
 
