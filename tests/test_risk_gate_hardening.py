@@ -499,7 +499,8 @@ def test_78_one_cent_below_the_percent_floor_is_refused(sized_spy):
 
 def test_78_exactly_min_risk_per_share_passes_that_floor(sized_spy):
     lim = replace(LIMITS, min_risk_pct=D("0.01"))  # isolate the absolute floor
-    p = forged("100.00", "99.90", "100.10", "0.10")
+    # 2R target: at 1R the 0.10 reward would equal the 0.10 minimum allowance (#139)
+    p = forged("100.00", "99.90", "100.20", "0.10")
     assert build(p, lim)["ok"] is True and len(sized_spy) == 1
 
 

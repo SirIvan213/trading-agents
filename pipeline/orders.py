@@ -123,6 +123,18 @@ def build_order(
     slip = slippage_from_quote(entry, quote, limits, now)
     if slip.get("ok") is not True:
         return {"ok": False, "reason": str(slip.get("reason", "no live quote"))}
+    # #139: a quote that already breaks the plan. A bid at or below the stop means the bracket
+    # would stop out at once; an allowance that reaches the reward means a worst-case fill at
+    # entry + allowance would be at or above the take-profit (Alpaca also needs the target
+    # above the stop, and the stop below the entry limit price, which this keeps true).
+    bid, allowance = Decimal(slip["bid"]), Decimal(slip["allowance"])
+    if bid <= stop:
+        return {"ok": False, "reason": (
+            f"live bid {slip['bid']} is at or below the stop {stop}: the plan is already broken")}
+    if allowance >= target - entry:
+        return {"ok": False, "reason": (
+            f"slippage allowance {slip['allowance']} reaches the reward {target - entry}: a "
+            f"worst-case fill at {entry + allowance} would be at or above the target {target}")}
     sized = size_position(Plan(plan.symbol, entry, stop, target), limits,
                           slippage=Decimal(slip["allowance"]))
     if sized.get("ok") is True:

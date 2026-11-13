@@ -25,7 +25,10 @@ PLANS = {
                       risk_per_share="0.34", reward_to_risk="2.00", last_close="80.72"),
     "red-flag": dict(symbol="VNTR", entry="92.72", stop="92.37", target="93.42",
                      risk_per_share="0.35", reward_to_risk="2.00", last_close="92.72"),
-    "tsla": dict(symbol="TSLA"),
+    # #139: the TSLA fixture's own price (last trade 248.65, quote 248.63/248.67), the same
+    # 5.86 risk and 1R target as the generic test plan, so the live bid is above the stop
+    "tsla": dict(symbol="TSLA", entry="248.65", stop="242.79", target="254.51",
+                 risk_per_share="5.86", reward_to_risk="1.00", last_close="248.65"),
 }
 SHARES = {"clean-buy": 37, "red-flag": 32, "tsla": 8}
 

@@ -359,7 +359,7 @@ def grid_plan(entry: str, risk: str):
 
 
 def test_every_accepted_quote_keeps_every_fill_within_every_limit():
-    accepted = refused_price = unsizable = noise_refused = 0
+    accepted = refused_price = unsizable = noise_refused = broken_plan = 0
     for entry, risk, spread, limits, off in product(
             ENTRIES, RISKS, SPREADS, GRID_LIMITS, ASK_OFFSETS):
         p = grid_plan(entry, risk)
@@ -384,6 +384,9 @@ def test_every_accepted_quote_keeps_every_fill_within_every_limit():
         if out["ok"] is not True:
             if out["reason"].startswith("price moved"):
                 refused_price += 1
+                continue
+            if out["reason"].startswith(("live bid", "slippage allowance")):
+                broken_plan += 1  # #139: the quote already breaks the plan
                 continue
             assert "max_loss_per_trade" in out["reason"] or "shares" in out["reason"], out
             unsizable += 1
@@ -412,7 +415,7 @@ def test_every_accepted_quote_keeps_every_fill_within_every_limit():
             gate=gate_for_order(out["order"], NOW))
         assert verdict["verdict"] == "PASS", (entry, risk, spread, verdict)
     assert accepted > 500 and refused_price > 200 and unsizable >= 0  # both paths ran
-    assert noise_refused > 0
+    assert noise_refused > 0 and broken_plan > 0  # #139 refusals ran too
 
 
 # ======================= risk_check =======================
