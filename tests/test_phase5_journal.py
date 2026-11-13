@@ -12,11 +12,12 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import journal.log as jl
+import pipeline.decide as decide
 import pipeline.order_flow as of
 from journal.log import APPROVED, Journal, JournalError
 from journal.repair import main as repair_main
 from journal.repair import repair, torn_tail
-from pipeline.order_flow import propose
+from pipeline.order_flow import Outcome, propose
 from tests.order_helpers import (
     T0,
     approved_entry,
@@ -25,6 +26,8 @@ from tests.order_helpers import (
     quotes_at,
     sealed_ledger,
 )
+from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (autouse fixtures)
+from tests.test_phase5_gate_d import run_scenario
 from tools.config import CONFIG_DIR, load_limits
 
 NY = ZoneInfo("America/New_York")
@@ -230,3 +233,111 @@ def test_128_repair_of_a_whole_journal_is_a_no_op(tmp_path, capsys):
     assert repair_main(["--path", str(path), "--yes"]) == 0
     assert "nothing to repair" in capsys.readouterr().out
     assert list(tmp_path.glob("*.torn-*")) == []
+
+
+# ======================= #129: a lock timeout after "yes" =======================
+
+def lines(path):
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+
+def test_129_end_to_end_lock_held_elsewhere_after_yes_is_journal_locked_and_recorded(
+        monkeypatch, tmp_path):
+    """decide.run_decision with the journal lock held by another process (another Journal
+    object) from the moment the human types yes until just after approve gives up. The
+    approval times out; nothing is approved; the attempt is journaled."""
+    monkeypatch.setattr(jl, "LOCK_TIMEOUT_S", 0.3)
+    path = tmp_path / "clean-buy.jsonl"
+    holder = Journal(path)
+    hold, release = threading.Event(), threading.Event()
+
+    def keep_lock():
+        with holder.exclusive():
+            hold.set()
+            release.wait(5)
+
+    real_append = Journal.append
+    attempts = []
+
+    def append_spy(self, entry):
+        attempts.append(entry["status"])
+        if entry["status"] == decide.JOURNAL_LOCKED:
+            release.set()  # the other process finishes; the record's write can now succeed
+        return real_append(self, entry)
+
+    monkeypatch.setattr(Journal, "append", append_spy)
+
+    def answer_then_lock(_question):
+        threading.Thread(target=keep_lock, daemon=True).start()
+        hold.wait(5)
+        return "yes"
+
+    result, journal, asked, _ = run_scenario(monkeypatch, tmp_path, "clean-buy",
+                                             answers=answer_then_lock)
+    release.set()
+    assert len(asked) == 1
+    assert result.outcome.status == decide.JOURNAL_LOCKED
+    assert "nothing approved" in result.outcome.reason
+    assert "lock timed out" in result.outcome.reason
+    (entry,) = lines(path)
+    assert entry["status"] == decide.JOURNAL_LOCKED and entry["plan_id"] == "plan-1"
+    assert entry["symbol"] == "BRKO" and entry["run_id"] == result.ledger_run_id
+    assert APPROVED not in [e["status"] for e in lines(path)]
+    assert Journal(path).day_state(
+        datetime.fromisoformat(result.proposal.checked_at)).trades_today == 0
+
+
+def test_129_the_record_is_retried_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(decide, "approve", lambda *a, **k: (_ for _ in ()).throw(
+        JournalError("journal lock timed out")))
+    real_append = Journal.append
+    tries = []
+
+    def flaky(self, entry):
+        tries.append(entry["status"])
+        if len(tries) == 1:
+            raise JournalError("journal lock timed out")
+        return real_append(self, entry)
+
+    monkeypatch.setattr(Journal, "append", flaky)
+    result, journal, _, _ = run_scenario(monkeypatch, tmp_path, "clean-buy")
+    assert result.outcome.status == decide.JOURNAL_LOCKED
+    assert tries == [decide.JOURNAL_LOCKED, decide.JOURNAL_LOCKED]
+    assert [e["status"] for e in journal.entries()] == [decide.JOURNAL_LOCKED]
+    assert "could not be journaled" not in result.outcome.reason
+
+
+def test_129_when_both_writes_fail_the_outcome_says_it_was_not_recorded(monkeypatch, tmp_path):
+    monkeypatch.setattr(decide, "approve", lambda *a, **k: (_ for _ in ()).throw(
+        JournalError("journal lock timed out")))
+    real_append = Journal.append
+    tries = []
+
+    def broken(self, entry):
+        tries.append(entry["status"])
+        if entry["status"] == decide.JOURNAL_LOCKED:
+            raise JournalError("journal lock timed out")
+        return real_append(self, entry)
+
+    monkeypatch.setattr(Journal, "append", broken)
+    result, journal, _, _ = run_scenario(monkeypatch, tmp_path, "clean-buy")
+    assert result.outcome.status == decide.JOURNAL_LOCKED
+    assert tries == [decide.JOURNAL_LOCKED] * decide.RECORD_ATTEMPTS
+    assert result.outcome.reason.endswith("(and the attempt could not be journaled)")
+    assert journal.entries() == []
+
+
+def test_129_a_write_failure_that_is_not_a_lock_timeout_is_journal_error(monkeypatch,
+                                                                        tmp_path):
+    monkeypatch.setattr(decide, "approve", lambda *a, **k: (_ for _ in ()).throw(
+        JournalError("journal write failed (PermissionError)")))
+    result, journal, _, _ = run_scenario(monkeypatch, tmp_path, "clean-buy")
+    assert result.outcome.status == decide.JOURNAL_ERROR
+    assert isinstance(result.outcome, Outcome) and result.outcome.proposal.ok
+    assert [e["status"] for e in journal.entries()] == [decide.JOURNAL_ERROR]
+
+
+def test_129_a_normal_approval_is_unchanged(monkeypatch, tmp_path):
+    result, journal, _, _ = run_scenario(monkeypatch, tmp_path, "clean-buy")
+    assert result.outcome.status == APPROVED
+    assert [e["status"] for e in journal.entries()] == [APPROVED]

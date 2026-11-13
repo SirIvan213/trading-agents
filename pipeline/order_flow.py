@@ -80,7 +80,8 @@ class Proposal:
 @dataclass(frozen=True)
 class Outcome:
     """What happened at approval. status is one of: "approved_not_sent", "declined",
-    "refused_after_approval", "changed_after_approval", "no_order"."""
+    "refused_after_approval", "changed_after_approval", "no_order", and from
+    pipeline.decide (#129) "journal_locked" / "journal_error" (nothing approved)."""
 
     status: str
     reason: str | None
