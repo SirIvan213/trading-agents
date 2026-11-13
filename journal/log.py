@@ -1,7 +1,9 @@
 """Decision journal: one JSON object per line in journal/decisions.jsonl (git-ignored).
 
-Phase 4 sends nothing to a broker. An approved order is written here with status
-"approved_not_sent"; sending is Phase 5. Today's DayState for risk_check is read back from
+An approved order is written here with status "approved_not_sent" and its deterministic
+client_order_id; from Phase 5 everything that happens to it afterwards (submitting,
+submitted, fills, closed ...) is appended as an order event, and its state is derived by
+replaying them (journal/orders.py, #109). Today's DayState for risk_check is read back from
 these entries, fail-closed: an unreadable journal blocks the order instead of resetting the
 day's count.
 
@@ -20,11 +22,12 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from journal.orders import APPROVED, OrderError, OrderState, apply_event, replay
 from tools.risk_check import DayState
 
 NY = ZoneInfo("America/New_York")
 DEFAULT_PATH = Path(__file__).resolve().parent / "decisions.jsonl"
-APPROVED = "approved_not_sent"
+__all__ = ["APPROVED", "DEFAULT_PATH", "Journal", "JournalError", "LOCK_TIMEOUT_S"]
 
 
 class JournalError(RuntimeError):
@@ -168,6 +171,39 @@ class Journal:
                 raise JournalError(f"journal line {n} is not an object")
             out.append(obj)
         return out
+
+    def orders(self) -> dict[str, OrderState]:
+        """Every order in the journal, by client_order_id, as its entries replay
+        (journal/orders.py). Raises JournalError for a corrupt journal or an impossible
+        lifecycle."""
+        try:
+            return replay(self.entries())
+        except OrderError as exc:
+            raise JournalError(f"journal order history is invalid: {exc}") from None
+
+    def record_order_event(self, client_order_id: str, status: str, at: datetime,
+                           **fields: object) -> OrderState:
+        """Append one lifecycle event for an approved order and return its new state. Under
+        the lock, the journal is replayed and the event checked first (a known order, a
+        possible step, valid fields), so an impossible event is never written. Raises
+        JournalError otherwise, or if the journal cannot be read, locked or written."""
+        if not isinstance(at, datetime) or at.tzinfo is None or at.utcoffset() is None:
+            raise JournalError("order event time must be timezone-aware")
+        try:
+            stamp = at.astimezone(NY).isoformat()
+        except (OverflowError, ValueError):
+            raise JournalError("order event time is outside the supported date range") from None
+        entry = {**fields, "status": status, "client_order_id": client_order_id, "at": stamp}
+        with self.exclusive():
+            current = self.orders().get(client_order_id)
+            if current is None:
+                raise JournalError(f"no approved order {str(client_order_id)[:40]}")
+            try:
+                new = apply_event(current, entry)
+            except OrderError as exc:
+                raise JournalError(f"order event refused: {exc}") from None
+            self.append(entry)
+        return new
 
     def day_state(self, now: datetime) -> DayState:
         """Trades and risk already committed today (New York date of `now`).

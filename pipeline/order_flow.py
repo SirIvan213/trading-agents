@@ -12,8 +12,9 @@ Flow:
   2. render_ticket(): the order in plain words.
   3. approve(): show the ticket and require the typed word "yes" for that exact order. Then
      re-check at a NEW wall-clock `now` (freshness, build_order, check_order). Stale, blocked
-     or changed means no order. An approved order is journaled "approved_not_sent"; nothing
-     is sent to a broker in Phase 4.
+     or changed means no order. An approved order is journaled "approved_not_sent" with its
+     deterministic client_order_id (journal/orders.py); nothing is sent to a broker yet
+     (sending is Phase 5 PR 3).
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from agents.orchestrator import load_checked_limits
 from agents.schemas import ExitPlanRecord
 from journal.log import APPROVED, Journal, JournalError
+from journal.orders import client_order_id
 from pipeline.events import EventSource
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
@@ -310,5 +312,6 @@ def approve(
         approved_at = datetime.fromisoformat(again.checked_at)
         age = _plan_age_s(again.plan, approved_at) if again.plan else None
         journal.append(
-            _entry(again, APPROVED, None, approved_at=again.checked_at, plan_age_s=age))
+            _entry(again, APPROVED, None, approved_at=again.checked_at, plan_age_s=age,
+                   client_order_id=client_order_id(again.run_id, again.plan_id)))
         return Outcome(APPROVED, None, p, again, again.checked_at, age)

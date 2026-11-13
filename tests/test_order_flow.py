@@ -614,7 +614,13 @@ def test_approved_entry_has_exactly_these_keys(ledger, journal):
     _, e = approved(ledger, journal)
     assert set(e) == {"status", "reason", "run_id", "plan_id", "symbol", "order", "max_loss",
                       "decided_by", "quote", "verdict", "checked_at", "approved_at",
-                      "plan_age_s", "gate"}
+                      "plan_age_s", "gate", "client_order_id"}
+
+
+def test_approved_entry_carries_the_deterministic_client_order_id(ledger, journal):
+    from journal.orders import client_order_id
+    _, e = approved(ledger, journal)
+    assert e["client_order_id"] == client_order_id(ledger.run_id, "plan-1")
 
 
 def test_no_journal_entry_ever_holds_confidence_reasoning_or_evidence(ledger, journal):
