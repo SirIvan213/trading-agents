@@ -6,7 +6,15 @@ from decimal import Decimal as D
 import pytest
 
 from journal.log import APPROVED, DEFAULT_PATH, Journal, JournalError
-from tests.order_helpers import NY, T0, approved_entry, journal_with, raw_lines, sent_order
+from tests.order_helpers import (
+    NY,
+    T0,
+    approved_entry,
+    closed_trade,
+    journal_with,
+    raw_lines,
+    sent_order,
+)
 
 
 @pytest.fixture
@@ -79,8 +87,8 @@ def test_counts_only_todays_approvals_and_sums_max_loss(j):
     for e in [
         *sent_order(T0 - timedelta(hours=1), "46.88"),
         *sent_order(T0, "10.00"),
-        *sent_order(yesterday, "99.00"),  # another day: not counted
-        *sent_order(tomorrow, "99.00"),
+        *closed_trade(yesterday, "99.00"),  # another day, closed: not counted
+        *closed_trade(tomorrow, "99.00"),
         {"status": "declined", "approved_at": T0.isoformat(), "max_loss": "77"},
         {"status": "refused_after_approval", "max_loss": "77"},
         {"status": "changed_after_approval", "max_loss": "77"},
