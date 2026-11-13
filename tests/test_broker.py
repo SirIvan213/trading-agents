@@ -2,6 +2,7 @@
 fixtures in Alpaca's documented shapes; no network."""
 from __future__ import annotations
 
+import http.client
 import inspect
 import io
 import json
@@ -316,7 +317,8 @@ def test_cancel_order_accepts_204_and_refuses_a_bad_id():
 def test_list_positions():
     b, _ = client({("GET", "/v2/positions"): (200, fx("positions.json"))})
     assert b.list_positions() == [{"symbol": "TSLA", "side": "long", "qty": "8",
-                                   "avg_entry_price": "364.20", "market_value": "2915.20",
+                                   "qty_available": "0", "avg_entry_price": "364.20",
+                                   "current_price": "364.40", "market_value": "2915.20",
                                    "unrealized_pl": "1.60"}]
 
 
@@ -405,3 +407,126 @@ def test_the_example_account_cash_stays_the_sizing_limit():
     """Decision 14 (#154): the paper account holds more, but sizing uses account_cash."""
     b, _ = client()
     assert D(b.account()["cash"]) > LIMITS.account_cash == D("5000.00")
+
+
+# ======================= review fixes =======================
+
+@pytest.mark.parametrize("over,want", [
+    ({"take_profit": "370.040"}, ("364.55", "358.32", "370.04")),
+    ({"entry": "364.180", "slippage": "0.370"}, ("364.55", "358.32", "370.04")),
+    ({"slippage": "0E-5"}, ("364.18", "358.32", "370.04")),
+    ({"take_profit": "3.7E+2"}, ("364.55", "358.32", "370.00")),
+], ids=["trailing-zero", "entry-trailing", "exponent-zero", "exponent"])
+def test_prices_are_sent_as_canonical_two_decimal_strings(over, want):
+    req = bracket_request(order_for(**over), CID)
+    assert (req["limit_price"], req["stop_loss"]["stop_price"],
+            req["take_profit"]["limit_price"]) == want
+
+
+@pytest.mark.parametrize("over", [{"entry": "1E+30"}, {"slippage": "1E+30"},
+                                  {"take_profit": "1E+999999"}], ids=["entry", "slip", "huge"])
+def test_blocked_an_absurd_price_is_a_broker_error_not_a_decimal_error(over):
+    with pytest.raises(BrokerError):
+        bracket_request(order_for(**over), CID)
+
+
+@pytest.mark.parametrize("exc", [http.client.IncompleteRead(b"par"),
+                                 http.client.BadStatusLine("x")], ids=["incomplete", "badline"])
+def test_blocked_a_broken_http_reply_is_a_broker_error(exc):
+    b, _ = client({("GET", "/v2/positions"): exc})
+    with pytest.raises(BrokerError, match=r"^GET /v2/positions: incomplete response"):
+        b.list_positions()
+
+
+def test_a_timeout_wrapped_in_url_error_is_reported_as_a_timeout():
+    b, _ = client({("GET", "/v2/positions"): urllib.error.URLError(TimeoutError())})
+    with pytest.raises(BrokerError, match=r"^GET /v2/positions timed out$"):
+        b.list_positions()
+
+
+def test_blocked_a_failed_re_verification_blocks_every_later_call():
+    b, fake = client({("POST", "/v2/orders"): (200, fx("order_bracket_new.json"))})
+    fake.routes[("GET", "/v2/account")] = (200, {**fx("account.json"), "trading_blocked": True})
+    with pytest.raises(BrokerError, match="blocked"):
+        b.account()
+    with pytest.raises(BrokerError, match="verify_paper_account"):
+        b.submit_bracket(order_for(), CID)
+    assert [r.get_method() for r in fake.requests] == ["GET", "GET"]
+
+
+@pytest.mark.parametrize("over", [
+    {"client_order_id": "ta-ffffffffffffffffffffffffffffffff"}, {"symbol": "AAPL"},
+    {"side": "sell"}, {"qty": "9"}, {"order_class": "simple"},
+], ids=["cid", "symbol", "side", "qty", "class"])
+def test_blocked_a_submit_reply_that_does_not_match_the_order(over):
+    b, _ = client({("POST", "/v2/orders"): (200, {**fx("order_bracket_new.json"), **over})})
+    with pytest.raises(BrokerError, match="does not match the order sent"):
+        b.submit_bracket(order_for(), CID)
+
+
+def test_blocked_a_lookup_reply_for_another_client_order_id():
+    reply = {**fx("order_bracket_filled.json"), "client_order_id": "ta-other"}
+    b, _ = client({("GET", "/v2/orders:by_client_order_id"): (200, reply)})
+    with pytest.raises(BrokerError, match="another client_order_id"):
+        b.get_order_by_client_id(CID)
+
+
+def test_blocked_an_order_reply_with_an_unknown_side():
+    with pytest.raises(BrokerError, match="unknown order side"):
+        parse_order({**fx("order_bracket_new.json"), "side": "short"})
+
+
+def test_the_order_reply_carries_the_timestamps_pr3_needs():
+    out = parse_order(fx("order_bracket_filled.json"))
+    assert out["time_in_force"] == "day" and out["updated_at"] and out["filled_at"]
+    assert out["canceled_at"] is None and out["expired_at"] is None
+
+
+def test_a_position_with_odd_display_fields_still_lists():
+    """The exit path (listing positions to flatten them) never fails on a display field."""
+    pos = {**fx("positions.json")[0], "market_value": None, "unrealized_pl": "abc",
+           "current_price": None}
+    b, _ = client({("GET", "/v2/positions"): (200, [pos])})
+    (out,) = b.list_positions()
+    assert out["qty"] == "8" and out["market_value"] is None and out["unrealized_pl"] is None
+
+
+def test_close_all_keeps_every_result_when_one_order_reply_is_unreadable():
+    results = fx("close_all_207.json")
+    results[0]["body"]["status"] = "teleported"
+    b, _ = client({("DELETE", "/v2/positions"): (207, results)})
+    out = b.close_all()
+    assert out[0]["symbol"] == "TSLA" and out[0]["order"] is None
+    assert "unknown order status" in out[0]["error"]
+    assert out[1] == {"symbol": "NVDA", "status": 403, "error_code": 40310000}
+
+
+@pytest.mark.parametrize("body", [None, []], ids=["empty", "list"])
+def test_close_all_with_nothing_to_close(body):
+    b, _ = client({("DELETE", "/v2/positions"): (207, body)})
+    assert b.close_all() == []
+
+
+def test_a_not_cancelable_order_is_a_broker_error():
+    b, _ = client({("DELETE", "/v2/orders/ord-1"): (422, {"code": 42210000})})
+    with pytest.raises(BrokerError, match="HTTP 422") as exc:
+        b.cancel_order("ord-1")
+    assert exc.value.code == 42210000
+
+
+def test_the_injected_timeout_reaches_the_opener():
+    seen = []
+
+    def opener(req, timeout=None):
+        seen.append(timeout)
+        return Resp(200, json.dumps(fx("account.json")).encode(), req.full_url)
+
+    AlpacaPaperBroker(LIMITS, opener=opener, timeout=3.5).verify_paper_account()
+    assert seen == [3.5]
+
+
+def test_errors_carry_no_chained_exception():
+    b, _ = client({("GET", "/v2/positions"): OSError(KEY)})
+    with pytest.raises(BrokerError) as exc:
+        b.list_positions()
+    assert exc.value.__cause__ is None and exc.value.__suppress_context__ is True

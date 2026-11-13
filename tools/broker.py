@@ -40,10 +40,18 @@ fields: `slippage` and every other internal field are never forwarded.
 
 Errors (BrokerError) name the method, the URL path (never the query string), the HTTP status
 and Alpaca's numeric error code: never keys, request bodies or Alpaca's message text. Keys
-come from ALPACA_API_KEY / ALPACA_SECRET_KEY.
+come from ALPACA_API_KEY / ALPACA_SECRET_KEY. Like every data request, the default opener
+honours HTTPS_PROXY (tools/http.py): a proxy set there sees the key headers.
+
+Replies are parsed strictly: an order reply must carry a known status and side and must match
+the request (client_order_id, symbol and, for a submit, side, qty and order class), so a
+surprise never reads as a fill. Position fields that only describe the position
+(market_value, unrealized_pl, current_price, qty_available) are optional, so the exit path
+(listing positions to flatten them) never fails on them.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -88,11 +96,11 @@ def _cents(value: object, what: str) -> Decimal:
         raise BrokerError(f"order {what} is not a price")
     try:
         d = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        raise BrokerError(f"order {what} is not a price") from None
-    if not d.is_finite() or d <= 0 or d != d.quantize(CENT):
-        raise BrokerError(f"order {what} must be a positive whole-cent price")
-    return d
+        if not d.is_finite() or d <= 0 or d != d.quantize(CENT):
+            raise ValueError
+        return d.quantize(CENT)  # canonical: "370.040" -> 370.04
+    except (InvalidOperation, ValueError, ArithmeticError):
+        raise BrokerError(f"order {what} must be a positive whole-cent price") from None
 
 
 def bracket_request(order: dict, client_order_id: str) -> dict:
@@ -118,14 +126,15 @@ def bracket_request(order: dict, client_order_id: str) -> dict:
     target = _cents(order.get("take_profit"), "take_profit")
     slip = order.get("slippage")
     try:
-        allowance = Decimal(str(slip)) if not isinstance(slip, bool) and slip is not None \
-            else None
-    except (InvalidOperation, ValueError):
-        allowance = None
-    if allowance is None or not allowance.is_finite() or allowance < 0 \
-            or allowance != allowance.quantize(CENT):
-        raise BrokerError("order slippage must be a non-negative whole-cent allowance")
-    limit = entry + allowance
+        if isinstance(slip, bool) or slip is None:
+            raise ValueError
+        allowance = Decimal(str(slip))
+        if not allowance.is_finite() or allowance < 0 or allowance != allowance.quantize(CENT):
+            raise ValueError
+        allowance = allowance.quantize(CENT)
+    except (InvalidOperation, ValueError, ArithmeticError):
+        raise BrokerError("order slippage must be a non-negative whole-cent allowance") from None
+    limit = (entry + allowance).quantize(CENT)
     if min(limit, stop, target) < MIN_PRICE:
         raise BrokerError(f"prices below {MIN_PRICE} are not sent (sub-penny rules)")
     if stop > limit - CENT:
@@ -139,11 +148,11 @@ def bracket_request(order: dict, client_order_id: str) -> dict:
         "qty": str(qty),
         "side": "buy",
         "type": "limit",
-        "limit_price": str(limit),
+        "limit_price": f"{limit:.2f}",
         "time_in_force": "day",
         "order_class": "bracket",
-        "take_profit": {"limit_price": str(target)},
-        "stop_loss": {"stop_price": str(stop)},
+        "take_profit": {"limit_price": f"{target:.2f}"},
+        "stop_loss": {"stop_price": f"{stop:.2f}"},
         "client_order_id": client_order_id,
     }
 
@@ -186,6 +195,8 @@ def parse_order(reply: object) -> dict:
     legs = reply.get("legs")
     if legs is not None and not isinstance(legs, list):
         raise BrokerError("broker reply legs is not a list")
+    if reply.get("side") not in ("buy", "sell"):
+        raise BrokerError("broker reply has an unknown order side")
 
     def money(key: str) -> str | None:
         v = _dec(reply.get(key), key, optional=True)
@@ -204,8 +215,13 @@ def parse_order(reply: object) -> dict:
         "filled_avg_price": money("filled_avg_price"),
         "limit_price": money("limit_price"),
         "stop_price": money("stop_price"),
+        "time_in_force": _text(reply.get("time_in_force"), "time_in_force", optional=True),
         "submitted_at": _text(reply.get("submitted_at"), "submitted_at", optional=True),
+        "updated_at": _text(reply.get("updated_at"), "updated_at", optional=True),
         "filled_at": _text(reply.get("filled_at"), "filled_at", optional=True),
+        "canceled_at": _text(reply.get("canceled_at"), "canceled_at", optional=True),
+        "expired_at": _text(reply.get("expired_at"), "expired_at", optional=True),
+        "failed_at": _text(reply.get("failed_at"), "failed_at", optional=True),
         "legs": [parse_order(leg) for leg in legs] if legs else [],
     }
 
@@ -216,13 +232,24 @@ def parse_position(reply: object) -> dict:
     side = reply.get("side")
     if side not in ("long", "short"):
         raise BrokerError("broker reply position side is unknown")
+    def optional(key: str) -> str | None:
+        """Display-only fields: a missing or odd value is None, never a reason to fail the
+        exit path (listing positions to flatten them)."""
+        try:
+            v = _dec(reply.get(key), key, optional=True)
+        except BrokerError:
+            return None
+        return None if v is None else str(v)
+
     return {
         "symbol": _text(reply.get("symbol"), "symbol"),
         "side": side,
         "qty": str(_dec(reply.get("qty"), "qty")),
+        "qty_available": optional("qty_available"),  # shares not held by open orders (legs)
         "avg_entry_price": str(_dec(reply.get("avg_entry_price"), "avg_entry_price")),
-        "market_value": str(_dec(reply.get("market_value"), "market_value")),
-        "unrealized_pl": str(_dec(reply.get("unrealized_pl"), "unrealized_pl")),
+        "current_price": optional("current_price"),
+        "market_value": optional("market_value"),
+        "unrealized_pl": optional("unrealized_pl"),
     }
 
 
@@ -288,8 +315,12 @@ class AlpacaPaperBroker:
         except TimeoutError:
             raise BrokerError(f"{where} timed out") from None
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise BrokerError(f"{where} timed out") from None
             raise BrokerError(
                 f"{where} failed: network error ({type(exc.reason).__name__})") from None
+        except http.client.HTTPException as exc:  # IncompleteRead, BadStatusLine: not OSError
+            raise BrokerError(f"{where}: incomplete response ({type(exc).__name__})") from None
         except OSError as exc:
             raise BrokerError(f"{where} failed: network error ({type(exc).__name__})") from None
         if status not in ok:
@@ -300,7 +331,7 @@ class AlpacaPaperBroker:
             return None
         try:
             return json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             raise BrokerError(f"{where}: reply is not JSON") from None
 
     def _require_verified(self) -> None:
@@ -313,7 +344,9 @@ class AlpacaPaperBroker:
         trading- or account-blocked. Only paper keys work on the paper host (Alpaca keeps
         separate paper and live keys), and Alpaca documents no paper flag on the account, so
         this is the check. Returns {"account_number", "status", "currency", "cash",
-        "buying_power"}; raises BrokerError otherwise."""
+        "buying_power"}; raises BrokerError otherwise. Any failure, including on a later
+        re-check, leaves the client unverified, so every other call refuses again."""
+        self._verified = False
         reply = self._call("GET", "/v2/account")
         if not isinstance(reply, dict):
             raise BrokerError("broker reply is not an account")
@@ -336,7 +369,14 @@ class AlpacaPaperBroker:
         """POST /v2/orders with bracket_request(order, client_order_id); the parsed order."""
         self._require_verified()
         body = bracket_request(order, client_order_id)
-        return parse_order(self._call("POST", "/v2/orders", body=body))
+        out = parse_order(self._call("POST", "/v2/orders", body=body))
+        expected = {"client_order_id": client_order_id, "symbol": body["symbol"], "side": "buy",
+                    "qty": body["qty"], "order_class": "bracket"}
+        got = {k: out[k] for k in expected}
+        got["qty"] = str(Decimal(got["qty"]).normalize()) if got["qty"] else got["qty"]
+        if got != expected:
+            raise BrokerError("broker reply does not match the order sent")
+        return out
 
     def get_order_by_client_id(self, client_order_id: str) -> dict | None:
         """The order with this client_order_id, or None when Alpaca answers 404 (assumed to
@@ -351,7 +391,10 @@ class AlpacaPaperBroker:
             if exc.status == 404:
                 return None
             raise
-        return parse_order(reply)
+        out = parse_order(reply)
+        if out["client_order_id"] != client_order_id:
+            raise BrokerError("broker reply is for another client_order_id")
+        return out
 
     def list_open_orders(self) -> list[dict]:
         self._require_verified()
@@ -401,7 +444,14 @@ class AlpacaPaperBroker:
                 raise BrokerError("broker close-all result is malformed")
             sym = _text(item.get("symbol"), "symbol")
             if item["status"] == 200:
-                out.append({"symbol": sym, "status": 200, "order": parse_order(item.get("body"))})
+                # one unreadable order must not lose the other positions' results: the
+                # positions are already being closed at the broker
+                try:
+                    out.append({"symbol": sym, "status": 200,
+                                "order": parse_order(item.get("body"))})
+                except BrokerError as exc:
+                    out.append({"symbol": sym, "status": 200, "order": None,
+                                "error": str(exc)[:120]})
             else:
                 body = item.get("body")
                 code = body.get("code") if isinstance(body, dict) else None
