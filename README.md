@@ -119,6 +119,24 @@ How the calendars are fetched and checked:
 - **Approval.** The first live call to each needs Ivan's explicit approval (CLAUDE.md rule
   6). Tests never call either.
 
+## Paper broker
+
+`tools/broker.py` is the Alpaca **paper** trading client (Phase 5). Its base URL is fixed to
+`paper-api.alpaca.markets`, and there is no live path. It refuses to start unless
+`limits.paper` is true, and refuses every call until it has read an ACTIVE, unblocked account
+from the paper host. Use Alpaca paper keys: Alpaca issues separate paper and live keys, and
+documents no paper flag on the account.
+
+An approved order would go out as a bracket:
+
+- **Entry:** a limit order at entry + slippage allowance, so the exchange enforces the price
+  sizing assumed.
+- **Legs:** the plan's take-profit and stop, time in force `day`.
+- **Allow-list:** the request is built field by field, so internal fields such as the
+  slippage allowance are never forwarded.
+
+Nothing in the pipeline sends orders yet; that is the next Phase 5 step.
+
 ## Decision journal
 
 Every decision is a line in `journal/decisions.jsonl` (git-ignored). An approved order is
