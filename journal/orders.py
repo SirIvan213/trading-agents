@@ -12,9 +12,12 @@ entry is ever rewritten.
     partially_filled  -> partially_filled | filled | cancelled | expired
     filled            -> closed
     cancelled/expired -> closed (only when part of the order filled: the position remains)
-A partial fill is closed only after the rest of the order is cancelled or expired, so a
-later fill of a still-working remainder can always be recorded.
     rejected, closed  -> nothing (final)
+
+A partial fill is closed only after the rest of the order is cancelled or expired, so a
+later fill of a still-working remainder can always be recorded. An approval is sent
+("submitting") only before its plan expires: the journal refuses a later send, since
+day_state has already released its position slot and risk.
 
 Event entries: {"status", "client_order_id", "at": aware ISO time, ...}.
   partially_filled / filled: "filled_qty" (cumulative, 1..qty, never decreasing; filled means
@@ -118,7 +121,10 @@ class OrderState:
         if self.expires_at is not None:
             return self.expires_at
         day = self.approved_at.astimezone(NY).date()
-        return datetime.combine(day + timedelta(days=1), time(0), tzinfo=NY)
+        try:
+            return datetime.combine(day + timedelta(days=1), time(0), tzinfo=NY)
+        except OverflowError:  # approved on the last representable day: never expires
+            return datetime.max.replace(tzinfo=NY)
 
     def live_unsent(self, now: datetime) -> bool:
         """An approval not sent yet whose plan has not expired at `now`."""
@@ -134,7 +140,8 @@ class OrderState:
     def open(self) -> bool:
         """The order may still hold, or come to hold, a position: anything not closed and
         not released (approved, submitting, submitted, send_unknown, any fill, or a cancelled
-        remainder after a partial fill)."""
+        remainder after a partial fill). Clock-free: an unsent approval past its plan's
+        expiry still reads open here; Journal.day_state applies live_unsent(now)."""
         return not self.released and self.status != CLOSED
 
     @property
@@ -245,6 +252,9 @@ def apply_event(state: OrderState, entry: dict) -> OrderState:
         raise OrderError("an order with a fill cannot be rejected")
     if state.status == APPROVED and filled:
         raise OrderError("an order never sent cannot have a fill")
+    if status == SUBMITTING and at >= state.unsent_expiry():
+        raise OrderError(f"order {state.client_order_id} cannot be sent: its plan expired "
+                         "before it was sent")
     closed_by, pnl = state.closed_by, state.realized_pnl
     if status == CLOSED:
         if state.filled_qty < 1:

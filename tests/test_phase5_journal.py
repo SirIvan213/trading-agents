@@ -745,3 +745,13 @@ def test_lock_timeouts_raise_the_journal_lock_timeout_subclass(tmp_path, monkeyp
     finally:
         release.set()
         t.join(5)
+
+
+def test_n1_an_approval_cannot_be_sent_after_its_plan_expired(tmp_path):
+    a = approved_entry(at(9, 50), "10")  # expires 09:55
+    j = journal_with(tmp_path / "j.jsonl", [a])
+    before = j.path.read_bytes()
+    with pytest.raises(JournalError, match="its plan expired before it was sent"):
+        j.record_order_event(a["client_order_id"], "submitting", at(9, 55))
+    assert j.path.read_bytes() == before
+    assert j.record_order_event(a["client_order_id"], "submitting", at(9, 54, 59)).sent

@@ -263,9 +263,9 @@ class Journal:
           - risk_used_today: each of today's orders at its sized worst-case max_loss (or its
             realized loss, if larger), released only when the broker confirmed a zero fill;
           - open_positions: orders that may hold a position now, from ANY day (an overnight
-            one blocks too).
-          An approval not sent yet counts (open, with its risk) only until its plan expires
-          (OrderState.live_unsent), whether or not its "expired" event is written yet;
+            one blocks too). An approval not sent yet counts (open, with its risk on its
+            approval day) only until its plan expires (OrderState.live_unsent), whether or
+            not its "expired" event is written yet;
           - realized_loss_today: the losses of trades CLOSED today, whenever approved (an
             overnight position closed this morning counts: the daily loss stop);
           - stopped_out_symbols: symbols whose trade was closed by its stop today.
