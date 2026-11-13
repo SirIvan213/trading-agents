@@ -6,23 +6,31 @@ retry can never create a second order). Its state is derived by REPLAYING those 
 entry is ever rewritten.
 
     approved_not_sent -> submitting -> submitted | rejected | send_unknown
+    approved_not_sent -> expired (its plan expired before it was sent; Ivan's decision)
     send_unknown      -> submitted | rejected | partially_filled | filled | cancelled | expired
     submitted         -> partially_filled | filled | cancelled | expired | rejected
-    partially_filled  -> partially_filled | filled | cancelled | expired | closed
+    partially_filled  -> partially_filled | filled | cancelled | expired
     filled            -> closed
     cancelled/expired -> closed (only when part of the order filled: the position remains)
+A partial fill is closed only after the rest of the order is cancelled or expired, so a
+later fill of a still-working remainder can always be recorded.
     rejected, closed  -> nothing (final)
 
 Event entries: {"status", "client_order_id", "at": aware ISO time, ...}.
   partially_filled / filled: "filled_qty" (cumulative, 1..qty, never decreasing; filled means
     all of qty) and "avg_price" (> 0).
-  cancelled / expired: optional "filled_qty" (cumulative, never decreasing).
+  cancelled / expired: "filled_qty", REQUIRED (cumulative, never decreasing): 0 is the
+    broker's confirmed zero fill that releases the order's risk; a missing field is not.
   rejected: no fill.
   closed: "closed_by" ("stop", "target" or "flatten") and "realized_pnl" (the whole trade's
     realized profit or loss, negative for a loss).
 Risk (decisions on #109): an order's risk is its sized worst-case `max_loss`, counted from
 approval until the broker confirms a ZERO fill (rejected, or cancelled/expired with nothing
 filled). A closed trade counts the larger of max_loss and its realized loss.
+An approval that was never sent counts (open, with its risk) only until its plan expires:
+`expires_at` on the approved entry (plan as_of + max_plan_age_s), or the end of its New
+York day for an entry without one. It then releases both and is journaled "expired". It
+never takes a trade slot: only an order that reached "submitting" (`sent`) does.
 
 Any malformed entry or impossible sequence raises JournalError: the day's totals cannot be
 trusted, so the gate fails closed. Nothing here talks to a broker.
@@ -32,7 +40,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
@@ -52,12 +60,12 @@ CLOSED = "closed"
 ORDER_EVENTS = frozenset({SUBMITTING, SUBMITTED, REJECTED, SEND_UNKNOWN, PARTIALLY_FILLED,
                           FILLED, CANCELLED, EXPIRED, CLOSED})
 NEXT: dict[str, frozenset[str]] = {
-    APPROVED: frozenset({SUBMITTING}),
+    APPROVED: frozenset({SUBMITTING, EXPIRED}),
     SUBMITTING: frozenset({SUBMITTED, REJECTED, SEND_UNKNOWN}),
     SEND_UNKNOWN: frozenset({SUBMITTED, REJECTED, PARTIALLY_FILLED, FILLED, CANCELLED,
                              EXPIRED}),
     SUBMITTED: frozenset({PARTIALLY_FILLED, FILLED, CANCELLED, EXPIRED, REJECTED}),
-    PARTIALLY_FILLED: frozenset({PARTIALLY_FILLED, FILLED, CANCELLED, EXPIRED, CLOSED}),
+    PARTIALLY_FILLED: frozenset({PARTIALLY_FILLED, FILLED, CANCELLED, EXPIRED}),
     FILLED: frozenset({CLOSED}),
     CANCELLED: frozenset({CLOSED}),
     EXPIRED: frozenset({CLOSED}),
@@ -101,6 +109,20 @@ class OrderState:
     closed_by: str | None = None
     realized_pnl: Decimal | None = None
     last_at: datetime | None = None
+    expires_at: datetime | None = None  # the plan's expiry: an unsent approval's end
+    sent: bool = False  # reached "submitting": the order took a trade slot
+
+    def unsent_expiry(self) -> datetime:
+        """When an approval that was never sent stops counting: its plan's expires_at, or
+        (an entry without one) midnight after its New York approval day."""
+        if self.expires_at is not None:
+            return self.expires_at
+        day = self.approved_at.astimezone(NY).date()
+        return datetime.combine(day + timedelta(days=1), time(0), tzinfo=NY)
+
+    def live_unsent(self, now: datetime) -> bool:
+        """An approval not sent yet whose plan has not expired at `now`."""
+        return self.status == APPROVED and now < self.unsent_expiry()
 
     @property
     def released(self) -> bool:
@@ -188,7 +210,9 @@ def from_approved(entry: dict) -> OrderState:
     return OrderState(
         client_order_id=cid, symbol=symbol.strip().upper(), run_id=run_id, plan_id=plan_id,
         approved_at=_aware(entry.get("approved_at"), "approved_at"), qty=qty,
-        max_loss=_decimal(entry.get("max_loss"), "max_loss", non_negative=True))
+        max_loss=_decimal(entry.get("max_loss"), "max_loss", non_negative=True),
+        expires_at=(_aware(entry["expires_at"], "expires_at")
+                    if entry.get("expires_at") is not None else None))
 
 
 def apply_event(state: OrderState, entry: dict) -> OrderState:
@@ -201,8 +225,10 @@ def apply_event(state: OrderState, entry: dict) -> OrderState:
                          f"{status}")
     at = _aware(entry.get("at"), f"{status} time")
     filled, avg = state.filled_qty, state.avg_price
-    if status in (PARTIALLY_FILLED, FILLED) or (status in (CANCELLED, EXPIRED)
-                                                and "filled_qty" in entry):
+    if status in (CANCELLED, EXPIRED) and "filled_qty" not in entry:
+        # releasing risk needs the broker's confirmed fill count, never an assumed zero
+        raise OrderError(f"{status} needs the broker's filled_qty (0 for none)")
+    if status in (PARTIALLY_FILLED, FILLED, CANCELLED, EXPIRED):
         filled = _whole(entry.get("filled_qty"), f"{status} filled_qty")
         if not state.filled_qty <= filled <= state.qty:
             raise OrderError(f"{status} filled_qty {filled} must be between "
@@ -217,6 +243,8 @@ def apply_event(state: OrderState, entry: dict) -> OrderState:
             raise OrderError("a fill of every share is filled, not partially_filled")
     if status == REJECTED and state.filled_qty:
         raise OrderError("an order with a fill cannot be rejected")
+    if state.status == APPROVED and filled:
+        raise OrderError("an order never sent cannot have a fill")
     closed_by, pnl = state.closed_by, state.realized_pnl
     if status == CLOSED:
         if state.filled_qty < 1:
@@ -226,7 +254,8 @@ def apply_event(state: OrderState, entry: dict) -> OrderState:
             raise OrderError(f"closed_by must be one of {sorted(CLOSED_BY)}")
         pnl = _decimal(entry.get("realized_pnl"), "realized_pnl")
     return replace(state, status=status, filled_qty=filled, avg_price=avg,
-                   closed_by=closed_by, realized_pnl=pnl, last_at=at)
+                   closed_by=closed_by, realized_pnl=pnl, last_at=at,
+                   sent=state.sent or status == SUBMITTING)
 
 
 def replay(entries: Iterable[dict]) -> dict[str, OrderState]:

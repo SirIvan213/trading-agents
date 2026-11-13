@@ -58,15 +58,24 @@ _APPROVALS = itertools.count(1)
 
 def approved_entry(when: datetime, max_loss: str = "1.00", *, symbol: str = "TSLA",
                    qty: int = 8, run_id: str | None = None,
-                   plan_id: str = "plan-1") -> dict:
+                   plan_id: str = "plan-1", plan_age_s: int = 300) -> dict:
     """An "approved_not_sent" entry as order_flow writes it: the fields day_state replays
-    (journal/orders.py). Each call gets its own run id, so its own client_order_id."""
+    (journal/orders.py). Each call gets its own run id, so its own client_order_id. The plan
+    is taken as made at `when`, so it expires `plan_age_s` later (limits.max_plan_age_s)."""
     from journal.orders import client_order_id
     run_id = run_id or f"run-{next(_APPROVALS):06d}"
     return {"status": APPROVED, "approved_at": when.isoformat(), "max_loss": max_loss,
             "run_id": run_id, "plan_id": plan_id, "symbol": symbol,
             "order": {"symbol": symbol, "side": "buy", "qty": qty},
-            "client_order_id": client_order_id(run_id, plan_id)}
+            "client_order_id": client_order_id(run_id, plan_id),
+            "expires_at": (when + timedelta(seconds=plan_age_s)).isoformat()}
+
+
+def sent_order(when: datetime, max_loss: str = "1.00", **kw) -> list[dict]:
+    """An approved order that was sent ("submitting"): it took a trade slot (#109)."""
+    a = approved_entry(when, max_loss, **kw)
+    return [a, {"status": "submitting", "client_order_id": a["client_order_id"],
+                "at": (when + timedelta(seconds=1)).isoformat()}]
 
 
 def closed_trade(when: datetime, max_loss: str = "1.00", *, pnl: str = "10.00",

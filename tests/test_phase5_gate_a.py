@@ -410,21 +410,29 @@ def race(monkeypatch, tmp_path, lim: Limits, *, lock: bool):
     return outs, Journal(path)
 
 
-MAX_TRADES_1 = replace(LIMITS, max_trades_per_day=1)
-LOSS_ONE_FITS = replace(LIMITS, daily_loss_limit=D("60.00"))  # 49.84 (#68) fits once, not twice
+# An approval holds an open position and its risk until it is sent or its plan expires; a
+# trade slot is taken only when it is sent (#109), so the race is on those two rules.
+ONE_POSITION = LIMITS  # max_open_positions = 1
+LOSS_ONE_FITS = replace(LIMITS, daily_loss_limit=D("60.00"),  # 49.84 (#68) fits once
+                        max_open_positions=2)  # so only the loss rule can stop the second
 
 
-@pytest.mark.parametrize("lim", [MAX_TRADES_1, LOSS_ONE_FITS], ids=["max_trades", "daily_loss"])
-def test_107_race_exactly_one_approval(monkeypatch, tmp_path, lim):
+@pytest.mark.parametrize("lim,why", [
+    (ONE_POSITION, "already 1 open position(s) (max 1)"),
+    (LOSS_ONE_FITS, "over the daily limit 60.00"),
+], ids=["open_positions", "daily_loss"])
+def test_107_race_exactly_one_approval(monkeypatch, tmp_path, lim, why):
     outs, j = race(monkeypatch, tmp_path, lim, lock=True)
     assert sorted(o.status for o in outs) == sorted([APPROVED, "refused_after_approval"])
     loser = next(o for o in outs if o.status != APPROVED)
     assert loser.recheck.stage == "risk"
+    assert why in loser.reason
     assert statuses(j).count(APPROVED) == 1
-    assert j.day_state(T0).trades_today == 1
+    assert j.day_state(T0).open_positions == 1
 
 
-@pytest.mark.parametrize("lim", [MAX_TRADES_1, LOSS_ONE_FITS], ids=["max_trades", "daily_loss"])
+@pytest.mark.parametrize("lim", [ONE_POSITION, LOSS_ONE_FITS], ids=["open_positions",
+                                                                     "daily_loss"])
 def test_107_CONTROL_without_the_lock_both_approve(monkeypatch, tmp_path, lim):
     """CONTROL: proves the race test is meaningful. With exclusive() a no-op, the same race
     approves twice and overshoots the limit."""

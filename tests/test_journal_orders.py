@@ -65,6 +65,8 @@ def fields_for(status, before):
         return {"filled_qty": before.qty, "avg_price": "364.20"}
     if status == CLOSED:
         return {"closed_by": "target", "realized_pnl": "12.00"}
+    if status in (CANCELLED, EXPIRED):
+        return {"filled_qty": before.filled_qty}
     return {}
 
 
@@ -78,9 +80,10 @@ PATHS = {
                        ev(PARTIALLY_FILLED, filled_qty=3, avg_price="364.20")],
     FILLED: [ev(SUBMITTING), ev(SUBMITTED), ev(FILLED, filled_qty=8, avg_price="364.20")],
     CANCELLED: [ev(SUBMITTING), ev(SUBMITTED),
-                ev(PARTIALLY_FILLED, filled_qty=3, avg_price="364.20"), ev(CANCELLED)],
+                ev(PARTIALLY_FILLED, filled_qty=3, avg_price="364.20"),
+                ev(CANCELLED, filled_qty=3)],
     EXPIRED: [ev(SUBMITTING), ev(SUBMITTED),
-              ev(PARTIALLY_FILLED, filled_qty=3, avg_price="364.20"), ev(EXPIRED)],
+              ev(PARTIALLY_FILLED, filled_qty=3, avg_price="364.20"), ev(EXPIRED, filled_qty=3)],
     REJECTED: [ev(SUBMITTING), ev(REJECTED)],
     CLOSED: [ev(SUBMITTING), ev(SUBMITTED), ev(FILLED, filled_qty=8, avg_price="364.20"),
              ev(CLOSED, closed_by="stop", realized_pnl="-48.00")],
@@ -148,9 +151,9 @@ def test_a_winner_keeps_its_max_loss_counted():
 
 @pytest.mark.parametrize("events", [
     [ev(SUBMITTING), ev(REJECTED)],
-    [ev(SUBMITTING), ev(SUBMITTED), ev(CANCELLED)],
+    [ev(SUBMITTING), ev(SUBMITTED), ev(CANCELLED, filled_qty=0)],
     [ev(SUBMITTING), ev(SUBMITTED), ev(EXPIRED, filled_qty=0)],
-    [ev(SUBMITTING), ev(SEND_UNKNOWN), ev(CANCELLED)],
+    [ev(SUBMITTING), ev(SEND_UNKNOWN), ev(CANCELLED, filled_qty=0)],
 ], ids=["rejected", "cancelled", "expired", "send-unknown-cancelled"])
 def test_risk_is_released_only_by_a_confirmed_zero_fill(events):
     s = state_after(*events)
@@ -202,6 +205,13 @@ BASE_PARTIAL = [ev(SUBMITTING), ev(SUBMITTED),
      "needs a fill"),
     ([*BASE_PARTIAL, ev(PARTIALLY_FILLED, filled_qty=2, avg_price="364")], "between 3 and 8"),
     ([*BASE_PARTIAL, ev(CANCELLED, filled_qty=1)], "between 3 and 8"),
+    # S2: a cancel or expiry without the broker's fill count is not a confirmed zero fill
+    ([ev(SUBMITTING), ev(SUBMITTED), ev(CANCELLED)], "needs the broker's filled_qty"),
+    ([ev(SUBMITTING), ev(SEND_UNKNOWN), ev(EXPIRED)], "needs the broker's filled_qty"),
+    ([*BASE_PARTIAL, ev(CANCELLED)], "needs the broker's filled_qty"),
+    # S3: a partial fill is closed only after its remainder is cancelled or expired
+    ([*BASE_PARTIAL, ev(CLOSED, closed_by="stop", realized_pnl="-1")],
+     "cannot go from partially_filled to closed"),
     ([ev(SUBMITTING), ev(SUBMITTED), ev(FILLED, filled_qty=8)], "avg_price is not a number"),
     ([ev(SUBMITTING), ev(SUBMITTED), ev(FILLED, filled_qty=8, avg_price="0")], "out of range"),
     ([ev(SUBMITTING), ev(SUBMITTED), ev(FILLED, filled_qty=8, avg_price="NaN")],
@@ -215,8 +225,8 @@ BASE_PARTIAL = [ev(SUBMITTING), ev(SUBMITTED),
     ([*PATHS[FILLED], ev(CLOSED, closed_by="manual", realized_pnl="1")], "closed_by"),
     ([*PATHS[FILLED], ev(CLOSED, closed_by="stop")], "realized_pnl is not a number"),
     ([*PATHS[FILLED], ev(CLOSED, closed_by="stop", realized_pnl="Infinity")], "out of range"),
-    ([ev(SUBMITTING), ev(SUBMITTED), ev(EXPIRED), ev(CLOSED, closed_by="stop",
-                                                     realized_pnl="0")],
+    ([ev(SUBMITTING), ev(SUBMITTED), ev(EXPIRED, filled_qty=0),
+      ev(CLOSED, closed_by="stop", realized_pnl="0")],
      "only a filled position can be closed"),
     ([ev(SUBMITTING), ev(SEND_UNKNOWN), ev(PARTIALLY_FILLED, filled_qty=2, avg_price="9"),
       ev(REJECTED)], "cannot go from partially_filled to rejected"),

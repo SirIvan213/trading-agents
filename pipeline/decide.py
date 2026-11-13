@@ -34,7 +34,7 @@ from agents.llm import AgentConfig, config_for
 from agents.orchestrator import AGENTS, load_checked_limits, run_analysts
 from agents.schemas import DebateRecord, DecisionPacket
 from agents.trader import TraderRun, forced_pass, run_trader
-from journal.log import Journal, JournalError
+from journal.log import Journal, JournalError, JournalLockTimeout
 from pipeline.events import events_from
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
@@ -92,7 +92,7 @@ def _journal_failed(proposal: Proposal, journal: Journal, exc: JournalError,
     """The outcome when approve() raised JournalError (#129): "journal_locked" for a lock
     timeout, else "journal_error". Nothing is approved. The attempt is journaled, retried
     once; if both writes fail, the outcome's reason says it was not recorded."""
-    status = JOURNAL_LOCKED if "lock timed out" in str(exc) else JOURNAL_ERROR
+    status = JOURNAL_LOCKED if isinstance(exc, JournalLockTimeout) else JOURNAL_ERROR
     reason = f"journal unavailable after the answer, nothing approved: {exc}"
     try:
         at = clock().astimezone(NY).isoformat()

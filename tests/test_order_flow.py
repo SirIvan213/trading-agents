@@ -36,6 +36,7 @@ from tests.order_helpers import (
     quotes_at,
     raw_lines,
     sealed_ledger,
+    sent_order,
 )
 from tools.config import CONFIG_DIR, load_limits
 
@@ -463,8 +464,9 @@ def test_re_check_block_when_max_trades_reached_while_waiting(ledger, journal):
     p = good(ledger, journal)
 
     def ask_and_race(_):
-        for i in range(LIMITS.max_trades_per_day):  # three other approvals land meanwhile
-            journal.append(approved_entry(T0 + timedelta(seconds=i), "1.00"))
+        for i in range(LIMITS.max_trades_per_day):  # three other orders are sent meanwhile
+            for e in sent_order(T0 + timedelta(seconds=i), "1.00"):
+                journal.append(e)
         return "yes"
 
     out = approve(p, ledger, journal=journal, ask=ask_and_race, clock=clock_at(T0),
@@ -480,7 +482,8 @@ def test_re_check_block_when_daily_loss_reached_while_waiting(ledger, journal):
     p = good(ledger, journal)
 
     def ask_and_race(_):
-        journal.append(approved_entry(T0, "110.00"))  # 110 + 46.88 > 150
+        for e in sent_order(T0, "110.00"):  # 110 + 49.84 > 150
+            journal.append(e)
         return "yes"
 
     out = approve(p, ledger, journal=journal, ask=ask_and_race, clock=clock_at(T0),
@@ -618,7 +621,7 @@ def test_approved_entry_has_exactly_these_keys(ledger, journal):
     _, e = approved(ledger, journal)
     assert set(e) == {"status", "reason", "run_id", "plan_id", "symbol", "order", "max_loss",
                       "decided_by", "quote", "verdict", "checked_at", "approved_at",
-                      "plan_age_s", "gate", "client_order_id"}
+                      "plan_age_s", "gate", "client_order_id", "expires_at"}
 
 
 def test_approved_entry_carries_the_deterministic_client_order_id(ledger, journal):
@@ -652,10 +655,12 @@ def test_no_journal_entry_ever_holds_confidence_reasoning_or_evidence(ledger, jo
     assert "confidence" not in text and "reasoning" not in text
 
 
-def test_approved_entry_counts_toward_the_day(ledger, journal):
+def test_an_unsent_approval_holds_its_risk_and_a_position_but_no_trade_slot(ledger, journal):
+    """Ivan's decision (#109): until its plan expires, an approval not yet sent counts as an
+    open position with its worst-case risk; only sending takes a trade slot."""
     approved(ledger, journal)
-    s = journal.day_state(T0)
-    assert s.trades_today == 1 and s.risk_used_today == D("49.84")
+    s = journal.day_state(T0 + timedelta(seconds=20))
+    assert s.trades_today == 0 and s.risk_used_today == D("49.84") and s.open_positions == 1
 
 
 def test_journal_write_failure_after_approval_raises_and_counts_nothing(ledger, tmp_path):

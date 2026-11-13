@@ -133,13 +133,15 @@ and `expired`.
 
 `risk_check` reads the day's totals from that replay (`Journal.day_state`):
 
-- **Trades:** every order approved today uses a slot, whatever happens to it
-  (`max_trades_per_day`).
+- **Trades:** every order sent today uses a slot, whatever happens to it
+  (`max_trades_per_day`). An approval never sent takes none.
 - **Risk:** each of today's orders counts at its sized worst-case `max_loss` (or its realized
   loss, if larger) until the broker confirms a zero fill (`daily_loss_limit`).
 - **Open positions:** an order that may hold a position, from any day, blocks a new entry
-  while `max_open_positions` (1) are open.
-- **Daily loss stop:** today's realized losses reaching `daily_loss_limit` stop new entries.
+  while `max_open_positions` (1) are open. An approval not sent yet counts, with its risk,
+  only until its plan expires (`as_of + max_plan_age_s`); it is then journaled `expired`.
+- **Daily loss stop:** the realized losses of trades closed today (an overnight position
+  included) reaching `daily_loss_limit` stop new entries. Profits don't offset them.
 - **No re-entry:** a symbol stopped out today cannot be bought again that day.
 
 A malformed entry or an impossible order history fails closed: no order passes. Reads and

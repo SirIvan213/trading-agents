@@ -16,11 +16,13 @@ import pytest
 import journal.log as jl
 import pipeline.decide as decide
 import pipeline.order_flow as of
-from journal.log import APPROVED, Journal, JournalError
+from journal.log import APPROVED, Journal, JournalError, JournalLockTimeout
+from journal.orders import EXPIRED as _EXPIRED
 from journal.orders import client_order_id
 from journal.repair import main as repair_main
 from journal.repair import repair, torn_tail
 from pipeline.order_flow import Outcome, propose
+from pipeline.order_flow import approve as _approve
 from tests.order_helpers import (
     T0,
     approved_entry,
@@ -30,7 +32,11 @@ from tests.order_helpers import (
     journal_with,
     quotes_at,
     sealed_ledger,
+    sent_order,
     sized_order,
+)
+from tests.order_helpers import (
+    plan as _plan,
 )
 from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (autouse fixtures)
 from tests.test_phase5_gate_d import run_scenario
@@ -106,7 +112,7 @@ def test_127_day_state_rejects_a_clock_that_is_not_aware(tmp_path, bad):
 
 def test_127_day_state_counts_today_as_before(tmp_path):
     j = journal_with(tmp_path / "j.jsonl",
-                     [approved_entry(T0, "10.00"), approved_entry(T0 - timedelta(days=1))])
+                     [*sent_order(T0, "10.00"), *sent_order(T0 - timedelta(days=1))])
     state = j.day_state(T0)
     assert state.trades_today == 1 and str(state.risk_used_today) == "10.00"
 
@@ -219,7 +225,8 @@ def test_128_repair_moves_the_cut_off_line_aside_and_keeps_every_complete_line(t
     assert out["moved_to"] == str(side) and side.read_bytes() == tail
     entries = Journal(path).entries()
     assert len(entries) == 2 and all(e["status"] == APPROVED for e in entries)
-    assert Journal(path).day_state(T0).trades_today == 2  # the cut-off approval is not counted
+    # the two complete approvals (live, unsent) count; the cut-off one does not
+    assert Journal(path).day_state(T0).open_positions == 2
 
 
 def test_128_repair_never_overwrites_an_earlier_fragment(tmp_path):
@@ -296,14 +303,14 @@ def test_129_end_to_end_lock_held_elsewhere_after_yes_is_journal_locked_and_reco
 
 def test_129_the_record_is_retried_once(monkeypatch, tmp_path):
     monkeypatch.setattr(decide, "approve", lambda *a, **k: (_ for _ in ()).throw(
-        JournalError("journal lock timed out")))
+        JournalLockTimeout("journal lock timed out")))
     real_append = Journal.append
     tries = []
 
     def flaky(self, entry):
         tries.append(entry["status"])
         if len(tries) == 1:
-            raise JournalError("journal lock timed out")
+            raise JournalLockTimeout("journal lock timed out")
         return real_append(self, entry)
 
     monkeypatch.setattr(Journal, "append", flaky)
@@ -316,14 +323,14 @@ def test_129_the_record_is_retried_once(monkeypatch, tmp_path):
 
 def test_129_when_both_writes_fail_the_outcome_says_it_was_not_recorded(monkeypatch, tmp_path):
     monkeypatch.setattr(decide, "approve", lambda *a, **k: (_ for _ in ()).throw(
-        JournalError("journal lock timed out")))
+        JournalLockTimeout("journal lock timed out")))
     real_append = Journal.append
     tries = []
 
     def broken(self, entry):
         tries.append(entry["status"])
         if entry["status"] == decide.JOURNAL_LOCKED:
-            raise JournalError("journal lock timed out")
+            raise JournalLockTimeout("journal lock timed out")
         return real_append(self, entry)
 
     monkeypatch.setattr(Journal, "append", broken)
@@ -373,17 +380,23 @@ def state_of(tmp_path, *entries, now=MON):
     return journal_with(tmp_path / "j.jsonl", list(entries)).day_state(now)
 
 
-def test_109_an_approval_today_uses_a_slot_its_risk_and_an_open_position(tmp_path):
-    s = state_of(tmp_path, approved_entry(MON - timedelta(minutes=5), "49.84"))
-    assert (s.trades_today, s.risk_used_today, s.open_positions) == (1, D("49.84"), 1)
+def test_109_a_live_unsent_approval_holds_its_risk_and_a_position_but_no_slot(tmp_path):
+    s = state_of(tmp_path, approved_entry(MON - timedelta(minutes=2), "49.84"))
+    assert (s.trades_today, s.risk_used_today, s.open_positions) == (0, D("49.84"), 1)
     assert s.realized_loss_today == 0 and s.stopped_out_symbols == frozenset()
+
+
+def test_109_an_unsent_approval_past_its_plan_expiry_releases_everything(tmp_path):
+    """Even before its "expired" event is written, day_state stops counting it."""
+    s = state_of(tmp_path, approved_entry(MON - timedelta(minutes=6), "49.84"))
+    assert (s.trades_today, s.risk_used_today, s.open_positions) == (0, 0, 0)
 
 
 @pytest.mark.parametrize("steps", [
     [("submitting", {})], [*SUBMITTED], [("submitting", {}), ("send_unknown", {})],
     [*SUBMITTED, ("partially_filled", {"filled_qty": 3, "avg_price": "100"})], [*FILLED],
     [*SUBMITTED, ("partially_filled", {"filled_qty": 3, "avg_price": "100"}),
-     ("cancelled", {})],
+     ("cancelled", {"filled_qty": 3})],
 ], ids=["submitting", "submitted", "send_unknown", "partial", "filled", "partial-cancelled"])
 def test_109_an_order_that_may_hold_a_position_counts_open_and_keeps_its_risk(tmp_path, steps):
     a = approved_entry(MON - timedelta(minutes=5), "49.84")
@@ -392,9 +405,9 @@ def test_109_an_order_that_may_hold_a_position_counts_open_and_keeps_its_risk(tm
 
 
 @pytest.mark.parametrize("steps", [
-    [("submitting", {}), ("rejected", {})], [*SUBMITTED, ("cancelled", {})],
+    [("submitting", {}), ("rejected", {})], [*SUBMITTED, ("cancelled", {"filled_qty": 0})],
     [*SUBMITTED, ("expired", {"filled_qty": 0})],
-    [("submitting", {}), ("send_unknown", {}), ("cancelled", {})],
+    [("submitting", {}), ("send_unknown", {}), ("cancelled", {"filled_qty": 0})],
 ], ids=["rejected", "cancelled", "expired", "send_unknown-cancelled"])
 def test_109_a_confirmed_zero_fill_releases_risk_but_keeps_the_trade_slot(tmp_path, steps):
     a = approved_entry(MON - timedelta(minutes=5), "49.84")
@@ -571,3 +584,164 @@ def test_109_propose_refuses_a_re_entry_after_a_stop_out(limits, tmp_path):
 def test_109_the_same_run_and_plan_always_get_the_same_client_order_id():
     led = sealed_ledger()
     assert client_order_id(led.run_id, "plan-1") == client_order_id(led.run_id, "plan-1")
+
+
+# ======================= Ivan's rule: an unsent approval lasts until its plan expires =========
+
+NINE = datetime(2026, 10, 19, 9, 0, tzinfo=NY)  # Monday 2026-10-19; entries open at 09:45
+
+
+def at(hh, mm, ss=0):
+    return NINE.replace(hour=hh, minute=mm, second=ss)
+
+
+def ledger_made_at(t):
+    """A ledger whose one plan was made at `t` (it expires max_plan_age_s = 300 s later)."""
+    return sealed_ledger([_plan(as_of=t.isoformat())])
+
+
+def propose_at(journal, led, t):
+    return propose(led, "plan-1", journal=journal, clock=lambda: t, quotes=quotes_at(t),
+                   events=events_clear())
+
+
+def test_ivan_an_approval_at_950_blocks_952_and_allows_956(limits, tmp_path):
+    j = Journal(tmp_path / "j.jsonl")
+    first = ledger_made_at(at(9, 50))
+    p = propose_at(j, first, at(9, 50, 20))
+    assert p.ok, p.reason
+    out = _approve(p, first, journal=j, ask=lambda _: "yes", clock=lambda: at(9, 50, 20),
+                   quotes=quotes_at(at(9, 50, 20)), events=events_clear())
+    assert out.status == APPROVED
+    (entry,) = [e for e in j.entries() if e["status"] == APPROVED]
+    assert entry["expires_at"] == at(9, 55).isoformat()  # plan as_of 09:50 + 300 s
+
+    # 09:52: the unsent approval still holds its position and its risk
+    blocked = propose_at(j, ledger_made_at(at(9, 52)), at(9, 52, 10))
+    assert blocked.ok is False and blocked.stage == "risk"
+    assert "already 1 open position(s) (max 1)" in blocked.reason
+    assert j.day_state(at(9, 52, 10)).trades_today == 0  # never sent: no trade slot
+
+    # 09:56: the plan expired at 09:55, so the approval is journaled expired and released
+    allowed = propose_at(j, ledger_made_at(at(9, 56)), at(9, 56, 10))
+    assert allowed.ok, allowed.reason
+    cid = client_order_id(first.run_id, "plan-1")
+    events = [e for e in j.entries() if e.get("client_order_id") == cid and e["status"] != APPROVED]
+    assert events == [{"status": _EXPIRED, "client_order_id": cid, "filled_qty": 0,
+                       "reason": "plan expired before the order was sent",
+                       "at": at(9, 56, 10).isoformat()}]
+    s = j.day_state(at(9, 56, 10))
+    assert (s.trades_today, s.risk_used_today, s.open_positions) == (0, 0, 0)
+
+
+def test_an_approval_expires_exactly_at_its_plans_expiry(tmp_path):
+    a = approved_entry(at(9, 50), "49.84")  # expires 09:55:00
+    j = journal_with(tmp_path / "j.jsonl", [a])
+    assert j.day_state(at(9, 54, 59)).open_positions == 1
+    assert j.day_state(at(9, 55)).open_positions == 0
+
+
+def test_expire_unsent_writes_once_and_only_for_expired_unsent_approvals(tmp_path):
+    stale, live = approved_entry(at(9, 40), "10"), approved_entry(at(9, 58), "10")
+    sent = sent_order(at(9, 41), "10")
+    j = journal_with(tmp_path / "j.jsonl", [stale, live, *sent])
+    assert j.expire_unsent(at(10, 0)) == [stale["client_order_id"]]
+    assert j.expire_unsent(at(10, 0, 30)) == []  # already expired: nothing more to write
+    orders = j.orders()
+    assert orders[stale["client_order_id"]].status == _EXPIRED
+    assert orders[live["client_order_id"]].status == APPROVED
+    assert orders[sent[0]["client_order_id"]].status == "submitting"
+
+
+def test_an_old_entry_without_expires_at_counts_until_the_end_of_its_day(tmp_path):
+    a = approved_entry(at(9, 50), "10")
+    del a["expires_at"]
+    j = journal_with(tmp_path / "j.jsonl", [a])
+    assert j.day_state(at(15, 59)).open_positions == 1
+    assert j.day_state(at(9, 50) + timedelta(days=1)).open_positions == 0
+
+
+def test_sending_takes_the_trade_slot_and_expiry_after_sending_is_impossible(tmp_path):
+    entries = sent_order(at(9, 50), "10")
+    j = journal_with(tmp_path / "j.jsonl", entries)
+    assert j.day_state(at(10, 30)).trades_today == 1  # sent: the slot stays taken
+    assert j.expire_unsent(at(10, 30)) == []  # only unsent approvals expire
+    assert j.day_state(at(10, 30)).open_positions == 1  # sent and never resolved: still open
+
+
+def test_the_expired_step_needs_a_zero_fill_and_only_follows_an_unsent_approval(tmp_path):
+    a = approved_entry(at(9, 50), "10")
+    j = journal_with(tmp_path / "j.jsonl", [a])
+    with pytest.raises(JournalError, match="needs the broker's filled_qty"):
+        j.record_order_event(a["client_order_id"], _EXPIRED, at(9, 56))
+    with pytest.raises(JournalError, match="never sent cannot have a fill"):
+        j.record_order_event(a["client_order_id"], _EXPIRED, at(9, 56), filled_qty=1)
+
+
+# ======================= review fixes =======================
+
+def test_b1_append_refuses_to_glue_onto_a_cut_off_line_and_repair_still_works(tmp_path):
+    path = tmp_path / "j.jsonl"
+    cut_off(path)
+    before = path.read_bytes()
+    with pytest.raises(JournalError, match=r"python -m journal\.repair"):
+        Journal(path).append({"status": "pass", "run_id": "r"})
+    assert path.read_bytes() == before  # nothing written
+    assert repair_main(["--path", str(path), "--yes"]) == 0
+    Journal(path).append({"status": "pass", "run_id": "r"})
+    assert [e["status"] for e in Journal(path).entries()] == [APPROVED, "pass"]
+
+
+def test_b1_a_decision_after_a_crash_leaves_the_journal_repairable(monkeypatch, tmp_path):
+    """The next decision's writes (here a refused proposal's best-effort no_order entry)
+    must not bury the cut-off line mid-file."""
+    path = tmp_path / "clean-buy.jsonl"
+    cut_off(path)
+    before = path.read_bytes()
+    result, journal, asked, _ = run_scenario(monkeypatch, tmp_path, "clean-buy")
+    assert result.proposal.ok is False and result.proposal.stage == "journal"
+    assert asked == [] and path.read_bytes() == before
+    assert repair_main(["--path", str(path), "--yes"]) == 0
+    assert len(Journal(path).entries()) == 1
+
+
+def test_s1_an_overnight_position_closed_this_morning_counts_today(tmp_path):
+    """Approved and filled on Friday, stopped out on Monday morning: Monday's loss and
+    stop-out, though not Monday's trade or risk."""
+    a = approved_entry(MON - timedelta(days=3), "49.84", symbol="GAPA")
+    cid = a["client_order_id"]
+    events = [*events_for(a, *FILLED),
+              {"status": "closed", "client_order_id": cid, "closed_by": "stop",
+               "realized_pnl": "-120.00", "at": (MON - timedelta(hours=1)).isoformat()}]
+    s = state_of(tmp_path, a, *events)
+    assert s.realized_loss_today == D("120.00")
+    assert s.stopped_out_symbols == frozenset({"GAPA"})
+    assert s.trades_today == 0 and s.risk_used_today == 0 and s.open_positions == 0
+
+
+def test_s1_a_trade_closed_yesterday_does_not_count_today(tmp_path):
+    a = approved_entry(MON - timedelta(days=3), "49.84", symbol="GAPA")
+    s = state_of(tmp_path, a, *events_for(a, *FILLED, ("closed", {"closed_by": "stop",
+                                                                   "realized_pnl": "-120"})))
+    assert s.realized_loss_today == 0 and s.stopped_out_symbols == frozenset()
+
+
+def test_lock_timeouts_raise_the_journal_lock_timeout_subclass(tmp_path, monkeypatch):
+    monkeypatch.setattr(jl, "LOCK_TIMEOUT_S", 0.2)
+    path = tmp_path / "j.jsonl"
+    hold, release = threading.Event(), threading.Event()
+
+    def keep_lock():
+        with Journal(path).exclusive():
+            hold.set()
+            release.wait(5)
+
+    t = threading.Thread(target=keep_lock)
+    t.start()
+    hold.wait(5)
+    try:
+        with pytest.raises(JournalLockTimeout):
+            Journal(path).append({"status": "pass"})
+    finally:
+        release.set()
+        t.join(5)

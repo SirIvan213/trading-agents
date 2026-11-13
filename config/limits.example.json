@@ -20,10 +20,7 @@
   "max_or_missing_minutes": 3,
   "slippage_pct": "0.10",
   "max_order_quote_age_s": 15,
-  "entry_window": [
-    "09:45",
-    "15:30"
-  ],
+  "entry_window": ["09:45", "15:30"],
   "flat_by": "15:55",
   "blocked_symbols": []
 }

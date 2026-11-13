@@ -6,7 +6,7 @@ from decimal import Decimal as D
 import pytest
 
 from journal.log import APPROVED, DEFAULT_PATH, Journal, JournalError
-from tests.order_helpers import NY, T0, approved_entry, journal_with, raw_lines
+from tests.order_helpers import NY, T0, approved_entry, journal_with, raw_lines, sent_order
 
 
 @pytest.fixture
@@ -77,10 +77,10 @@ def test_counts_only_todays_approvals_and_sums_max_loss(j):
     yesterday = T0 - timedelta(days=1)
     tomorrow = T0 + timedelta(days=1)
     for e in [
-        approved_entry(T0 - timedelta(hours=1), "46.88"),
-        approved_entry(T0, "10.00"),
-        approved_entry(yesterday, "99.00"),  # another day: not counted
-        approved_entry(tomorrow, "99.00"),
+        *sent_order(T0 - timedelta(hours=1), "46.88"),
+        *sent_order(T0, "10.00"),
+        *sent_order(yesterday, "99.00"),  # another day: not counted
+        *sent_order(tomorrow, "99.00"),
         {"status": "declined", "approved_at": T0.isoformat(), "max_loss": "77"},
         {"status": "refused_after_approval", "max_loss": "77"},
         {"status": "changed_after_approval", "max_loss": "77"},
@@ -93,7 +93,8 @@ def test_counts_only_todays_approvals_and_sums_max_loss(j):
 
 def test_day_boundary_uses_new_york_date_not_utc(j):
     late = datetime(2026, 10, 19, 23, 30, tzinfo=NY)  # 03:30Z on the 20th
-    j.append(approved_entry(late, "5.00"))
+    for e in sent_order(late, "5.00"):
+        j.append(e)
     same_ny_day = datetime(2026, 10, 19, 9, 0, tzinfo=NY)
     next_ny_day = datetime(2026, 10, 20, 0, 5, tzinfo=NY)
     assert j.day_state(same_ny_day).trades_today == 1
@@ -150,7 +151,8 @@ def test_malformed_approved_entry_from_another_day_still_fails_closed(j):
 
 
 def test_zero_max_loss_is_allowed_and_counts_as_a_trade(j):
-    j.append(approved_entry(T0, "0"))
+    for e in sent_order(T0, "0"):
+        j.append(e)
     s = j.day_state(T0)
     assert s.trades_today == 1 and s.risk_used_today == D("0")
 
@@ -159,7 +161,8 @@ def test_state_is_re_read_from_disk_every_call(tmp_path):
     path = tmp_path / "d.jsonl"
     a, b = Journal(path), Journal(path)  # two handles on one file
     assert a.day_state(T0).trades_today == 0
-    b.append(approved_entry(T0))
+    for e in sent_order(T0):
+        b.append(e)
     assert a.day_state(T0).trades_today == 1
 
 

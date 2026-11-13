@@ -183,6 +183,7 @@ def propose(
         if client_order_id(run_id, plan.plan_id) in journal.orders():
             return refuse("journal", "this plan already has an order (one order per plan)",
                           plan, sized)
+        journal.expire_unsent(now)  # unsent approvals past their plan's expiry (#109)
         state = journal.day_state(now)
     except (JournalError, OrderError) as exc:
         return refuse("journal", str(exc), plan, sized)
@@ -321,5 +322,6 @@ def approve(
         age = _plan_age_s(again.plan, approved_at) if again.plan else None
         journal.append(
             _entry(again, APPROVED, None, approved_at=again.checked_at, plan_age_s=age,
-                   client_order_id=client_order_id(again.run_id, again.plan_id)))
+                   client_order_id=client_order_id(again.run_id, again.plan_id),
+                   expires_at=again.expires_at))
         return Outcome(APPROVED, None, p, again, again.checked_at, age)
