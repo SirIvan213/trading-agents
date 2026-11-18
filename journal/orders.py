@@ -6,7 +6,8 @@ retry can never create a second order). Its state is derived by REPLAYING those 
 entry is ever rewritten.
 
     approved_not_sent -> submitting -> submitted | rejected | send_unknown
-    approved_not_sent -> expired (its plan expired before it was sent; Ivan's decision)
+    approved_not_sent -> expired (its plan expired before it was sent, Ivan's decision; or
+                         the sender refused it before any POST: "reason" starts "not sent:")
     send_unknown      -> submitted | rejected | partially_filled | filled | cancelled | expired
     submitted         -> partially_filled | filled | cancelled | expired | rejected
     partially_filled  -> partially_filled | filled | cancelled | expired

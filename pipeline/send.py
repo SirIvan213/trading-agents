@@ -56,7 +56,8 @@ from tools.broker import BrokerError, bracket_request
 # (no status, 408, 429, 5xx) may have created it, so it is looked up, never resent.
 DEFINITE_REFUSALS = frozenset({400, 401, 403, 404, 422})
 
-NOT_SENT = "not_sent"  # nothing reached the broker (the approval is journaled expired)
+NOT_SENT = "not_sent"  # this call POSTed nothing (`journaled`: the approval was expired)
+ALREADY_SENT = "already_sent"  # the order was sent before (the broker may hold it)
 JOURNAL_RECORD_ATTEMPTS = 2  # a post-send journal entry is written with one retry
 
 
@@ -64,12 +65,20 @@ JOURNAL_RECORD_ATTEMPTS = 2  # a post-send journal entry is written with one ret
 class SendResult:
     """What happened to one approved order.
 
-    status: "submitted", "rejected", "send_unknown" (the broker may hold the order; PR 4's
-    reconciler settles it) or "not_sent" (nothing was POSTed). `alert` is True when a human
-    must look now: the outcome at the broker is unknown or does not match, or a post-send
-    journal entry could not be written. `journaled` is False when the journal entry for this
-    result could not be written (the journal then still reads "submitting", which keeps the
-    order's slot and risk counted)."""
+    status:
+      - "submitted": the broker holds the order (PR 4's reconciler follows it from there,
+        including an asynchronous reject or cancel);
+      - "rejected": a definite refusal, and the lookup found no order;
+      - "send_unknown": the broker may hold the order; the reconciler settles it;
+      - "not_sent": THIS call POSTed nothing. `journaled` True: the approval is journaled
+        expired and can never be sent; False: no entry was written (the journal failed, or
+        the outcome does not match the journaled approval) and the approval stays unsent
+        until its plan expires;
+      - "already_sent": the journal shows the order was sent before (submitting or later), so
+        nothing is POSTed again; the broker may hold it.
+    `alert` is True when a human must look now: the outcome at the broker is unknown or does
+    not match, or a post-send journal entry could not be written (the journal then still
+    reads "submitting", which keeps the order's slot and risk counted)."""
 
     status: str
     reason: str | None
@@ -85,13 +94,13 @@ def _matches(reply: dict, body: dict) -> bool:
     """The broker's order is the one in the request: id, symbol, side, quantity, bracket,
     limit entry and limit price."""
     try:
-        qty = str(Decimal(str(reply.get("qty"))).normalize())
+        qty = Decimal(str(reply.get("qty")))  # as a number: "10" may come back as "10.0"
         limit = Decimal(str(reply.get("limit_price")))
     except (InvalidOperation, ValueError, TypeError):
         return False
     return (reply.get("client_order_id") == body["client_order_id"]
             and reply.get("symbol") == body["symbol"] and reply.get("side") == "buy"
-            and qty == body["qty"] and reply.get("order_class") == "bracket"
+            and qty == Decimal(body["qty"]) and reply.get("order_class") == "bracket"
             and reply.get("type") == "limit" and limit == Decimal(body["limit_price"]))
 
 
@@ -101,10 +110,31 @@ def _alert(message: str) -> None:
 
 
 def _now(clock: Clock) -> datetime:
-    now = clock()
+    """`clock()`, or JournalError for a clock that raises or is not timezone-aware."""
+    try:
+        now = clock()
+    except Exception as exc:  # noqa: BLE001 - a broken clock must not raise out of the sender
+        raise JournalError(f"clock failed ({type(exc).__name__})") from None
     if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
         raise JournalError("clock must be timezone-aware")
     return now
+
+
+def _event_time(clock: Clock) -> datetime:
+    """The time for a post-send event: the clock, or the wall clock when the injected clock
+    fails, so a sent order's broker id is never lost to a clock error."""
+    try:
+        return _now(clock)
+    except JournalError:
+        return wall_clock()
+
+
+def _approved_order(journal: Journal, cid: str) -> object:
+    """The order dict the human approved, as journaled with this client_order_id."""
+    for e in journal.entries():
+        if e.get("status") == APPROVED and e.get("client_order_id") == cid:
+            return e.get("order")
+    return None
 
 
 def _not_sent(journal: Journal, cid: str, clock: Clock, reason: str,
@@ -128,7 +158,7 @@ def _record(journal: Journal, cid: str, status: str, clock: Clock, result: SendR
     last: Exception | None = None
     for _ in range(JOURNAL_RECORD_ATTEMPTS):
         try:
-            journal.record_order_event(cid, status, _now(clock), **fields)
+            journal.record_order_event(cid, status, _event_time(clock), **fields)
             return result
         except JournalError as exc:
             last = exc
@@ -169,10 +199,19 @@ def send_approved(outcome: Outcome, *, journal: Journal, broker: Any,
         with journal.exclusive():
             now = _now(clock)
             current = journal.orders().get(cid)
-            if current is None or current.status != APPROVED:
-                state = current.status if current is not None else "missing"
-                return SendResult(NOT_SENT, f"the order is {state}, not an unsent approval",
-                                  cid)
+            if current is None:
+                return SendResult(NOT_SENT, "no approval in the journal for this order", cid,
+                                  journaled=False)
+            if current.sent:
+                return SendResult(ALREADY_SENT, f"the order was already sent (now "
+                                  f"{current.status}); nothing is sent again", cid)
+            if current.status != APPROVED:
+                return SendResult(NOT_SENT, f"the order is {current.status}, not an unsent "
+                                  "approval", cid, journaled=False)
+            if _approved_order(journal, cid) != order:
+                # only the exact order the human approved is ever sent
+                return SendResult(NOT_SENT, "the order differs from the journaled approval",
+                                  cid, journaled=False)
             if not current.live_unsent(now):
                 return _not_sent(journal, cid, clock, "its plan expired before it was sent")
             verdict = check_before_send(p, journal=journal, now=now)
@@ -185,7 +224,7 @@ def send_approved(outcome: Outcome, *, journal: Journal, broker: Any,
         # The write-ahead entry was refused (a late send, #186) or the journal failed:
         # without "submitting" on record, nothing is sent.
         return SendResult(NOT_SENT, f"journal refused or failed before sending, nothing "
-                          f"sent: {exc}", cid)
+                          f"sent: {exc}", cid, journaled=False)
 
     # 3. The one POST, outside the lock. Never resent.
     try:
@@ -196,6 +235,8 @@ def send_approved(outcome: Outcome, *, journal: Journal, broker: Any,
         return _after_failure(journal, broker, cid, body, clock,
                               BrokerError("the broker's reply does not match the request"),
                               verdict)
+    # A reply with status rejected or canceled (an asynchronous refusal) is still journaled
+    # "submitted": its risk stays counted until the reconciler (PR 4) records what happened.
     result = SendResult(SUBMITTED, None, cid, reply.get("id"), verdict,
                         details={"broker_status": reply.get("status")})
     return _record(journal, cid, SUBMITTED, clock, result, broker_order_id=reply.get("id"),

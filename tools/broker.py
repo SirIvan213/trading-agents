@@ -374,7 +374,9 @@ class AlpacaPaperBroker:
         expected = {"client_order_id": client_order_id, "symbol": body["symbol"], "side": "buy",
                     "qty": body["qty"], "order_class": "bracket"}
         got = {k: out[k] for k in expected}
-        got["qty"] = str(Decimal(got["qty"]).normalize()) if got["qty"] else got["qty"]
+        # compare the quantity as a number: Decimal("10").normalize() prints as "1E+1"
+        if got["qty"] and Decimal(got["qty"]) == Decimal(body["qty"]):
+            got["qty"] = body["qty"]
         if got != expected:
             raise BrokerError("broker reply does not match the order sent")
         return out

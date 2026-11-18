@@ -15,7 +15,7 @@ import pipeline.order_flow as of
 from journal.log import Journal, JournalError, JournalLockTimeout
 from journal.orders import APPROVED, client_order_id
 from pipeline.order_flow import approval_prompt, approve, propose, render_ticket
-from pipeline.send import NOT_SENT, send_approved
+from pipeline.send import ALREADY_SENT, NOT_SENT, send_approved
 from tests.order_helpers import (
     AS_OF,
     BROKER_FIXTURES,
@@ -160,7 +160,7 @@ def test_a_second_send_of_the_same_approval_sends_nothing(ledger, journal):
     broker = FakePaperBroker()
     assert send(out, journal, broker).status == "submitted"
     again = send(out, journal, broker, T1 + timedelta(seconds=1))
-    assert again.status == NOT_SENT and "submitted, not an unsent approval" in again.reason
+    assert again.status == ALREADY_SENT and "already sent (now submitted)" in again.reason
     assert broker.names().count("submit") == 1
     assert statuses(journal) == [APPROVED, "submitting", "submitted"]
 
@@ -529,10 +529,12 @@ def test_the_ticket_shows_the_limit_price_and_says_it_is_sent(ledger, journal):
                 events=events_clear())
     sent = render_ticket(p, sends=True)
     assert sent.splitlines()[0] == ("ORDER TICKET (Alpaca PAPER account; an approved order is "
-                                    "SENT to the paper broker)")
+                                    "SENT to the paper broker after a final risk re-check)")
     assert ("Buy 8 shares of TSLA with a LIMIT order at 364.55 (planned entry 364.18 + "
             "slippage allowance 0.37)") in sent
-    assert "fills at that price or lower, or not at all" in sent
+    assert "fills at that price or lower" in sent
+    # honest until the reconciler's 60 s cancel exists (PR 4)
+    assert "Nothing cancels an unfilled entry yet: it stays working until the close." in sent
     assert "at market" not in sent and "NOT sent" not in sent
     kept = render_ticket(p)
     assert "NOT sent to a broker" in kept and "LIMIT order at 364.55" in kept
@@ -610,3 +612,225 @@ def test_a_quote_gone_stale_while_waiting_for_the_lock_is_refused(ledger, journa
                   events=events_clear())
     assert out.status == "refused_after_approval" and "at size" in out.reason
     assert "old" in out.reason
+
+
+# ===================== review fixes =====================
+
+class Resp:
+    def __init__(self, body, url, status=200):
+        self.b, self.u, self.status = body, url, status
+
+    def read(self, n=None):
+        return self.b
+
+    def geturl(self):
+        return self.u
+
+    def getcode(self):
+        return self.status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def real_broker(monkeypatch, *, post, lookup=None):
+    """tools.broker's paper client behind a fake opener. `post(body)` answers the POST
+    (bytes, or raises); `lookup()` answers GET /v2/orders:by_client_order_id."""
+    import urllib.error
+    monkeypatch.setenv("ALPACA_API_KEY", "SENTINEL-KEY")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "SENTINEL-SECRET")
+    account = (BROKER_FIXTURES / "account.json").read_bytes()
+    calls = []
+
+    def opener(req, timeout=None):
+        url = req.full_url
+        if url.endswith("/v2/account"):
+            return Resp(account, url)
+        if req.get_method() == "POST":
+            calls.append("POST")
+            return Resp(post(json.loads(req.data)), url)
+        if "by_client_order_id" in url:
+            calls.append("LOOKUP")
+            if lookup is None:
+                raise urllib.error.HTTPError(url, 404, "nf", {}, None)
+            return Resp(lookup(), url)
+        if req.get_method() == "DELETE":
+            calls.append("DELETE")
+            return Resp(b"", url, 204)
+        raise AssertionError(url)
+
+    return AlpacaPaperBroker(LIMITS, opener=opener), calls
+
+
+def alpaca_reply(body):
+    raw = json.loads((BROKER_FIXTURES / "order_bracket_new.json").read_text(encoding="utf-8"))
+    raw.update({"client_order_id": body["client_order_id"], "symbol": body["symbol"],
+                "qty": body["qty"], "limit_price": body["limit_price"]})
+    return json.dumps(raw).encode()
+
+
+def approved_qty(journal, qty):
+    """An approval whose order is `qty` shares (the position cap sizes it), journaled."""
+    led = sealed_ledger()
+    value = (D("364.55") * qty + D("1")).quantize(D("0.01"))
+    limits = replace(LIMITS, max_position_value=value, max_loss_per_trade=D("10000.00"),
+                     account_cash=D("100000.00"), daily_loss_limit=D("10000.00"))
+    import pipeline.order_flow as flow
+    flow.load_checked_limits = lambda *a, **k: limits  # restored by the autouse fixture
+    out = approved(led, journal)
+    assert out.recheck.order["qty"] == qty, out.recheck.order
+    return out
+
+
+@pytest.mark.parametrize("qty", [10, 100])
+def test_b1_a_round_quantity_through_the_real_client_is_submitted(
+        journal, monkeypatch, qty):
+    """Decimal("10").normalize() is "1E+1": a 10-share order must still match."""
+    out = approved_qty(journal, qty)
+    broker, calls = real_broker(monkeypatch, post=alpaca_reply)
+    r = send(out, journal, broker)
+    assert r.status == "submitted" and not r.alert, r.reason
+    assert calls == ["POST"]  # no lookup, no cancel
+
+
+def test_a_quantity_written_with_a_decimal_point_still_matches():
+    from pipeline.send import _matches
+    body = {"client_order_id": "ta-x", "symbol": "TSLA", "qty": "10", "limit_price": "364.55"}
+    reply = {**body, "side": "buy", "order_class": "bracket", "type": "limit"}
+    assert _matches(dict(reply, qty="10.0"), body) and _matches(dict(reply, qty="10"), body)
+    assert not _matches(dict(reply, qty="1E+2"), body)  # 100 is not 10
+    assert not _matches(dict(reply, qty="9"), body)
+
+
+@pytest.mark.parametrize("qty", [10, 100])
+def test_b1_a_round_quantity_found_by_lookup_is_submitted(journal, monkeypatch, qty):
+    import urllib.error
+
+    def timeout(body):
+        raise urllib.error.URLError(TimeoutError())
+
+    out = approved_qty(journal, qty)
+    body = bracket_request(out.recheck.order, cid_of(out))
+    broker, calls = real_broker(monkeypatch, post=timeout,
+                                lookup=lambda: alpaca_reply(body))
+    r = send(out, journal, broker)
+    assert r.status == "submitted" and "broker holds the order" in r.reason
+    assert calls == ["POST", "LOOKUP"]  # never resent, never cancelled
+
+
+def test_the_real_client_on_a_timeout_with_nothing_found_is_send_unknown(
+        ledger, journal, monkeypatch, capsys):
+    import urllib.error
+
+    def timeout(body):
+        raise urllib.error.URLError(TimeoutError())
+
+    out = approved(ledger, journal)
+    broker, calls = real_broker(monkeypatch, post=timeout)  # the lookup answers 404
+    r = send(out, journal, broker)
+    assert r.status == "send_unknown" and r.alert and calls == ["POST", "LOOKUP"]
+    assert "ALERT" in capsys.readouterr().err
+
+
+def test_the_real_client_on_a_500_with_the_order_found_is_submitted(
+        ledger, journal, monkeypatch):
+    import urllib.error
+
+    def server_error(body):
+        raise urllib.error.HTTPError("u", 500, "x", {}, None)
+
+    out = approved(ledger, journal)
+    body = bracket_request(out.recheck.order, cid_of(out))
+    broker, calls = real_broker(monkeypatch, post=server_error,
+                                lookup=lambda: alpaca_reply(body))
+    assert send(out, journal, broker).status == "submitted"
+    assert calls == ["POST", "LOOKUP"]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_every_definite_refusal_with_nothing_found_is_rejected(ledger, journal, status):
+    out = approved(ledger, journal)
+    broker = FakePaperBroker()
+    broker.submit = BrokerError(f"POST /v2/orders failed: HTTP {status}", status=status)
+    r = send(out, journal, broker)
+    assert r.status == "rejected" and raw_lines(journal)[-1]["http_status"] == status
+
+
+def test_a_lookup_that_returns_neither_an_order_nor_none_is_send_unknown(ledger, journal):
+    out = approved(ledger, journal)
+    broker = FakePaperBroker()
+    broker.submit = BrokerError("POST /v2/orders failed: HTTP 403", status=403)
+    broker.lookup = ["not", "an", "order"]
+    r = send(out, journal, broker)
+    assert r.status == "send_unknown" and r.alert
+
+
+def test_a_clock_that_raises_before_the_post_sends_nothing(ledger, journal):
+    out = approved(ledger, journal)
+    broker = FakePaperBroker()
+
+    def broken():
+        raise RuntimeError("clock gone")
+
+    r = send_approved(out, journal=journal, broker=broker, clock=broken)
+    assert r.status == NOT_SENT and "submit" not in broker.names()
+
+
+def test_a_clock_that_raises_after_the_post_still_journals_the_broker_id(ledger, journal):
+    out = approved(ledger, journal)
+    broker = FakePaperBroker()
+    reads = {"n": 0}
+
+    def breaks_after_the_lock():
+        reads["n"] += 1
+        if reads["n"] > 1:
+            raise RuntimeError("clock gone")
+        return T1
+
+    r = send_approved(out, journal=journal, broker=broker, clock=breaks_after_the_lock)
+    assert r.status == "submitted" and r.journaled
+    last = raw_lines(journal)[-1]
+    assert last["status"] == "submitted" and last["broker_order_id"] == "ord-1"
+
+
+def test_an_outcome_that_differs_from_the_journaled_approval_is_never_sent(ledger, journal):
+    out = approved(ledger, journal)
+    bigger = dict(out.recheck.order, qty=9)
+    sized = dict(out.recheck.sized, order=bigger)
+    forged = replace(out, recheck=replace(out.recheck, sized=sized))
+    broker = FakePaperBroker()
+    r = send(forged, journal, broker)
+    assert r.status == NOT_SENT and "differs from the journaled approval" in r.reason
+    assert not r.journaled and "submit" not in broker.names()
+    assert statuses(journal) == [APPROVED]  # the real approval is untouched
+    assert send(out, journal, broker).status == "submitted"
+
+
+def test_day_state_never_leaves_out_a_sent_order(ledger, journal):
+    out = approved(ledger, journal)
+    send(out, journal, FakePaperBroker())
+    cid = cid_of(out)
+    assert journal.day_state(T1, exclude=cid) == journal.day_state(T1)
+    assert journal.day_state(T1, exclude=cid).open_positions == 1
+
+
+def test_the_cancel_of_a_mismatch_does_not_hold_the_lock(ledger, journal):
+    out = approved(ledger, journal)
+    broker = FakePaperBroker()
+    from tests.order_helpers import broker_reply
+    wrong = broker_reply(bracket_request(out.recheck.order, cid_of(out)), qty="9")
+    broker.submit, broker.lookup = wrong, wrong
+    seen, hook = run_in_other_thread(journal)
+    real_cancel = broker.cancel_order
+
+    def cancel(order_id):
+        hook("cancel")
+        return real_cancel(order_id)
+
+    broker.cancel_order = cancel
+    broker.during_call = hook
+    send(out, journal, broker)
+    assert ("cancel", True) in seen and all(ok for _, ok in seen)

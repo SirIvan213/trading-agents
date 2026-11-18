@@ -231,14 +231,14 @@ def render_ticket(p: Proposal, *, sends: bool = False) -> str:
     o, plan, sized = p.sized["order"], p.plan, p.sized
     qty = o["qty"]
     head = ("ORDER TICKET (Alpaca PAPER account; an approved order is SENT to the paper "
-            "broker)" if sends else
+            "broker after a final risk re-check)" if sends else
             "ORDER TICKET (paper account; an approved order is journaled, NOT sent to a broker)")
     return "\n".join([
         head,
         f"  Buy {qty} shares of {o['symbol']} with a LIMIT order at {limit_price(p)} "
         f"(planned entry {o['entry']} + slippage allowance {o.get('slippage', 'n/a')}), "
-        "as a bracket order, time in force day: it fills at that price or lower, or not "
-        "at all.",
+        "as a bracket order, time in force day: it fills at that price or lower. Nothing "
+        "cancels an unfilled entry yet: it stays working until the close.",
         f"  Stop-loss: sell all {qty} if the price falls to {o['stop_loss']}.",
         f"  Take-profit: sell all {qty} if the price reaches {o['take_profit']}.",
         f"  Planned risk per share {sized['risk_per_share']} "

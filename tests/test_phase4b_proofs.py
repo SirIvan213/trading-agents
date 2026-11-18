@@ -575,3 +575,22 @@ def test_without_a_broker_nothing_is_sent(tmp_path):
     assert result.outcome.status == APPROVED and result.sent is None
     assert "NOT sent to a broker" in result.ticket
     assert [e["status"] for e in raw_lines(journal)] == [APPROVED]
+
+
+def test_with_a_broker_a_blocked_re_check_at_sending_sends_nothing(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from tests.order_helpers import FakePaperBroker
+    broker = FakePaperBroker()
+    calls = {"n": 0}
+
+    def flips(*a, **k):  # the kill switch is flipped just before sending
+        calls["n"] += 1
+        return LIMITS if calls["n"] <= 3 else replace(LIMITS, trading_enabled=False)
+
+    monkeypatch.setattr(of, "load_checked_limits", flips)
+    result, journal, _ = go_send(tmp_path, scripts(), broker)
+    assert result.outcome.status == APPROVED
+    assert result.sent.status == "not_sent" and "kill switch" in result.sent.reason
+    assert [e["status"] for e in raw_lines(journal)] == [APPROVED, "expired"]
+    assert "submit" not in broker.names()
