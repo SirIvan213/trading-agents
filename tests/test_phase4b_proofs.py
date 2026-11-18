@@ -639,3 +639,18 @@ def test_190_a_normal_pass_is_recorded_once(tmp_path):
     result, _, journal = go(tmp_path, pass_scripts())
     assert result.record_error is None
     assert [e["status"] for e in raw_lines(journal)] == ["pass"]
+
+
+def test_190_a_clock_failure_while_recording_a_pass_does_not_raise(tmp_path):
+    calls = {"n": 0}
+
+    def clock():
+        calls["n"] += 1
+        if calls["n"] > 2:  # analysts start, before the Trader; then the PASS record
+            raise RuntimeError("clock gone")
+        return NOON + timedelta(seconds=10 * calls["n"])
+
+    result, _, journal = go(tmp_path, pass_scripts(), clock=clock)
+    assert result.record_error is None
+    (entry,) = raw_lines(journal)
+    assert entry["status"] == "pass" and entry["checked_at"] is None

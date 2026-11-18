@@ -263,6 +263,11 @@ def render_ticket(p: Proposal, *, sends: bool = False) -> str:
     ])
 
 
+def is_yes(answer: object) -> bool:
+    """The only answer that approves: exactly "yes" (surrounding spaces ignored)."""
+    return isinstance(answer, str) and answer.strip() == "yes"
+
+
 def approval_prompt(p: Proposal, *, sends: bool = False) -> str:
     """The question asked under the ticket; names the exact order being approved."""
     o = p.order or {}
@@ -388,7 +393,7 @@ def approve(
         answer = ask(render_ticket(p, sends=sends) + "\n" + approval_prompt(p, sends=sends))
     except EOFError:
         answer = ""
-    if not isinstance(answer, str) or answer.strip() != "yes":
+    if not is_yes(answer):
         journal.append(_entry(p, "declined", "not approved"))
         return Outcome("declined", "not approved", p)
 

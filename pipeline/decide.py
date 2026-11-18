@@ -50,6 +50,7 @@ from pipeline.order_flow import (
     Outcome,
     Proposal,
     approve,
+    is_yes,
     propose,
     quotes_from,
     render_ticket,
@@ -218,10 +219,13 @@ def run_decision(
     if decision.action != "BUY" or not decision.plan_id:
         # #190: a PASS record that cannot be written (lock timeout, cut-off journal) is
         # retried once and reported in the result; it never raises out of the decision.
+        try:
+            checked_at: str | None = clock().astimezone(NY).isoformat()
+        except Exception:  # noqa: BLE001 - the record must not fail on the clock
+            checked_at = None
         failed = _append_with_retry(journal, {
             "status": "pass", "run_id": ledger.run_id, "symbol": packet.symbol,
-            "forced_pass": trader.forced_pass,
-            "checked_at": clock().astimezone(NY).isoformat(),
+            "forced_pass": trader.forced_pass, "checked_at": checked_at,
         })
         if failed is not None:
             result.record_error = f"the PASS could not be journaled: {failed}"
@@ -247,8 +251,7 @@ def run_decision(
         # #129: the journal lock timed out (or a write failed) after the answer. Nothing is
         # approved, since an approval exists only once its entry is written, but the attempt
         # must still leave a record: one entry, written with one retry.
-        said_yes = bool(answers) and isinstance(answers[-1], str) and \
-            answers[-1].strip() == "yes"
+        said_yes = bool(answers) and is_yes(answers[-1])
         result.outcome = _journal_failed(result.proposal, journal, exc, clock,
                                          said_yes=said_yes)
     timings["approval"] = int((time.monotonic() - t0) * 1000)

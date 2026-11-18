@@ -165,6 +165,18 @@ class Journal:
                 raise JournalError(
                     f"journal write failed ({type(exc).__name__})") from None
 
+    def _missing(self) -> bool:
+        """True only when the journal file does not exist (FileNotFoundError). Any other
+        error reading its status (a permission error, an unreachable share, a broken link)
+        raises JournalError: an unreadable journal never reads as empty (fail closed)."""
+        try:
+            os.stat(self.path)
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError) as exc:
+            raise JournalError(f"journal unreadable ({type(exc).__name__})") from None
+        return False
+
     def _ends_cut_off(self) -> bool:
         """True when the journal exists, is not empty and does not end with a newline."""
         try:
@@ -188,17 +200,18 @@ class Journal:
         closed), and `python -m journal.repair` moves it aside after a human looks.
 
         A journal that does not exist yet reads as empty WITHOUT taking the lock (#192), so a
-        read never creates the journal's directory or its lock file."""
-        if self._holder != threading.get_ident() and not self.path.exists():
+        read never creates the journal's directory or its lock file. Only a missing file
+        counts: one whose status cannot be read raises JournalError."""
+        if self._holder != threading.get_ident() and self._missing():
             return []
         with self.exclusive():
             return self._read_entries()
 
     def _read_entries(self) -> list[dict]:
-        if not self.path.exists():
-            return []
         try:
             text = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
         except (OSError, UnicodeDecodeError) as exc:
             raise JournalError(f"journal unreadable ({type(exc).__name__})") from None
         if text and not text.endswith("\n"):
@@ -268,10 +281,11 @@ class Journal:
         as "expired" (filled_qty 0), releasing its position slot and its risk (Ivan's
         decision on #109). Returns the client_order_ids expired. Under the lock; raises
         JournalError if the journal cannot be read or written. The journal is replayed once
-        for all of them (#191). A journal that does not exist has nothing to expire."""
+        for all of them (#191), instead of once per expired approval. A journal that does not
+        exist has nothing to expire."""
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise JournalError("now must be timezone-aware")
-        if self._holder != threading.get_ident() and not self.path.exists():
+        if self._holder != threading.get_ident() and self._missing():
             return []
         done: list[str] = []
         with self.exclusive():

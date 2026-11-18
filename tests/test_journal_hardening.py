@@ -378,3 +378,163 @@ def test_197_blocked_a_suspended_or_shortable_account_is_refused(monkeypatch, fi
         b.verify_paper_account()
     with pytest.raises(BrokerError, match="verify_paper_account"):
         b.list_positions()  # every later call refuses too
+
+
+# ======================= review fixes =======================
+
+def test_192_blocked_a_journal_whose_status_cannot_be_read_never_reads_as_empty(
+        tmp_path, monkeypatch):
+    """Only a MISSING file reads as empty; a permission error fails closed (S1)."""
+    j = journal_with(tmp_path / "j.jsonl", [approved_entry(T0)])
+    real = jl.os.stat
+
+    def denied(p, *a, **k):
+        if str(p) == str(j.path):
+            raise PermissionError(13, "denied")
+        return real(p, *a, **k)
+
+    monkeypatch.setattr(jl.os, "stat", denied)
+    for read in (j.entries, j.orders, lambda: j.day_state(T0), lambda: j.expire_unsent(T0)):
+        with pytest.raises(JournalError, match="unreadable"):
+            read()
+
+
+def test_192_blocked_a_read_inside_the_lock_never_reads_an_unreadable_file_as_empty(
+        tmp_path, monkeypatch):
+    j = journal_with(tmp_path / "j.jsonl", [approved_entry(T0)])
+    real_read = type(j.path).read_text
+
+    def denied(self, *a, **k):
+        if str(self) == str(j.path):
+            raise PermissionError(13, "denied")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(type(j.path), "read_text", denied)
+    with j.exclusive(), pytest.raises(JournalError, match="unreadable"):
+        j.orders()
+
+
+def test_191_a_file_that_appears_after_proposes_existence_check_is_still_read(
+        tmp_path, limits):
+    """propose's lock choice uses Path.exists(); the reads themselves check again (T5)."""
+    path = tmp_path / "j.jsonl"
+    journal_with(path, [approved_entry(T0, symbol="AAPL")])  # a live approval: 1 open
+
+    class Lying(type(path)):
+        def exists(self, *a, **k):
+            return False
+
+    j = Journal(path)
+    j.path = Lying(str(path))
+    p = propose(sealed_ledger(), "plan-1", journal=j, clock=lambda: T0, quotes=quotes_at(T0),
+                events=events_clear())
+    assert p.ok is False and p.stage == "risk" and "open position" in p.reason
+
+
+def test_191_a_failed_append_inside_record_order_event_drops_the_held_replay(
+        tmp_path, replays):
+    a = approved_entry(T0)
+    cid = a["client_order_id"]
+    j = journal_with(tmp_path / "j.jsonl", [a])
+    with j.exclusive():
+        j.orders()
+        replays["n"] = 0
+
+        def broken():
+            raise JournalError("journal unreadable (OSError)")
+
+        j._ends_cut_off = broken
+        with pytest.raises(JournalError):
+            j.record_order_event(cid, "submitting", T0 + timedelta(seconds=1))
+        del j._ends_cut_off
+        assert j._replayed is None
+        assert j.orders()[cid].status == APPROVED and replays["n"] == 1  # read the file again
+
+
+def test_194_repair_reports_a_history_that_does_not_replay(tmp_path, capsys):
+    a, cid, events = trade(T0)
+    bad = ev(cid, "closed", T0 - timedelta(days=1), closed_by="stop", realized_pnl="-49.84")
+    path = tmp_path / "j.jsonl"
+    journal_with(path, [a, *events, bad])
+    before = path.read_bytes()
+    assert repair_main(["--path", str(path)]) == BAD_LINES
+    err = capsys.readouterr().err
+    assert "order history does not replay" in err and "before the order's previous event" in err
+    assert path.read_bytes() == before
+
+
+# ---- #194 on the sender path (S2) ----
+
+def sent_setup(tmp_path):
+    from pipeline.order_flow import approve
+    led = sealed_ledger()
+    j = Journal(tmp_path / "j.jsonl")
+    p = propose(led, "plan-1", journal=j, clock=lambda: T0, quotes=quotes_at(T0),
+                events=events_clear())
+    out = approve(p, led, journal=j, ask=lambda _: "yes", clock=lambda: T0,
+                  quotes=quotes_at(T0), events=events_clear(), sends=True)
+    assert out.status == APPROVED
+    return j, out
+
+
+def test_194_blocked_a_send_clock_behind_the_approval_sends_nothing(tmp_path, limits):
+    from pipeline.send import NOT_SENT, send_approved
+    from tests.order_helpers import FakePaperBroker
+    j, out = sent_setup(tmp_path)
+    broker = FakePaperBroker()
+    r = send_approved(out, journal=j, broker=broker, clock=lambda: T0 - timedelta(seconds=1))
+    assert r.status == NOT_SENT and not r.journaled
+    assert "before the order's previous event" in r.reason
+    assert "submit" not in broker.names()
+    assert [e["status"] for e in lines(j.path)] == [APPROVED]
+
+
+def test_194_blocked_a_post_send_event_dated_before_submitting_alerts_and_stays_counted(
+        tmp_path, limits, capsys):
+    from pipeline.send import send_approved
+    from tests.order_helpers import FakePaperBroker, StepClock
+    j, out = sent_setup(tmp_path)
+    t1 = T0 + timedelta(seconds=2)
+    r = send_approved(out, journal=j, broker=FakePaperBroker(),
+                      clock=StepClock(t1, t1 - timedelta(seconds=1)))
+    assert r.status == "submitted" and r.alert and not r.journaled
+    assert "ALERT" in capsys.readouterr().err
+    assert [e["status"] for e in lines(j.path)] == [APPROVED, "submitting"]
+    state = j.day_state(t1)
+    assert state.open_positions == 1 and state.risk_used_today == D("49.84")
+
+
+# ---- #192 through the real approve() (T3) ----
+
+def test_192_a_lock_timeout_after_a_real_yes_says_after_a_yes(monkeypatch, tmp_path):
+    import threading
+    monkeypatch.setattr(jl, "LOCK_TIMEOUT_S", 0.3)
+    path = tmp_path / "clean-buy.jsonl"
+    holder = Journal(path)
+    hold, release = threading.Event(), threading.Event()
+
+    def keep_lock():
+        with holder.exclusive():
+            hold.set()
+            release.wait(5)
+
+    real_append = Journal.append
+
+    def append_spy(self, entry):
+        if entry["status"] == decide.JOURNAL_LOCKED:
+            release.set()
+        return real_append(self, entry)
+
+    monkeypatch.setattr(Journal, "append", append_spy)
+
+    def answer_then_lock(_question):
+        threading.Thread(target=keep_lock, daemon=True).start()
+        hold.wait(5)
+        return "yes"
+
+    result, journal, _, _ = run_scenario(monkeypatch, tmp_path, "clean-buy",
+                                         answers=answer_then_lock)
+    release.set()
+    assert result.outcome.status == decide.JOURNAL_LOCKED
+    assert "journal unavailable after a yes" in result.outcome.reason
+    assert journal.entries()[-1]["answer"] == "yes"
