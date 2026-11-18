@@ -206,16 +206,23 @@ def run_decision(
     budget: dict[str, float | int | None] = {
         "max_plan_age_s": max_age, "analyst_timeout_s": analyst_timeout}
 
-    started = clock()
-    # #170: free SEC check before the first billed call
-    coverage = reporting_check(data, sym, started)
+    # #170: free SEC check before the first billed call. It reads its own clock, BEFORE
+    # `started`: SEC latency must never eat into the plan's age budget (max_plan_age_s).
+    checked = clock()
+    if not isinstance(checked, datetime) or checked.tzinfo is None or \
+            checked.utcoffset() is None:
+        raise ValueError("clock must be timezone-aware")  # before any request, free or billed
+    coverage = reporting_check(data, sym, checked)
     if coverage.get("covered") is not True:
         reason = str(coverage.get("reason") or "quarterly reporting not proven")
+        # best effort: a journal that cannot record the skip never turns it into a decision
         _append_with_retry(journal, {
             "status": "skipped", "symbol": sym, "run_id": ledger.run_id, "reason": reason,
-            "checked_at": started.astimezone(NY).isoformat(),
+            "checked_at": checked.astimezone(NY).isoformat(),
         })
         raise SymbolSkipped(sym, reason)
+
+    started = clock()  # the plan-age clock starts here, after the SEC check
     t0 = time.monotonic()
     packet = asyncio.run(run_analysts(
         sym, started, data=data, clients=clients, configs={a: cfgs[a] for a in AGENTS},
