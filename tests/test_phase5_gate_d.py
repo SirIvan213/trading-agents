@@ -748,7 +748,9 @@ def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=
     scenario = load_scenario(name)
     base = ScenarioData(scenario)
     as_of, symbol = base.as_of(), base.symbol
-    clock = StepClock(as_of, as_of + timedelta(seconds=20), as_of + timedelta(seconds=40))
+    # readings: SEC check (#170), analysts start, before the Trader, proposal ...
+    clock = StepClock(as_of, as_of, as_of + timedelta(seconds=20),
+                      as_of + timedelta(seconds=40))
     data = RestampedScenario(scenario, clock)
 
     async def fake_analysts(sym, at, **k):

@@ -850,7 +850,9 @@ def test_approved_entry_counts_the_worst_case_loss_toward_the_day(ledger, journa
 # ======================= decide and smoke wiring =======================
 
 def go(tmp_path, data, clock=None):
-    clock = clock or StepClock(NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=40))
+    # readings: SEC check (#170), analysts start, before the Trader, proposal ...
+    clock = clock or StepClock(NOON, NOON, NOON + timedelta(seconds=20),
+                               NOON + timedelta(seconds=40))
     journal = Journal(tmp_path / "j.jsonl")
     result = run_decision(SYMBOL, data=data, clients=Router(scripts()), journal=journal,
                           clock=clock, ask=yes, rounds=1, timeout_s=10)
@@ -858,7 +860,8 @@ def go(tmp_path, data, clock=None):
 
 
 def test_run_decision_reads_the_quote_from_data_for_propose_and_again_for_approve(tmp_path):
-    clock = StepClock(NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=40))
+    clock = StepClock(NOON, NOON, NOON + timedelta(seconds=20),  # SEC check first
+                      NOON + timedelta(seconds=40))
     data = QuotingData(FakeAllData(), clock, SYMBOL, "103.10")
     result, journal = go(tmp_path, data, clock)
     assert result.outcome.status == APPROVED
@@ -879,7 +882,8 @@ def test_run_decision_without_a_quote_in_the_snapshots_gets_no_order(tmp_path):
 
 
 def test_run_decision_with_a_stale_live_quote_gets_no_order(tmp_path):
-    clock = StepClock(NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=40))
+    clock = StepClock(NOON, NOON, NOON + timedelta(seconds=20),  # SEC check first
+                      NOON + timedelta(seconds=40))
     data = QuotingData(FakeAllData(), clock, SYMBOL, "103.10", age_s=16)
     result, _ = go(tmp_path, data, clock)
     assert result.proposal.stage == "size"

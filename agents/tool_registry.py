@@ -24,6 +24,7 @@ from tools.plan_labels import plan_labels
 from tools.scan import ScanCriteria, validate_symbols
 
 MAX_SCAN_SYMBOLS = 5  # #43: the session symbol plus at most 4 peers
+MAX_SCAN_INPUT = 4 * MAX_SCAN_SYMBOLS  # entries accepted before validation and de-duplication
 MAX_SCAN_CALLS = 2  # #43: scan calls per analyst run (each one fetches snapshots and listings)
 PLAN_EXIT_KEYS = frozenset({"setup", "entry", "level", "reward_multiple"})
 # REWARD_MULTIPLES (tools.config) is the only menu the model may pick from. exit_plan computes
@@ -415,7 +416,7 @@ def _scan(s: ToolSession, inp: dict) -> tuple[dict, bool]:
         return _err("symbols must be a non-empty array of strings")
     too_many = _err(f"at most {MAX_SCAN_SYMBOLS} symbols (this session's symbol plus "
                     f"{MAX_SCAN_SYMBOLS - 1} peers)")
-    if len(symbols) > 4 * MAX_SCAN_SYMBOLS:  # a bound before validating a long list
+    if len(symbols) > MAX_SCAN_INPUT:  # a bound before validating a long list
         return too_many
     try:
         syms = validate_symbols(symbols)
