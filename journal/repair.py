@@ -37,9 +37,18 @@ DRY_RUN_FOUND = 1
 BAD_LINES = 3
 
 
+def _read(path: Path) -> bytes:
+    """The journal's bytes; b"" only when it does not exist. Any other read error raises
+    (OSError, which repair() turns into JournalError): never read as empty."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return b""
+
+
 def torn_tail(path: Path) -> bytes:
     """The bytes after the journal's last newline ("" when it ends with one or is empty)."""
-    data = path.read_bytes() if path.exists() else b""
+    data = _read(path)
     cut = data.rfind(b"\n") + 1
     return data[cut:]
 
@@ -47,7 +56,7 @@ def torn_tail(path: Path) -> bytes:
 def bad_lines(path: Path) -> list[int]:
     """Line numbers (1-based) of complete lines that are not a JSON object; blank lines are
     skipped, as the journal does. The cut-off tail is not a complete line and not listed."""
-    data = path.read_bytes() if path.exists() else b""
+    data = _read(path)
     complete = data[:data.rfind(b"\n") + 1]
     out = []
     for n, raw in enumerate(complete.split(b"\n")[:-1], 1):
@@ -65,7 +74,7 @@ def bad_lines(path: Path) -> list[int]:
 def history_error(path: Path) -> str | None:
     """Why the complete, well-formed lines do not replay as an order history (None if they
     do, or if some line is not a JSON object: bad_lines reports that)."""
-    data = path.read_bytes() if path.exists() else b""
+    data = _read(path)
     complete = data[:data.rfind(b"\n") + 1]
     try:
         entries = [json.loads(x) for x in complete.decode("utf-8").splitlines() if x.strip()]
