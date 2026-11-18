@@ -130,9 +130,16 @@ def _event_time(clock: Clock) -> datetime:
 
 
 def _approved_order(journal: Journal, cid: str) -> object:
-    """The order dict the human approved, as journaled with this client_order_id."""
+    """The order dict the human approved, as journaled for this client_order_id (an entry
+    without one gets the id its run and plan derive, as journal.orders does)."""
     for e in journal.entries():
-        if e.get("status") == APPROVED and e.get("client_order_id") == cid:
+        if e.get("status") != APPROVED:
+            continue
+        try:
+            own = e.get("client_order_id") or client_order_id(e.get("run_id"), e.get("plan_id"))
+        except OrderError:
+            continue
+        if own == cid:
             return e.get("order")
     return None
 

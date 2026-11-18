@@ -672,14 +672,13 @@ def alpaca_reply(body):
     return json.dumps(raw).encode()
 
 
-def approved_qty(journal, qty):
+def approved_qty(journal, monkeypatch, qty):
     """An approval whose order is `qty` shares (the position cap sizes it), journaled."""
     led = sealed_ledger()
     value = (D("364.55") * qty + D("1")).quantize(D("0.01"))
     limits = replace(LIMITS, max_position_value=value, max_loss_per_trade=D("10000.00"),
                      account_cash=D("100000.00"), daily_loss_limit=D("10000.00"))
-    import pipeline.order_flow as flow
-    flow.load_checked_limits = lambda *a, **k: limits  # restored by the autouse fixture
+    monkeypatch.setattr(of, "load_checked_limits", lambda *a, **k: limits)
     out = approved(led, journal)
     assert out.recheck.order["qty"] == qty, out.recheck.order
     return out
@@ -689,7 +688,7 @@ def approved_qty(journal, qty):
 def test_b1_a_round_quantity_through_the_real_client_is_submitted(
         journal, monkeypatch, qty):
     """Decimal("10").normalize() is "1E+1": a 10-share order must still match."""
-    out = approved_qty(journal, qty)
+    out = approved_qty(journal, monkeypatch, qty)
     broker, calls = real_broker(monkeypatch, post=alpaca_reply)
     r = send(out, journal, broker)
     assert r.status == "submitted" and not r.alert, r.reason
@@ -712,7 +711,7 @@ def test_b1_a_round_quantity_found_by_lookup_is_submitted(journal, monkeypatch, 
     def timeout(body):
         raise urllib.error.URLError(TimeoutError())
 
-    out = approved_qty(journal, qty)
+    out = approved_qty(journal, monkeypatch, qty)
     body = bracket_request(out.recheck.order, cid_of(out))
     broker, calls = real_broker(monkeypatch, post=timeout,
                                 lookup=lambda: alpaca_reply(body))
