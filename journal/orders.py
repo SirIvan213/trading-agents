@@ -20,7 +20,11 @@ later fill of a still-working remainder can always be recorded. An approval is s
 ("submitting") only before its plan expires: the journal refuses a later send, since
 day_state has already released its position slot and risk.
 
-Event entries: {"status", "client_order_id", "at": aware ISO time, ...}.
+Event entries: {"status", "client_order_id", "at": aware ISO time, ...}. An event's "at" is
+never before the order's previous event (or its approval, #194): a closed trade's loss
+counts on the New York day of its "closed" event (#188), so a back-dated event could move it
+out of today's totals. Callers stamp events with their own receipt time; a broker's
+timestamps go in other fields.
   partially_filled / filled: "filled_qty" (cumulative, 1..qty, never decreasing; filled means
     all of qty) and "avg_price" (> 0).
   cancelled / expired: "filled_qty", REQUIRED (cumulative, never decreasing): 0 is the
@@ -232,6 +236,10 @@ def apply_event(state: OrderState, entry: dict) -> OrderState:
         raise OrderError(f"order {state.client_order_id} cannot go from {state.status} to "
                          f"{status}")
     at = _aware(entry.get("at"), f"{status} time")
+    previous = state.last_at if state.last_at is not None else state.approved_at
+    if at < previous:
+        raise OrderError(f"{status} at {at.isoformat()} is before the order's previous event "
+                         f"at {previous.isoformat()}")
     filled, avg = state.filled_qty, state.avg_price
     if status in (CANCELLED, EXPIRED) and "filled_qty" not in entry:
         # releasing risk needs the broker's confirmed fill count, never an assumed zero

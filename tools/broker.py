@@ -355,6 +355,10 @@ class AlpacaPaperBroker:
             raise BrokerError("paper account is not ACTIVE")
         if reply.get("trading_blocked") is not False or reply.get("account_blocked") is not False:
             raise BrokerError("paper account is blocked")
+        if reply.get("trade_suspended_by_user") is not False:  # #197
+            raise BrokerError("paper account trading is suspended by the user")
+        if reply.get("shorting_enabled") is not False:  # #197: long only, no stray shorts
+            raise BrokerError("paper account has shorting enabled: disable it (long only)")
         summary = {
             "account_number": _text(reply.get("account_number"), "account_number"),
             "status": "ACTIVE",

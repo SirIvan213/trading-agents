@@ -90,6 +90,9 @@ class Journal:
         self.path = Path(path) if path is not None else DEFAULT_PATH
         self._tx_lock = threading.Lock()
         self._holder: int | None = None  # thread ident holding the lock through this object
+        # #191: the order replay, kept only while this object holds the lock (nobody else can
+        # write then), so one locked operation replays the journal once. Dropped on release.
+        self._replayed: dict[str, OrderState] | None = None
 
     @property
     def lock_path(self) -> Path:
@@ -128,10 +131,12 @@ class Journal:
                         raise JournalLockTimeout("journal lock timed out")
                     time.sleep(0.01)
                 self._holder = me
+                self._replayed = None
                 try:
                     yield
                 finally:
                     self._holder = None
+                    self._replayed = None
                     try:
                         _unlock(fh)
                     except OSError:
@@ -149,6 +154,7 @@ class Journal:
         that fragment, making a bad line mid-file that journal.repair can no longer move."""
         line = json.dumps(entry, sort_keys=True, default=str)
         with self.exclusive():
+            self._replayed = None  # the held replay no longer matches the file
             if self._ends_cut_off():
                 raise JournalError(CUT_OFF)
             try:
@@ -158,6 +164,18 @@ class Journal:
             except OSError as exc:
                 raise JournalError(
                     f"journal write failed ({type(exc).__name__})") from None
+
+    def _missing(self) -> bool:
+        """True only when the journal file does not exist (FileNotFoundError). Any other
+        error reading its status (a permission error, an unreachable share, a broken link)
+        raises JournalError: an unreadable journal never reads as empty (fail closed)."""
+        try:
+            os.stat(self.path)
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError) as exc:
+            raise JournalError(f"journal unreadable ({type(exc).__name__})") from None
+        return False
 
     def _ends_cut_off(self) -> bool:
         """True when the journal exists, is not empty and does not end with a newline."""
@@ -179,15 +197,21 @@ class Journal:
         Reads under the journal's lock (#128), like every write, so a reader never sees
         another process's half-written last line. A last line WITHOUT its newline is
         therefore not a write in progress but one a crash cut off: it is refused (fail
-        closed), and `python -m journal.repair` moves it aside after a human looks."""
+        closed), and `python -m journal.repair` moves it aside after a human looks.
+
+        A journal that does not exist yet reads as empty WITHOUT taking the lock (#192), so a
+        read never creates the journal's directory or its lock file. Only a missing file
+        counts: one whose status cannot be read raises JournalError."""
+        if self._holder != threading.get_ident() and self._missing():
+            return []
         with self.exclusive():
             return self._read_entries()
 
     def _read_entries(self) -> list[dict]:
-        if not self.path.exists():
-            return []
         try:
             text = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
         except (OSError, UnicodeDecodeError) as exc:
             raise JournalError(f"journal unreadable ({type(exc).__name__})") from None
         if text and not text.endswith("\n"):
@@ -208,11 +232,21 @@ class Journal:
     def orders(self) -> dict[str, OrderState]:
         """Every order in the journal, by client_order_id, as its entries replay
         (journal/orders.py). Raises JournalError for a corrupt journal or an impossible
-        lifecycle."""
+        lifecycle.
+
+        Inside exclusive() the replay is done once and reused until the lock is released or
+        an entry is appended (#191); record_order_event keeps it current. Outside the lock,
+        every call replays the file."""
+        held = self._holder == threading.get_ident()
+        if held and self._replayed is not None:
+            return dict(self._replayed)
         try:
-            return replay(self.entries())
+            out = replay(self.entries())
         except OrderError as exc:
             raise JournalError(f"journal order history is invalid: {exc}") from None
+        if held:
+            self._replayed = dict(out)
+        return out
 
     def record_order_event(self, client_order_id: str, status: str, at: datetime,
                            **fields: object) -> OrderState:
@@ -228,7 +262,8 @@ class Journal:
             raise JournalError("order event time is outside the supported date range") from None
         entry = {**fields, "status": status, "client_order_id": client_order_id, "at": stamp}
         with self.exclusive():
-            current = self.orders().get(client_order_id)
+            known = self.orders()
+            current = known.get(client_order_id)
             if current is None:
                 raise JournalError(f"no approved order {str(client_order_id)[:40]}")
             try:
@@ -236,15 +271,22 @@ class Journal:
             except OrderError as exc:
                 raise JournalError(f"order event refused: {exc}") from None
             self.append(entry)
+            # the replay of the file now: the same orders, this one advanced by `entry` (#191)
+            known[client_order_id] = new
+            self._replayed = known
         return new
 
     def expire_unsent(self, now: datetime) -> list[str]:
         """Journal every approval that was never sent and whose plan has expired at `now`
         as "expired" (filled_qty 0), releasing its position slot and its risk (Ivan's
         decision on #109). Returns the client_order_ids expired. Under the lock; raises
-        JournalError if the journal cannot be read or written."""
+        JournalError if the journal cannot be read or written. The journal is replayed once
+        for all of them (#191), instead of once per expired approval. A journal that does not
+        exist has nothing to expire."""
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise JournalError("now must be timezone-aware")
+        if self._holder != threading.get_ident() and self._missing():
+            return []
         done: list[str] = []
         with self.exclusive():
             for cid, o in self.orders().items():

@@ -22,6 +22,7 @@ Flow:
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -186,13 +187,18 @@ def propose(
     except (BrokerError, OrderError) as exc:
         return refuse("size", f"the broker request cannot be built: {exc}", plan, sized)
     try:
-        # One order per plan (#109): the client_order_id is derived from the run and the plan,
-        # so a second approval of the same plan would be a second order with the same id.
-        if client_order_id(run_id, plan.plan_id) in journal.orders():
-            return refuse("journal", "this plan already has an order (one order per plan)",
-                          plan, sized)
-        journal.expire_unsent(now)  # unsent approvals past their plan's expiry (#109)
-        state = journal.day_state(now)
+        # #191: one lock hold for the three reads, so the journal is replayed once (the lock
+        # is local file I/O only; the event gate below is fetched after it is released). A
+        # journal that does not exist yet is read without creating it (#192).
+        with journal.exclusive() if journal.path.exists() else nullcontext():
+            # One order per plan (#109): the client_order_id is derived from the run and the
+            # plan, so a second approval of the same plan would be a second order with the
+            # same id.
+            if client_order_id(run_id, plan.plan_id) in journal.orders():
+                return refuse("journal", "this plan already has an order (one order per plan)",
+                              plan, sized)
+            journal.expire_unsent(now)  # unsent approvals past their plan's expiry (#109)
+            state = journal.day_state(now)
     except (JournalError, OrderError) as exc:
         return refuse("journal", str(exc), plan, sized)
     gate: dict | None = None
@@ -255,6 +261,11 @@ def render_ticket(p: Proposal, *, sends: bool = False) -> str:
         f"  Approve before {p.expires_at or 'n/a'}: after that the plan is stale and the "
         "re-check refuses it.",
     ])
+
+
+def is_yes(answer: object) -> bool:
+    """The only answer that approves: exactly "yes" (surrounding spaces ignored)."""
+    return isinstance(answer, str) and answer.strip() == "yes"
 
 
 def approval_prompt(p: Proposal, *, sends: bool = False) -> str:
@@ -382,7 +393,7 @@ def approve(
         answer = ask(render_ticket(p, sends=sends) + "\n" + approval_prompt(p, sends=sends))
     except EOFError:
         answer = ""
-    if not isinstance(answer, str) or answer.strip() != "yes":
+    if not is_yes(answer):
         journal.append(_entry(p, "declined", "not approved"))
         return Outcome("declined", "not approved", p)
 

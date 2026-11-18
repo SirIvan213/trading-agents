@@ -594,3 +594,63 @@ def test_with_a_broker_a_blocked_re_check_at_sending_sends_nothing(tmp_path, mon
     assert result.sent.status == "not_sent" and "kill switch" in result.sent.reason
     assert [e["status"] for e in raw_lines(journal)] == [APPROVED, "expired"]
     assert "submit" not in broker.names()
+
+
+# ===================== #190: a PASS whose record cannot be written =====================
+
+def pass_scripts():
+    return scripts(trader=trader_json(action="PASS", plan_id=None))
+
+
+def test_190_a_pass_whose_journal_write_fails_twice_is_reported_not_raised(tmp_path, monkeypatch):
+    from journal.log import JournalLockTimeout
+    tries = []
+
+    def locked(self, entry):
+        tries.append(entry["status"])
+        raise JournalLockTimeout("journal lock timed out")
+
+    monkeypatch.setattr(Journal, "append", locked)
+    result, _, journal = go(tmp_path, pass_scripts())
+    assert result.outcome is None and result.proposal is None
+    assert tries == ["pass", "pass"]  # one retry
+    assert result.record_error.startswith("the PASS could not be journaled")
+    assert "lock timed out" in result.record_error
+
+
+def test_190_a_pass_whose_first_write_fails_is_retried_and_recorded(tmp_path, monkeypatch):
+    from journal.log import JournalError
+    real = Journal.append
+    tries = []
+
+    def flaky(self, entry):
+        tries.append(entry["status"])
+        if len(tries) == 1:
+            raise JournalError("journal's last line was cut off")
+        return real(self, entry)
+
+    monkeypatch.setattr(Journal, "append", flaky)
+    result, _, journal = go(tmp_path, pass_scripts())
+    assert result.record_error is None and tries == ["pass", "pass"]
+    assert [e["status"] for e in raw_lines(journal)] == ["pass"]
+
+
+def test_190_a_normal_pass_is_recorded_once(tmp_path):
+    result, _, journal = go(tmp_path, pass_scripts())
+    assert result.record_error is None
+    assert [e["status"] for e in raw_lines(journal)] == ["pass"]
+
+
+def test_190_a_clock_failure_while_recording_a_pass_does_not_raise(tmp_path):
+    calls = {"n": 0}
+
+    def clock():
+        calls["n"] += 1
+        if calls["n"] > 2:  # analysts start, before the Trader; then the PASS record
+            raise RuntimeError("clock gone")
+        return NOON + timedelta(seconds=10 * calls["n"])
+
+    result, _, journal = go(tmp_path, pass_scripts(), clock=clock)
+    assert result.record_error is None
+    (entry,) = raw_lines(journal)
+    assert entry["status"] == "pass" and entry["checked_at"] is None

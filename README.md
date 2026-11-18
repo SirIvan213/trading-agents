@@ -124,8 +124,10 @@ How the calendars are fetched and checked:
 `tools/broker.py` is the Alpaca **paper** trading client (Phase 5). Its base URL is fixed to
 `paper-api.alpaca.markets`, and there is no live path. It refuses to start unless
 `limits.paper` is true, and refuses every call until it has read an ACTIVE, unblocked account
-from the paper host. Use Alpaca paper keys: Alpaca issues separate paper and live keys, and
-documents no paper flag on the account.
+from the paper host that is not suspended by the user and has shorting disabled (#197: the
+system is long only, so a stray sell must never open a short; set "no shorting" in the paper
+account's configuration). Use Alpaca paper keys: Alpaca issues separate paper and live keys,
+and documents no paper flag on the account.
 
 An approved order goes out as a bracket:
 
@@ -186,7 +188,10 @@ and `expired`.
 
 A malformed entry or an impossible order history fails closed: no order passes. Reads and
 writes take the journal's lock. A last line cut off by a crash blocks reading until a human
-runs `python -m journal.repair` (a dry run; `--yes` moves the fragment to a side file).
+runs `python -m journal.repair` (a dry run; `--yes` moves the fragment to a side file). It
+never creates a file, and it reports, but never changes, a corrupt line mid-file (exit 3): a
+human fixes that one. An order event is never dated before the order's previous event
+(#194). Reading a journal that does not exist yet creates nothing.
 
 ## Status
 
