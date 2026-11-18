@@ -127,7 +127,7 @@ How the calendars are fetched and checked:
 from the paper host. Use Alpaca paper keys: Alpaca issues separate paper and live keys, and
 documents no paper flag on the account.
 
-An approved order would go out as a bracket:
+An approved order goes out as a bracket:
 
 - **Entry:** a limit order at entry + slippage allowance, so the exchange enforces the price
   sizing assumed.
@@ -135,7 +135,28 @@ An approved order would go out as a bracket:
 - **Allow-list:** the request is built field by field, so internal fields such as the
   slippage allowance are never forwarded.
 
-Nothing in the pipeline sends orders yet; that is the next Phase 5 step.
+### Sending (`pipeline/send.py`)
+
+An approved order is sent only when `run_decision` is given a broker; without one, nothing is
+sent. The ticket then says the order is **sent to the Alpaca paper account** and shows the
+limit price. The sender:
+
+1. **Before the journal lock:** builds the request and checks the paper account (network).
+2. **Under the lock:** the order must still be an unsent approval whose plan has not expired.
+   Today's totals are re-read without this order and `risk_check` runs again, covering the
+   kill switch, market hours, trades, open positions, risk, the loss stop, stop-outs and the
+   event gate. A block journals the approval `expired`, so it can never be sent later. A pass
+   journals `submitting` before any HTTP call. If the journal refuses that entry (the plan
+   expired) or cannot write it, nothing is sent.
+3. **After the lock:** POSTs once and **never resends**. A reply that matches is `submitted`.
+   After any failure the order is looked up by its `client_order_id`:
+   - found and matching: `submitted`;
+   - found but not matching: cancelled, `send_unknown`, ALERT;
+   - not found after a definite refusal (HTTP 400/401/403/404/422): `rejected`;
+   - anything else: `send_unknown`, ALERT.
+
+A `submitting` or `send_unknown` order keeps its slot and its risk until the reconciler (Phase
+5 PR 4) settles it with the broker.
 
 ## Decision journal
 

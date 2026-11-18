@@ -678,7 +678,8 @@ def test_quote_is_read_after_the_clock_and_plan_refusals_never_read_it(ledger, j
 
 def test_ticket_names_the_allowance_the_live_ask_and_the_worst_case_loss(ledger, journal):
     t = render_ticket(run(ledger, journal, quotes_at(NOW, spread="0.05")))
-    assert "slippage allowance 0.37 per share" in t
+    # #136: the entry is a LIMIT at entry + allowance, the price the broker request carries
+    assert "with a LIMIT order at 364.55 (planned entry 364.18 + slippage allowance 0.37)" in t
     assert "(live ask 364.18)" in t
     assert "Worst-case loss at the stop 49.84" in t
     assert "Buy 8 shares of TSLA" in t

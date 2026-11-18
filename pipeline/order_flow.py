@@ -13,8 +13,11 @@ Flow:
   3. approve(): show the ticket and require the typed word "yes" for that exact order. Then
      re-check at a NEW wall-clock `now` (freshness, build_order, check_order). Stale, blocked
      or changed means no order. An approved order is journaled "approved_not_sent" with its
-     deterministic client_order_id (journal/orders.py); nothing is sent to a broker yet
-     (sending is Phase 5 PR 3).
+     deterministic client_order_id (journal/orders.py). The live quote and the event gate
+     are fetched BEFORE the journal lock is taken (#148); their freshness is re-checked
+     inside it (build_order, check_order).
+  4. Sending is pipeline/send.py (Phase 5 PR 3): only when the caller passes a broker, and
+     then the ticket says the approved order is sent to the Alpaca PAPER account.
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ from pipeline.events import EventSource
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
 from pipeline.orders import build_order, select_plan
+from tools.broker import BrokerError, bracket_request
 from tools.market_calendar import CalendarError, day_times
 from tools.risk_check import check_order
 
@@ -177,6 +181,10 @@ def propose(
     sized = build_order(plan, limits, now, quote)
     if sized.get("ok") is not True:
         return refuse("size", str(sized.get("reason", "order could not be built")), plan, sized)
+    try:  # #136: an order the paper broker would refuse is never proposed
+        bracket_request(sized["order"], client_order_id(run_id, plan.plan_id))
+    except (BrokerError, OrderError) as exc:
+        return refuse("size", f"the broker request cannot be built: {exc}", plan, sized)
     try:
         # One order per plan (#109): the client_order_id is derived from the run and the plan,
         # so a second approval of the same plan would be a second order with the same id.
@@ -201,23 +209,41 @@ def propose(
                     _expires_at(plan, limits.max_plan_age_s), gate)
 
 
-def render_ticket(p: Proposal) -> str:
-    """The order in plain words (or why there is none). Every number comes from tools."""
+def limit_price(p: Proposal) -> str | None:
+    """The entry LIMIT price the broker request carries (tools.broker.bracket_request: the
+    plan's entry + the slippage allowance, #136), or None when there is no order or the
+    request cannot be built. The ticket shows exactly the price that is sent."""
+    if p.order is None or p.plan_id is None:
+        return None
+    try:
+        return bracket_request(p.order, client_order_id(p.run_id, p.plan_id))["limit_price"]
+    except (BrokerError, OrderError):
+        return None
+
+
+def render_ticket(p: Proposal, *, sends: bool = False) -> str:
+    """The order in plain words (or why there is none). Every number comes from tools.
+    `sends` says whether approving SENDS the order to the Alpaca paper account (a caller
+    with a broker) or only journals it."""
     if not p.ok or p.plan is None or p.sized is None:
         return (f"NO ORDER for plan {p.plan_id or '(none)'}: {p.reason} "
                 f"(refused at {p.stage}, checked {p.checked_at}).")
     o, plan, sized = p.sized["order"], p.plan, p.sized
     qty = o["qty"]
+    head = ("ORDER TICKET (Alpaca PAPER account; an approved order is SENT to the paper "
+            "broker after a final risk re-check)" if sends else
+            "ORDER TICKET (paper account; an approved order is journaled, NOT sent to a broker)")
     return "\n".join([
-        "ORDER TICKET (paper account; an approved order is journaled, NOT sent to a broker)",
-        f"  Buy {qty} shares of {o['symbol']} at market, as a bracket order "
-        "(a market fill can differ from the planned entry).",
+        head,
+        f"  Buy {qty} shares of {o['symbol']} with a LIMIT order at {limit_price(p)} "
+        f"(planned entry {o['entry']} + slippage allowance {o.get('slippage', 'n/a')}), "
+        "as a bracket order, time in force day: it fills at that price or lower. Nothing "
+        "cancels an unfilled entry yet: it stays working until the close.",
         f"  Stop-loss: sell all {qty} if the price falls to {o['stop_loss']}.",
         f"  Take-profit: sell all {qty} if the price reaches {o['take_profit']}.",
-        f"  Planned entry {o['entry']}; planned risk per share {sized['risk_per_share']}; "
-        f"slippage allowance {sized.get('slippage', 'n/a')} per share "
+        f"  Planned risk per share {sized['risk_per_share']} "
         f"(live ask {(sized.get('quote') or {}).get('ask', 'n/a')}).",
-        f"  Worst-case loss at the stop {sized['max_loss']}, for a fill up to entry + allowance "
+        f"  Worst-case loss at the stop {sized['max_loss']}, for a fill at the limit price "
         "(a gap through the stop can lose more).",
         f"  Size decided by the limit: {sized['decided_by']}.",
         f"  Plan {plan.plan_id} ({plan.setup} setup), made {plan.as_of}; "
@@ -231,12 +257,13 @@ def render_ticket(p: Proposal) -> str:
     ])
 
 
-def approval_prompt(p: Proposal) -> str:
+def approval_prompt(p: Proposal, *, sends: bool = False) -> str:
     """The question asked under the ticket; names the exact order being approved."""
     o = p.order or {}
-    return (f"Type yes to approve exactly this order (BUY {o.get('qty')} {o.get('symbol')}, "
-            f"stop {o.get('stop_loss')}, target {o.get('take_profit')}); "
-            "anything else declines: ")
+    verb = "approve and SEND to the paper account" if sends else "approve"
+    return (f"Type yes to {verb} exactly this order (BUY {o.get('qty')} {o.get('symbol')}, "
+            f"LIMIT {limit_price(p)}, stop {o.get('stop_loss')}, "
+            f"target {o.get('take_profit')}); anything else declines: ")
 
 
 def _entry(p: Proposal, status: str, reason: str | None, **extra: object) -> dict:
@@ -269,12 +296,69 @@ def _plan_age_s(plan: ExitPlanRecord, now: datetime) -> int | None:
         return None
 
 
+def check_before_send(p: Proposal, *, journal: Journal, now: datetime) -> dict:
+    """check_order for an APPROVED order at the moment it is sent (#187), so this module
+    stays the only caller of the risk gate. Today's DayState is re-read WITHOUT this order
+    (its client_order_id), with the limits as they are now and the approval's event gate
+    (stale once older than max_plan_age_s). The caller holds journal.exclusive().
+    An invalid limits config or a proposal without an order is a BLOCK; raises JournalError
+    when the journal cannot be read (the caller then sends nothing)."""
+    if p.order is None or p.plan_id is None:
+        return {"verdict": "BLOCK", "reasons": ["no approved order"]}
+    try:
+        limits = load_checked_limits()
+    except ValueError:
+        return {"verdict": "BLOCK", "reasons": ["limits config is invalid"]}
+    try:
+        cid = client_order_id(p.run_id, p.plan_id)
+    except OrderError as exc:
+        return {"verdict": "BLOCK", "reasons": [str(exc)]}
+    state = journal.day_state(now, exclude=cid)
+    return check_order(p.order, limits, state, now, p.gate)
+
+
+def _raiser(exc: Exception) -> Callable[..., object]:
+    def fail(*_: object) -> object:
+        raise exc
+    return fail
+
+
+def _prefetch(fn: Callable[..., object], *args: object) -> Callable[..., object]:
+    """Call `fn(*args)` now (outside the journal lock, #148) and return a stand-in that gives
+    back its result, or raises its exception, when propose() calls it inside the lock."""
+    try:
+        value = fn(*args)
+    except Exception as exc:  # noqa: BLE001 - re-raised inside propose, which refuses
+        return _raiser(exc)
+    return lambda *_: value
+
+
+def _prefetched_sources(
+    p: Proposal, clock: Clock, quotes: Quotes | None, events: EventSource | None,
+) -> tuple[Quotes | None, EventSource | None]:
+    """The quote and the event gate for `p`'s symbol, fetched before the lock (#148). Their
+    freshness is checked again inside it: build_order refuses a stale quote, check_order a
+    stale gate (older than max_plan_age_s, or from another New York day)."""
+    symbol = p.plan.symbol if p.plan is not None else ""
+    try:  # the clock first, then the sources, in propose's order
+        now = clock()
+        end = _window_end(now, load_checked_limits()) if events is not None else None
+    except Exception as exc:  # noqa: BLE001 - propose refuses the clock or limits itself
+        failed = _raiser(exc)
+        return (failed if quotes is not None else None,  # type: ignore[return-value]
+                failed if events is not None else None)
+    q = _prefetch(quotes, symbol) if quotes is not None else None
+    e = _prefetch(events, symbol, now, end) if events is not None else None
+    return q, e  # type: ignore[return-value]
+
+
 def approve(
     p: Proposal, ledger: PlanLedger, *, journal: Journal, ask: Ask = input,
     clock: Clock = wall_clock, quotes: Quotes | None = None,
-    events: EventSource | None = None,
+    events: EventSource | None = None, sends: bool = False,
 ) -> Outcome:
-    """Ask a human to approve `p`, re-check it, and journal the result. Never sends an order.
+    """Ask a human to approve `p`, re-check it, and journal the result. Never sends an order
+    (pipeline/send.py does, after an approval); `sends` only changes the ticket's words.
 
     A proposal that is not ok is journaled as "no_order" (with its stage) and never asked.
 
@@ -286,6 +370,7 @@ def approve(
     "no_order" entry is best effort. The re-check and its journal entry run under
     journal.exclusive() (#107); if that lock cannot be taken, JournalError is raised and
     nothing is approved.
+    The quote and the event gate for the re-check are fetched before the lock (#148).
     """
     if not p.ok:
         try:  # audit trail for a refused BUY; a broken journal must not hide the refusal
@@ -294,7 +379,7 @@ def approve(
             pass
         return Outcome("no_order", p.reason, p)
     try:
-        answer = ask(render_ticket(p) + "\n" + approval_prompt(p))
+        answer = ask(render_ticket(p, sends=sends) + "\n" + approval_prompt(p, sends=sends))
     except EOFError:
         answer = ""
     if not isinstance(answer, str) or answer.strip() != "yes":
@@ -303,7 +388,9 @@ def approve(
 
     # #107: the re-check (which reads today's DayState from the journal) and the approved
     # append happen under the journal's cross-process lock, so two concurrent approvers can
-    # never both fit into the last trade or the last of the daily loss budget.
+    # never both fit into the last trade or the last of the daily loss budget. The network
+    # reads happen before the lock (#148), so a slow source never holds it.
+    quotes, events = _prefetched_sources(p, clock, quotes, events)
     with journal.exclusive():
         again = propose(ledger, p.plan_id, journal=journal, clock=clock, quotes=quotes,
                         events=events)

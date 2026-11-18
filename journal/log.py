@@ -254,7 +254,7 @@ class Journal:
                     done.append(cid)
         return done
 
-    def day_state(self, now: datetime) -> DayState:
+    def day_state(self, now: datetime, *, exclude: str | None = None) -> DayState:
         """Today's trades, risk, open positions, realized losses and stop-outs (New York
         date of `now`), replayed from the order lifecycle (journal/orders.py, #109):
 
@@ -272,6 +272,10 @@ class Journal:
             overnight position closed this morning counts: the daily loss stop);
           - stopped_out_symbols: symbols whose trade was closed by its stop today.
 
+        `exclude`: the client_order_id of an UNSENT approval to leave out, for the sender's
+        re-check at sending (#187). It is ignored once that order has been sent: a sent
+        order's slot and risk always count.
+
         Fail-closed: raises JournalError for a corrupt journal, a malformed approved entry or
         an impossible order history, so no order passes on totals that cannot be trusted.
         """
@@ -284,6 +288,10 @@ class Journal:
         trades, risk, lost, opened = 0, Decimal("0"), Decimal("0"), 0
         stopped: set[str] = set()
         for o in self.orders().values():
+            if exclude is not None and o.client_order_id == exclude and o.status == APPROVED:
+                # the sender re-checks the day without the approval it is about to send; a
+                # sent order is never left out (its slot and risk always count)
+                continue
             day = o.approved_at.astimezone(NY).date()
             if o.status == APPROVED:
                 if o.live_unsent(now):

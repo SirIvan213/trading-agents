@@ -85,7 +85,7 @@ def test_propose_sizes_and_passes(ledger, journal):
     assert p.ok and p.stage is None and p.reason is None
     assert p.plan_id == "plan-1" and p.run_id == ledger.run_id
     assert p.order == {
-        "symbol": "TSLA", "side": "buy", "qty": 8, "type": "market", "order_class": "bracket",
+        "symbol": "TSLA", "side": "buy", "qty": 8, "type": "limit", "order_class": "bracket",
         "entry": "364.18", "stop_loss": "358.32", "take_profit": "370.04", "slippage": "0.37"}
     # #68: allowance 0.37 (0.10% of entry beats the 0.02 spread): (5.86 + 0.37) x 8 = 49.84
     assert p.sized["max_loss"] == "49.84" and p.verdict == {"verdict": "PASS", "reasons": []}
@@ -418,7 +418,7 @@ def test_approval_re_reads_the_clock_and_records_the_new_time(ledger, journal):
     clock = StepClock(T0 + timedelta(seconds=45))
     out = approve(p, ledger, journal=journal, ask=yes, clock=clock,
                   quotes=quotes_at(T0 + timedelta(seconds=45)), events=events_clear())
-    assert clock.calls == 1
+    assert clock.calls == 2  # the fetch before the lock (#148), then the re-check inside it
     assert out.status == APPROVED
     assert out.approved_at == (T0 + timedelta(seconds=45)).isoformat() != p.checked_at
     assert out.plan_age_s == 75  # 30 s at propose + 45 s more
@@ -559,7 +559,7 @@ def test_order_changed_when_limits_differ_on_the_second_load_only(journal, monke
     assert p.ok and p.order["qty"] == 8
     out = approve(p, led, journal=journal, ask=yes, clock=clock_at(T0), quotes=quotes_at(T0),
         events=events_clear())
-    assert len(calls) == 2
+    assert len(calls) == 3  # propose, the event-gate fetch before the lock (#148), re-check
     assert out.status == "changed_after_approval" and out.recheck.order["qty"] == 2
 
 
@@ -733,14 +733,16 @@ def test_propose_signature_pinned():
 
 
 def test_approve_signature_pinned():
-    assert params(approve) == ["p", "ledger", "journal", "ask", "clock", "quotes", "events"]
+    assert params(approve) == ["p", "ledger", "journal", "ask", "clock", "quotes", "events",
+                               "sends"]
     kw_only = [n for n, p in inspect.signature(approve).parameters.items()
                if p.kind is inspect.Parameter.KEYWORD_ONLY]
-    assert kw_only == ["journal", "ask", "clock", "quotes", "events"]
+    assert kw_only == ["journal", "ask", "clock", "quotes", "events", "sends"]
 
 
 def test_ticket_functions_take_only_a_proposal():
-    assert params(render_ticket) == ["p"] and params(approval_prompt) == ["p"]
+    # `sends` (a bool, keyword only) only changes the words: sent to the paper broker or not
+    assert params(render_ticket) == ["p", "sends"] and params(approval_prompt) == ["p", "sends"]
 
 
 @pytest.mark.parametrize("fn", [propose, approve, render_ticket, approval_prompt])

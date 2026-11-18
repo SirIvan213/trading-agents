@@ -77,7 +77,8 @@ def build_order(
     """Re-validate the plan, check it is fresh at `now`, then size it (size_position result).
 
     The plan is refused unless its entry is its last_close (entry_level "last_close" and the
-    recorded last_close equal to entry): orders are market orders (issue #118).
+    recorded last_close equal to entry): entries are marketable, sent as a limit at entry +
+    slippage allowance (issues #118, #136).
     `now` must be timezone-aware. After the price re-validation the plan is refused if `now`
     is naive, plan.as_of is not an aware ISO datetime, the plan is from another New York
     session day, it is dated more than 5 s in the future, or it is older than
@@ -113,8 +114,9 @@ def build_order(
         return {"ok": False, "reason": (
             f"risk per share {risk} is below {limits.min_risk_pct}% of entry "
             f"({pct_floor.normalize():f})")}
-    # Issue #118: the order is a MARKET order, so it fills near the last close. A plan whose
-    # entry is any other price would be sized on a risk it does not carry.
+    # Issue #118: the entry is marketable (a limit at entry + allowance, #136), so it fills
+    # near the last close. A plan whose entry is any other price would be sized on a risk it
+    # does not carry.
     if plan.entry_level != "last_close" or _cents(plan.last_close) != entry:
         return {"ok": False, "reason": "market order: plan entry must be its last_close"}
     stale = _freshness_error(plan, limits, now)

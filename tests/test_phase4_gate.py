@@ -1253,9 +1253,20 @@ def test_decide_passes_only_plan_id_to_propose_and_approve():
 
     # approve(<the Proposal>, ledger, journal=..., ask=..., clock=...)
     assert len(ap.args) == 2 and getattr(ap.args[1], "id", None) == "ledger"
-    assert sorted(k.arg for k in ap.keywords) == ["ask", "clock", "events", "journal", "quotes"]
+    # `sends` (Phase 5 PR 3) is `broker is not None`: it only changes the ticket's words
+    assert sorted(k.arg for k in ap.keywords) == ["ask", "clock", "events", "journal", "quotes",
+                                                  "sends"]
     assert _names_in(ap) <= {"approve", "result", "proposal", "ledger", "journal", "ask", "clock",
-                             "quotes", "events"}
+                             "quotes", "events", "broker"}
+    sends = next(k.value for k in ap.keywords if k.arg == "sends")
+    assert ast.unparse(sends) == "broker is not None"
+
+    # send_approved(result.outcome, journal=..., broker=..., clock=...): only the approval
+    # Outcome crosses to the sender, never anything the model produced
+    (sd,) = _calls_named(src, "send_approved")
+    assert [ast.unparse(a) for a in sd.args] == ["result.outcome"]
+    assert sorted(k.arg for k in sd.keywords) == ["broker", "clock", "journal"]
+    assert _names_in(sd) <= {"send_approved", "result", "outcome", "journal", "broker", "clock"}
 
     # quotes is assigned exactly once, as quotes_from(data): live market data, nothing else
     q_assigns = [n for n in ast.walk(ast.parse(src))
