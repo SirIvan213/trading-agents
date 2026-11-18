@@ -37,15 +37,20 @@ def test_run_scan_passes_ny_date(monkeypatch):
     seen = {}
 
     def spy(snapshots, criteria, limits, avg_volume=None, today=None, now=None,
-            listings=None):
-        seen.update(today=today, avg=avg_volume, now=now, listings=listings)
+            listings=None, reporting=None):
+        seen.update(today=today, avg=avg_volume, now=now, listings=listings,
+                    reporting=reporting)
         return {"candidates": [], "rejected": [], "criteria": {}}
 
     monkeypatch.setattr(market, "scan", spy)
     now = datetime(2026, 11, 5, 2, 30, tzinfo=UTC)
     market.run_scan({}, ScanCriteria(), load_limits(), now, avg_volume={"A": 1})
-    # no listings given: run_scan passes an empty map, so every symbol fails closed (#168)
-    assert seen == {"today": date(2026, 11, 4), "avg": {"A": 1}, "now": now, "listings": {}}
+    # no listings given: run_scan passes an empty map, so every symbol fails closed (#168);
+    # no reporting given: not checked (#170 is the day scan's and run_decision's check)
+    assert seen == {"today": date(2026, 11, 4), "avg": {"A": 1}, "now": now, "listings": {},
+                    "reporting": None}
+    market.run_scan({}, ScanCriteria(), load_limits(), now, reporting={"A": {"covered": True}})
+    assert seen["reporting"] == {"A": {"covered": True}}
 
 
 def _snap(day_t: str) -> dict:

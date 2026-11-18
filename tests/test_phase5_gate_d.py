@@ -735,13 +735,22 @@ class RestampedScenario(ScenarioData):
         return fixed
 
 
-def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=None):
+def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=None,
+                 bypass_prescreen=False, stub_analysts=True):
     """run_decision on a saved scenario with every model faked to BUY plan-1. The analysts are
-    one stub that records the scenario's real plan; the debaters and the Trader are scripted."""
+    one stub that records the scenario's real plan; the debaters and the Trader are scripted.
+    `bypass_prescreen` turns off run_decision's free SEC reporting check (#170), to prove the
+    event gate still refuses on its own (defence in depth). `stub_analysts=False` leaves
+    decide.run_analysts as the caller set it (a test's own guard)."""
+    if bypass_prescreen:
+        monkeypatch.setattr(decide, "reporting_check",
+                            lambda data, sym, now: {"covered": True, "reason": None})
     scenario = load_scenario(name)
     base = ScenarioData(scenario)
     as_of, symbol = base.as_of(), base.symbol
-    clock = StepClock(as_of, as_of + timedelta(seconds=20), as_of + timedelta(seconds=40))
+    # readings: SEC check (#170), analysts start, before the Trader, proposal ...
+    clock = StepClock(as_of, as_of, as_of + timedelta(seconds=20),
+                      as_of + timedelta(seconds=40))
     data = RestampedScenario(scenario, clock)
 
     async def fake_analysts(sym, at, **k):
@@ -751,7 +760,8 @@ def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=
         from tests.test_smoke_scenarios import packet_for
         return packet_for(symbol, [p], as_of.isoformat())
 
-    monkeypatch.setattr(decide, "run_analysts", fake_analysts)
+    if stub_analysts:
+        monkeypatch.setattr(decide, "run_analysts", fake_analysts)
     replies = [*debaters(symbol), reply(trader(symbol, confidence=trader_confidence))]
     client = FakeClient(replies)
     journal = Journal(tmp_path / f"{name}.jsonl")
@@ -769,7 +779,8 @@ def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=
 
 
 def test_blocked_red_flag_every_model_says_buy_and_the_gate_still_refuses(monkeypatch, tmp_path):
-    result, journal, asked, client = run_scenario(monkeypatch, tmp_path, "red-flag")
+    result, journal, asked, client = run_scenario(monkeypatch, tmp_path, "red-flag",
+                                                  bypass_prescreen=True)
     assert result.trader.decision.action == "BUY" and result.trader.decision.plan_id == "plan-1"
     p = result.proposal
     assert p.ok is False and p.stage == "risk"
@@ -792,16 +803,17 @@ def test_blocked_red_flag_every_model_says_buy_and_the_gate_still_refuses(monkey
 
 @pytest.mark.parametrize("confidence", [0.01, 0.99])
 def test_blocked_trader_confidence_cannot_move_the_gate(monkeypatch, tmp_path, confidence):
-    result, *_ = run_scenario(monkeypatch, tmp_path, "red-flag", trader_confidence=confidence)
+    result, *_ = run_scenario(monkeypatch, tmp_path, "red-flag", trader_confidence=confidence,
+                              bypass_prescreen=True)
     assert result.proposal.ok is False and "event gate EVENT:" in result.proposal.reason
 
 
 def test_the_refusal_is_deterministic_across_runs(monkeypatch, tmp_path):
-    a, *_ = run_scenario(monkeypatch, tmp_path, "red-flag")
+    a, *_ = run_scenario(monkeypatch, tmp_path, "red-flag", bypass_prescreen=True)
     reasons_a = a.proposal.verdict["reasons"]
     tmp2 = tmp_path / "second"
     tmp2.mkdir()
-    b, *_ = run_scenario(monkeypatch, tmp2, "red-flag")
+    b, *_ = run_scenario(monkeypatch, tmp2, "red-flag", bypass_prescreen=True)
     assert b.proposal.verdict["reasons"] == reasons_a
 
 

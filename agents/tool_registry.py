@@ -23,7 +23,9 @@ from tools.exit_plan import exit_plan, opening_range_gap_error
 from tools.plan_labels import plan_labels
 from tools.scan import ScanCriteria, validate_symbols
 
-MAX_SCAN_SYMBOLS = 50
+MAX_SCAN_SYMBOLS = 5  # #43: the session symbol plus at most 4 peers
+MAX_SCAN_INPUT = 4 * MAX_SCAN_SYMBOLS  # entries accepted before validation and de-duplication
+MAX_SCAN_CALLS = 2  # #43: scan calls per analyst run (each one fetches snapshots and listings)
 PLAN_EXIT_KEYS = frozenset({"setup", "entry", "level", "reward_multiple"})
 # REWARD_MULTIPLES (tools.config) is the only menu the model may pick from. exit_plan computes
 # the target; values above the plan's suggested_multiple are refused here.
@@ -90,8 +92,10 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "scan",
         "description": (
-            "Check how this symbol (optionally with a few peers) passes the gap/volume "
-            "pre-filter; returns candidates (ranked) and rejected symbols with reasons."
+            "Check how this symbol (optionally with up to 4 peers) passes the gap/volume "
+            "pre-filter; returns candidates (ranked) and rejected symbols with reasons. "
+            f"The list must include this session's symbol; at most {MAX_SCAN_SYMBOLS} "
+            f"symbols, and at most {MAX_SCAN_CALLS} scan calls per run."
         ),
         "strict": True,
         "input_schema": {
@@ -100,7 +104,8 @@ TOOLS: list[dict[str, Any]] = [
                 "symbols": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": f"At most {MAX_SCAN_SYMBOLS} symbols",
+                    "description": f"This session's symbol plus at most "
+                    f"{MAX_SCAN_SYMBOLS - 1} peers ({MAX_SCAN_SYMBOLS} symbols in all)",
                 },
             },
             "required": ["symbols"],
@@ -124,6 +129,7 @@ class ToolSession:
     # The pipeline's plan ledger (issue #64): each plan is recorded the moment exit_plan
     # produces it. None outside a pipeline run (tests, the technical smoke script).
     ledger: PlanLedger | None = None
+    scan_calls: int = 0  # scans run this session (#43), at most MAX_SCAN_CALLS
 
     def execute(self, name: str, tool_input: Any) -> tuple[dict, bool]:
         """Run a tool; return (result, is_error). Never raises."""
@@ -408,12 +414,21 @@ def _scan(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     symbols = inp.get("symbols")
     if not isinstance(symbols, list) or not symbols:
         return _err("symbols must be a non-empty array of strings")
-    if len(symbols) > MAX_SCAN_SYMBOLS:
-        return _err(f"at most {MAX_SCAN_SYMBOLS} symbols")
+    too_many = _err(f"at most {MAX_SCAN_SYMBOLS} symbols (this session's symbol plus "
+                    f"{MAX_SCAN_SYMBOLS - 1} peers)")
+    if len(symbols) > MAX_SCAN_INPUT:  # a bound before validating a long list
+        return too_many
     try:
         syms = validate_symbols(symbols)
     except ValueError:
         raise _Refusal("symbols must be valid tickers (letters and dots)") from None
+    if len(syms) > MAX_SCAN_SYMBOLS:  # counted after de-duplication (#43)
+        return too_many
+    if s.symbol.strip().upper() not in syms:
+        return _err(f"symbols must include this session's symbol {s.symbol.strip().upper()}")
+    if s.scan_calls >= MAX_SCAN_CALLS:
+        return _err(f"at most {MAX_SCAN_CALLS} scan calls per run")
+    s.scan_calls += 1  # counted once the call will fetch data
     snaps = s.data.snapshots(syms)
     listings = _listings(s.data, syms)  # #168
     return run_scan(snaps, s.criteria, s.limits, s.now, listings=listings), False

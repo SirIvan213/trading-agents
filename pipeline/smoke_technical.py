@@ -32,7 +32,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from agents.llm import EFFORTS, AgentConfig, config_for, make_client
-from agents.schemas import CallRecord
+from agents.schemas import TOKEN_KEYS, CallRecord, token_totals  # noqa: F401 (re-export)
 from agents.technical import run_technical
 from agents.tool_registry import ToolSession
 from pipeline.smoke_common import (  # noqa: F401  (load_dotenv re-exported for callers)
@@ -111,17 +111,8 @@ def fallback_notes(response: Any) -> list[str]:
     return notes
 
 
-TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
-              "cache_read_input_tokens")
-
-
-def token_totals(calls: list[CallRecord]) -> dict[str, int]:
-    """Sum of the top-level usage fields across all call records."""
-    totals = dict.fromkeys(TOKEN_KEYS, 0)
-    for c in calls:
-        for k in TOKEN_KEYS:
-            totals[k] += getattr(c.usage, k)
-    return totals
+# Token totals live with CallRecord in agents.schemas (TOKEN_KEYS, token_totals), imported
+# above and re-exported here for the smoke scripts.
 
 
 def main(argv: list[str] | None = None, *, client: Any = None) -> int:

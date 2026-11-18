@@ -310,7 +310,7 @@ def test_tool_failure_does_not_abort_run():
 
     q = [
         response([tool_use("t", "get_bars", {"symbol": "AAPL"})], "tool_use"),
-        response([tool_use("s", "scan", {"symbols": ["GAPA"]})], "tool_use"),
+        response([tool_use("s", "scan", {"symbols": ["AAPL", "GAPA"]})], "tool_use"),
         good(evidence=[{"point": "gapa passes", "source": "scan"}]),
     ]
     report, client = run(q, data=BarsDown())

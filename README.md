@@ -77,6 +77,25 @@ American listings: a live check saw no NYSE Arca or Cboe item in it. Until one i
 scan rejects any other listing (from Alpaca's asset endpoint, never guessed from the ticker),
 and the gate reads UNKNOWN for it.
 
+**Quarterly reporting before a decision (#170).** A symbol with no 8-K item 2.02 in the last
+100 days (a foreign private issuer filing 6-K / 20-F, no SEC filer, or SEC unavailable) can
+only ever read UNKNOWN. So `run_decision` checks the free SEC filings first and skips it
+(`SymbolSkipped`, journaled `skipped`) before any billed analyst runs, and the scan rejects it
+when given the same check (`run_scan(..., reporting=...)`). The gate's rule is unchanged.
+
+**Budget savers.** A packet with a failed analyst is not debated (#163): the Trader passes
+without a call anyway, so the Bull and Bear calls are skipped and the debate record says
+`skipped`. The technical analyst's `scan` tool takes this session's symbol plus at most 4
+peers, at most twice per run (#43).
+
+**Counting tokens (#58).** On a call where a server-side fallback ran, the top-level `usage`
+covers only the attempt that produced the message; `usage.iterations` lists every attempt
+(the Claude API docs call it the per-attempt source of truth). A call's tokens are therefore
+the sum of its iterations when they are present, else the top-level usage
+(`CallRecord.billed_usage()`, taking the larger of the two per field; summed over calls by
+`agents.schemas.token_totals`). The daily token cap, built with `run_day` in Phase 5 PR 6,
+will count input, output, cache writes and cache reads this way.
+
 `risk_check` blocks EVENT and UNKNOWN. The reason names the kind and the source, e.g.
 `event gate EVENT: EVENT (alphavantage): estimated earnings date ...` against
 `event gate UNKNOWN: UNKNOWN (alphavantage): earnings source unavailable: ...`. The order

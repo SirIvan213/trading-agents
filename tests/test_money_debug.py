@@ -22,7 +22,7 @@ from agents.money_guard import (
 from pipeline import smoke_debate as S
 from tests.debate_helpers import bear_json, bull_json, reply
 from tests.fakes import FakeClient
-from tests.test_issue87 import PKT, run_record
+from tests.test_issue87 import DEBATED, PKT, run_record
 
 CFGS = {"bull": AgentConfig(), "bear": AgentConfig()}
 SECRET_TOKEN = "110.25"
@@ -39,10 +39,10 @@ def queue():
 def debate(listener=None):
     client = FakeClient(queue())
     if listener is None:
-        rec = run_debate(PKT, clients=client, configs=CFGS, rounds=1)
+        rec = run_debate(DEBATED, clients=client, configs=CFGS, rounds=1)
     else:
         with money_debug(listener):
-            rec = run_debate(PKT, clients=client, configs=CFGS, rounds=1)
+            rec = run_debate(DEBATED, clients=client, configs=CFGS, rounds=1)
     return rec, client
 
 
@@ -136,7 +136,7 @@ def test_quoted_values_are_skipped_in_a_real_bear_rejection():
     bear = bear_json(objections=["up 7.47% on 1.64 relative volume, stop 97.13", "b", "c"])
     client = FakeClient([reply(bull_json()), reply(bear), reply(bear_json())])
     with money_debug(lambda side, items: events.append((side, items))):
-        run_debate(PKT, clients=client, configs=CFGS, rounds=1)
+        run_debate(DEBATED, clients=client, configs=CFGS, rounds=1)
     ((side, items),) = events
     assert side == "bear" and [d.number for _, d in items] == ["97.13"]
 

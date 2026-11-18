@@ -41,7 +41,7 @@ from agents.schemas import DebateRecord, DecisionPacket
 from agents.trader import TraderRun, forced_pass, run_trader
 from journal.log import Journal, JournalError, JournalLockTimeout
 from journal.orders import APPROVED
-from pipeline.events import events_from
+from pipeline.events import events_from, reporting_check
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
 from pipeline.order_flow import (
@@ -92,6 +92,17 @@ def _client_for(clients: dict[str, Any] | Any, agent: str) -> Any:
 
 def _elapsed_s(start: datetime, now: datetime) -> float:
     return round((now - start).total_seconds(), 3)
+
+
+class SymbolSkipped(ValueError):  # noqa: N818 - a skip, not an error
+    """The symbol was skipped before any billed call (#170): it is not proven to report
+    quarterly (no 8-K item 2.02 in the last 100 days), so the event gate could only block it.
+    No decision was spent. `reason` says why."""
+
+    def __init__(self, symbol: str, reason: str) -> None:
+        super().__init__(f"{symbol} skipped before any billed call: {reason}")
+        self.symbol = symbol
+        self.reason = reason
 
 
 JOURNAL_LOCKED = "journal_locked"
@@ -169,6 +180,11 @@ def run_decision(
     Raises ValueError before any API call for: a bad symbol, an invalid limits config, a bad
     agent config or debate rounds, a naive clock, or `timeout_s` not below
     limits.max_plan_age_s. `timeout_s` defaults to half of max_plan_age_s.
+
+    Raises SymbolSkipped (a ValueError) before any billed call when `data`'s SEC filings do
+    not show an 8-K item 2.02 in the last 100 days (#170): a foreign private issuer, no SEC
+    filer, or SEC unavailable. The event gate could only call it UNKNOWN, so no decision is
+    spent on it. The skip is journaled (best effort).
     """
     try:
         validate_symbols([symbol])
@@ -190,7 +206,23 @@ def run_decision(
     budget: dict[str, float | int | None] = {
         "max_plan_age_s": max_age, "analyst_timeout_s": analyst_timeout}
 
-    started = clock()
+    # #170: free SEC check before the first billed call. It reads its own clock, BEFORE
+    # `started`: SEC latency must never eat into the plan's age budget (max_plan_age_s).
+    checked = clock()
+    if not isinstance(checked, datetime) or checked.tzinfo is None or \
+            checked.utcoffset() is None:
+        raise ValueError("clock must be timezone-aware")  # before any request, free or billed
+    coverage = reporting_check(data, sym, checked)
+    if coverage.get("covered") is not True:
+        reason = str(coverage.get("reason") or "quarterly reporting not proven")
+        # best effort: a journal that cannot record the skip never turns it into a decision
+        _append_with_retry(journal, {
+            "status": "skipped", "symbol": sym, "run_id": ledger.run_id, "reason": reason,
+            "checked_at": checked.astimezone(NY).isoformat(),
+        })
+        raise SymbolSkipped(sym, reason)
+
+    started = clock()  # the plan-age clock starts here, after the SEC check
     t0 = time.monotonic()
     packet = asyncio.run(run_analysts(
         sym, started, data=data, clients=clients, configs={a: cfgs[a] for a in AGENTS},

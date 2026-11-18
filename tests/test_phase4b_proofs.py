@@ -120,7 +120,9 @@ def scripts(*, tech_point="breakout above the opening range", sent_point="two po
 def go(tmp_path, scr, *, ask=lambda _: "yes", clock=None, name="j.jsonl"):
     router = Router(scr)
     journal = Journal(tmp_path / name)
-    clock = clock or StepClock(NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=40))
+    # readings: SEC check (#170), analysts start, before the Trader, proposal ...
+    clock = clock or StepClock(NOON, NOON, NOON + timedelta(seconds=20),
+                               NOON + timedelta(seconds=40))
     data = QuotingData(FakeAllData(), clock, SYMBOL, "103.10")  # live quote (#68), ask = entry
     result = run_decision(SYMBOL, data=data, clients=router, journal=journal,
                           clock=clock, ask=ask, rounds=1, timeout_s=10)
@@ -373,8 +375,8 @@ def test_ask_none_stops_after_the_ticket(tmp_path):
 
 
 def test_slow_pipeline_makes_the_plan_stale_before_approval(tmp_path):
-    # readings: analysts start, before the Trader, proposal, re-check after approval
-    clock = StepClock(NOON, NOON + timedelta(seconds=10), NOON + timedelta(seconds=20),
+    # readings: SEC check, analysts start, before the Trader, proposal, re-check
+    clock = StepClock(NOON, NOON, NOON + timedelta(seconds=10), NOON + timedelta(seconds=20),
                       NOON + timedelta(seconds=301))
     result, _, journal = go(tmp_path, scripts(), clock=clock)
     assert result.proposal.ok
@@ -383,8 +385,8 @@ def test_slow_pipeline_makes_the_plan_stale_before_approval(tmp_path):
 
 
 def test_the_plan_age_limit_boundary_through_the_pipeline(tmp_path):
-    # readings: analysts start, before the Trader, proposal, re-check after approval
-    clock = StepClock(NOON, NOON + timedelta(seconds=10), NOON + timedelta(seconds=20),
+    # readings: SEC check, analysts start, before the Trader, proposal, re-check
+    clock = StepClock(NOON, NOON, NOON + timedelta(seconds=10), NOON + timedelta(seconds=20),
                       NOON + timedelta(seconds=300))
     result, _, _ = go(tmp_path, scripts(), clock=clock)
     assert result.outcome.status == APPROVED and result.outcome.plan_age_s == 300
@@ -429,6 +431,17 @@ def test_each_run_has_its_own_ledger(tmp_path):
 
 # ===================== latency budget (#65) =====================
 
+def test_170_sec_check_time_never_counts_against_the_plan_age(tmp_path):
+    """A slow SEC reply (250 s here) is spent before the plan-age clock starts: the analysts,
+    the Trader and the approval still get the whole max_plan_age_s."""
+    clock = StepClock(NOON, NOON + timedelta(seconds=250), NOON + timedelta(seconds=260),
+                      NOON + timedelta(seconds=270))
+    result, router, _ = go(tmp_path, scripts(), clock=clock)
+    assert "trader" in router.calls and result.trader.forced_pass is None
+    assert result.budget["age_before_trader_s"] == 10  # from the analysts' start, not the SEC
+    assert result.outcome.status == APPROVED and result.outcome.plan_age_s == 20
+
+
 def test_budget_is_recorded_against_max_plan_age(tmp_path):
     result, _, _ = go(tmp_path, scripts())
     b = result.budget
@@ -442,7 +455,7 @@ def test_budget_is_recorded_against_max_plan_age(tmp_path):
 @pytest.mark.parametrize("age", [
     LIMITS.max_plan_age_s - decide.MIN_APPROVAL_S + 1, LIMITS.max_plan_age_s + 1])
 def test_plans_stale_before_the_trader_skip_the_trader_call(tmp_path, age):
-    clock = StepClock(NOON, NOON + timedelta(seconds=age))
+    clock = StepClock(NOON, NOON, NOON + timedelta(seconds=age))
     result, router, journal = go(tmp_path, scripts(), clock=clock,
                                  ask=lambda _: pytest.fail("must not ask"))
     assert "trader" not in router.calls  # no billed Trader call
@@ -453,7 +466,7 @@ def test_plans_stale_before_the_trader_skip_the_trader_call(tmp_path, age):
 
 def test_budget_boundary_still_calls_the_trader(tmp_path):
     # exactly MIN_APPROVAL_S left for the human: the Trader is still called
-    clock = StepClock(NOON, NOON + timedelta(seconds=LIMITS.max_plan_age_s
+    clock = StepClock(NOON, NOON, NOON + timedelta(seconds=LIMITS.max_plan_age_s
                                              - decide.MIN_APPROVAL_S))
     result, router, _ = go(tmp_path, scripts(), clock=clock, ask=lambda _: "no")
     assert "trader" in router.calls and result.trader.ok
@@ -480,7 +493,7 @@ def test_default_analyst_timeout_is_half_the_plan_age(tmp_path, monkeypatch):
     monkeypatch.setattr(decide, "run_analysts", spy)
     run_decision(SYMBOL, data=FakeAllData(), clients=Router(scripts()),
                  journal=Journal(tmp_path / "j.jsonl"),
-                 clock=StepClock(NOON, NOON + timedelta(seconds=20)), ask=lambda _: "no",
+                 clock=StepClock(NOON, NOON, NOON + timedelta(seconds=20)), ask=lambda _: "no",
                  rounds=1)
     assert seen["timeout_s"] == LIMITS.max_plan_age_s / 2
 
@@ -534,7 +547,7 @@ def test_ledger_is_sealed_unaccepted_when_run_analysts_raises(monkeypatch):
 def go_send(tmp_path, scr, broker, *, ask=lambda _: "yes"):
     router = Router(scr)
     journal = Journal(tmp_path / "send.jsonl")
-    clock = StepClock(NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=40))
+    clock = StepClock(NOON, NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=40))
     data = QuotingData(FakeAllData(), clock, SYMBOL, "103.10")
     seen = []
     result = run_decision(SYMBOL, data=data, clients=router, journal=journal, clock=clock,
@@ -646,7 +659,7 @@ def test_190_a_clock_failure_while_recording_a_pass_does_not_raise(tmp_path):
 
     def clock():
         calls["n"] += 1
-        if calls["n"] > 2:  # analysts start, before the Trader; then the PASS record
+        if calls["n"] > 3:  # SEC check, analysts start, before the Trader; then the PASS
             raise RuntimeError("clock gone")
         return NOON + timedelta(seconds=10 * calls["n"])
 
