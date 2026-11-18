@@ -194,21 +194,61 @@ def test_get_bars_non_string_symbol_refused(sym):
 
 # ---- scan ----
 
-def test_scan_over_50_refused():
+def test_blocked_scan_over_5_symbols_refused():
+    """#43: the session symbol plus at most 4 peers."""
     data = FakeMarketData()
-    syms = [f"A{chr(65 + i // 26)}{chr(65 + i % 26)}" for i in range(51)]
-    res, err = make(data).execute("scan", {"symbols": syms})
-    assert (res, err) == ({"error": "at most 50 symbols"}, True)
+    syms = ["GAPA", "AAAA", "AAAB", "AAAC", "AAAD", "AAAE"]
+    res, err = make(data, symbol="GAPA").execute("scan", {"symbols": syms})
+    assert err is True and res["error"].startswith("at most 5 symbols")
     assert data.calls == []
 
 
-def test_scan_exactly_50_allowed():
-    syms = ["GAPA"] + [f"A{chr(65 + i // 26)}{chr(65 + i % 26)}" for i in range(49)]
-    assert len(syms) == 50
+def test_scan_exactly_5_allowed():
+    syms = ["GAPA", "AAAA", "AAAB", "AAAC", "AAAD"]
     data = FakeMarketData()
-    _, err = make(data).execute("scan", {"symbols": syms})
+    _, err = make(data, symbol="GAPA").execute("scan", {"symbols": syms})
     assert err is False
-    assert len(data.calls[0][1]) == 50
+    assert len(data.calls[0][1]) == 5
+
+
+@pytest.mark.parametrize("syms", [["GAPA"], ["GAPA", "GAPB"]])
+def test_blocked_scan_without_the_session_symbol_refused(syms):
+    data = FakeMarketData()
+    res, err = make(data, symbol="AAPL").execute("scan", {"symbols": syms})
+    assert (res, err) == ({"error": "symbols must include this session's symbol AAPL"}, True)
+    assert data.calls == []
+
+
+def test_scan_accepts_the_session_symbol_in_any_case():
+    _, err = make(FakeMarketData(), symbol="GAPA").execute("scan", {"symbols": ["gapa"]})
+    assert err is False
+
+
+def test_blocked_a_third_scan_call_is_refused_and_fetches_nothing():
+    data = FakeMarketData()
+    s = make(data, symbol="GAPA")
+    for _ in range(2):
+        assert s.execute("scan", {"symbols": ["GAPA"]})[1] is False
+    fetched = len(data.calls)
+    res, err = s.execute("scan", {"symbols": ["GAPA"]})
+    assert (res, err) == ({"error": "at most 2 scan calls per run"}, True)
+    assert len(data.calls) == fetched
+
+
+def test_a_refused_scan_does_not_use_up_a_call():
+    data = FakeMarketData()
+    s = make(data, symbol="GAPA")
+    assert s.execute("scan", {"symbols": ["GAPB"]})[1] is True  # no session symbol
+    assert s.execute("scan", {"symbols": ["GAPA", "AAAA", "AAAB", "AAAC", "AAAD", "AAAE"]}
+                     )[1] is True  # too many
+    assert s.execute("scan", {"symbols": ["GAPA"]})[1] is False
+    assert s.execute("scan", {"symbols": ["GAPA"]})[1] is False
+    assert s.scan_calls == 2
+
+
+def test_the_scan_tool_description_states_the_limits():
+    text = json.dumps(next(t for t in reg.TOOLS if t["name"] == "scan"))
+    assert "session's symbol" in text and "at most 5" in text and "2 scan calls" in text
 
 
 def test_scan_goes_through_run_scan_with_ny_date(monkeypatch):
@@ -220,7 +260,7 @@ def test_scan_goes_through_run_scan_with_ny_date(monkeypatch):
 
     monkeypatch.setattr(reg, "run_scan", fake_run_scan)
     data = FakeMarketData()
-    _, err = make(data).execute("scan", {"symbols": ["gapa", "GAPA", "gapb"]})
+    _, err = make(data, symbol="GAPA").execute("scan", {"symbols": ["gapa", "GAPA", "gapb"]})
     assert err is False
     assert data.calls == [("snapshots", ["GAPA", "GAPB"]), ("listing", "GAPA"),
                           ("listing", "GAPB")]
@@ -230,7 +270,7 @@ def test_scan_goes_through_run_scan_with_ny_date(monkeypatch):
 
 
 def test_scan_real_pipeline_rejects_stale_bars_premarket():
-    s = make()
+    s = make(symbol="GAPA")
     s.now = datetime(2026, 11, 4, 8, 0, tzinfo=ZoneInfo("America/New_York"))
     res, err = s.execute("scan", {"symbols": ["GAPA"]})
     assert err is False and res["candidates"] == []
@@ -238,7 +278,7 @@ def test_scan_real_pipeline_rejects_stale_bars_premarket():
 
 
 def test_scan_fresh_bar_passes():
-    s = make()
+    s = make(symbol="GAPA")
     # 1 minute after the fixture trade/quote time, so the staleness rule is satisfied
     s.now = datetime(2026, 11, 3, 9, 41, tzinfo=ZoneInfo("America/New_York"))
     res, err = s.execute("scan", {"symbols": ["GAPA"]})

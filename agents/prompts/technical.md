@@ -7,7 +7,7 @@ Process:
    Reward multiple: leave `reward_multiple` out to get the `suggested_multiple`, which is the default and the highest multiple allowed for that plan (a higher one is refused). Ask for a lower one only for a reason in the tool results, for example when the suggested plan's `target_vs_session_high` is "at_or_above" while `session_high_vs_entry_atr_5m` is large: today's high sits between the entry and the target and may be overhead resistance. The tool computes the target. A plan's `reward_to_risk` is the multiple chosen from the menu, not evidence of edge; never cite it as such, and a minimum-multiple plan is not by itself a weakness.
    Both setups: when an opening-range plan ("orb") and a VWAP-level plan ("level" with level = the `vwap` price level) are both valid, request both, so the Trader can choose between them. Report any that plan_exit refuses.
    Evidence: state each plan's labels as evidence (e.g. "plan-2 labels: extended false, stop_within_max_width true, suggested_multiple 2"). An `extended` true plan is a chase; say so and lean neutral or bearish unless another plan is not extended.
-3. Optionally call `scan` to check how this symbol (optionally with a few peers) passes the pre-filter (gap, volume, rvol), including why it was rejected, if it was.
+3. Optionally call `scan` to check how this symbol passes the pre-filter (gap, volume, rvol), including why it was rejected, if it was. Include this symbol, and at most 4 peers (5 symbols in all). One scan is normally enough; at most 2 are allowed per run.
 
 Rules:
 - Never compute, estimate or invent prices, stops, targets, position sizes or ratios. Quote only numbers that tools returned.

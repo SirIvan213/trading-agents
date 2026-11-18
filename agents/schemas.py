@@ -114,6 +114,24 @@ class CallRecord(BaseModel):
     usage: UsageRecord
     iterations: list[IterationRecord] = Field(default_factory=list)
 
+    def billed_usage(self) -> UsageRecord:
+        """The tokens this call processed, for cost reporting and the daily token cap (#58).
+
+        The rule (Claude API docs, refusals and fallback: "usage.iterations is the per-attempt
+        source of truth; top-level usage covers only the attempt that produced the returned
+        message"): when `usage.iterations` is present, the call's tokens are the SUM of its
+        iterations, every type included (message, fallback_message, compaction ...), so a
+        declined hop's tokens are counted. Without iterations, the top-level usage. Each
+        field is the larger of the two, so a response whose iterations under-report never
+        counts less than its top-level usage (the cap fails toward counting more)."""
+        top = self.usage
+        if not self.iterations:
+            return top
+        keys = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                "cache_read_input_tokens")
+        summed = {k: sum(getattr(i.usage, k) for i in self.iterations) for k in keys}
+        return UsageRecord(**{k: max(summed[k], getattr(top, k)) for k in keys})
+
 
 class RetryRecord(BaseModel):
     """Why one attempt was rejected and retried (issue #87).
@@ -266,3 +284,7 @@ class DebateRecord(BaseModel):
     final_bull: BullCase | None
     final_bear: BearCase | None
     all_ok: bool
+    # #163: the debate was not run (no Bull or Bear call), e.g. because an analyst failed and
+    # the Trader's PASS is already fixed. A skipped debate has no turns and no final cases.
+    skipped: bool = False
+    skip_reason: str | None = None

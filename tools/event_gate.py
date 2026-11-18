@@ -323,6 +323,25 @@ def _sec_findings(symbol: str, now: datetime,
     return findings, True, last.astimezone(NY).date().isoformat()
 
 
+def reporting_coverage(symbol: str, now: datetime, filings: object) -> dict:
+    """Whether EDGAR shows `symbol` reporting quarterly: an 8-K item 2.02 filed in the last
+    COVERAGE_DAYS days (the gate's own coverage rule, unchanged). {"covered": bool,
+    "reason": str | None, "last_item_202": ISO date | None}.
+
+    Used BEFORE a decision is spent (#170): a symbol the gate can only call UNKNOWN on this
+    rule (a foreign private issuer filing 6-K / 20-F, no SEC filer, SEC unavailable) is
+    skipped by the scan and by run_decision before any billed call. `filings` is the gate's
+    {"ok", "submissions"} input. An item 2.02 filed today counts as reporting: whether it
+    blocks (EVENT) stays the gate's call."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    findings, covered, last = _sec_findings(symbol, now, filings)
+    if covered or any(f["status"] == EVENT for f in findings):
+        return {"covered": True, "reason": None, "last_item_202": last}
+    reason = "; ".join(f["reason"] for f in findings) or "quarterly reporting not proven"
+    return {"covered": False, "reason": reason, "last_item_202": last}
+
+
 def company_names(symbol: str, sources: dict) -> list[str]:
     """The company's names from tool output: the SEC filer's name and Alpha Vantage's name
     for the symbol (or a share-class sibling). Never model text. Only exact repeats are

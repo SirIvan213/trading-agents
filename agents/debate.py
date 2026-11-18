@@ -83,10 +83,23 @@ def run_debate(
     case is fatal (including a failed, fail-closed Bear). Sequential on purpose: each side
     needs the other's latest case. Raises ValueError only for bad `rounds` / config, up front;
     after that exceptions inside a turn become that turn's failure.
+
+    A packet with a failed analyst (`all_ok` false) is not debated (#163): the Trader forces
+    PASS ("analyst_failed") without a call, so Bull and Bear calls would be spent on a fixed
+    decision. The record is then `skipped`, with no turns, no final cases, `fatal` false and
+    `all_ok` false.
     """
     planned = resolve_rounds(rounds)
     cfgs = {s: (configs or {}).get(s) or config_for(s) for s in ("bull", "bear")}
     sym = packet.symbol
+    if not packet.all_ok:
+        return DebateRecord(
+            symbol=sym, as_of=packet.as_of, rounds_planned=planned, rounds_run=0, turns=[],
+            stopped_early=False, fatal=False,
+            requested_same_model=cfgs["bull"].model == cfgs["bear"].model, same_model=False,
+            final_bull=None, final_bear=None, all_ok=False, skipped=True,
+            skip_reason="analyst_failed: the Trader passes without a call, so no debate",
+        )
     turns: list[DebateTurn] = []
     last_bull: BullCase | None = None  # last VALID bull case
     last_bear: BearCase | None = None

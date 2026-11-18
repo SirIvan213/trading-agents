@@ -218,7 +218,7 @@ def test_a_listing_problem_is_added_to_other_reasons():
 
 def test_blocked_the_scan_tool_rejects_an_arca_listing():
     data = FakeMarketData(exchanges={"GAPA": "ARCA"})
-    out, err = make(data).execute("scan", {"symbols": ["GAPA", "GAPB"]})
+    out, err = make(data, symbol="GAPA").execute("scan", {"symbols": ["GAPA", "GAPB"]})
     assert err is False and out["candidates"] == []  # the fixture snapshots are stale too
     reasons = {r["symbol"]: r["reasons"] for r in out["rejected"]}
     assert reasons["GAPA"][0].startswith("listed on ARCA:")
@@ -228,7 +228,7 @@ def test_blocked_the_scan_tool_rejects_an_arca_listing():
 def test_blocked_the_scan_tool_rejects_every_symbol_when_the_listing_lookup_fails():
     data = FakeMarketData()
     data.listing_raises = RuntimeError("HTTP 503 from /v2/assets/GAPA")
-    out, err = make(data).execute("scan", {"symbols": ["GAPA", "GAPB"]})
+    out, err = make(data, symbol="GAPA").execute("scan", {"symbols": ["GAPA", "GAPB"]})
     assert err is False and out["candidates"] == []
     reasons = {r["symbol"]: r["reasons"][0] for r in out["rejected"]}
     assert reasons["GAPA"] == "listing exchange unknown (HTTP 503 from /v2/assets/GAPA)"
@@ -246,7 +246,7 @@ def test_an_unknown_symbol_404_does_not_stop_the_other_lookups():
                 raise RuntimeError("HTTP 404 from /v2/assets/GAPA")
             return asset_reply(symbol)
     data = Partly()
-    out, _ = make(data).execute("scan", {"symbols": ["GAPA", "GAPB"]})
+    out, _ = make(data, symbol="GAPA").execute("scan", {"symbols": ["GAPA", "GAPB"]})
     reasons = {r["symbol"]: r["reasons"] for r in out["rejected"]}
     assert reasons["GAPA"][0] == "listing exchange unknown (HTTP 404 from /v2/assets/GAPA)"
     assert not any("listing" in x for x in reasons["GAPB"])
@@ -256,7 +256,7 @@ def test_an_unknown_symbol_404_does_not_stop_the_other_lookups():
 
 def test_a_bad_reply_does_not_stop_the_other_lookups():
     data = FakeMarketData(exchanges={"GAPA": "ARCA"})
-    make(data).execute("scan", {"symbols": ["GAPA", "GAPB"]})
+    make(data, symbol="GAPA").execute("scan", {"symbols": ["GAPA", "GAPB"]})
     assert [c for c in data.calls if c[0] == "listing"] == [("listing", "GAPA"),
                                                            ("listing", "GAPB")]
 
@@ -265,7 +265,7 @@ def test_blocked_the_scan_tool_rejects_everything_without_a_listing_source():
     class NoListing:
         def snapshots(self, symbols):
             return FakeMarketData().snapshots(symbols)
-    out, _ = make(NoListing()).execute("scan", {"symbols": ["GAPA"]})
+    out, _ = make(NoListing(), symbol="GAPA").execute("scan", {"symbols": ["GAPA"]})
     assert out["candidates"] == []
     assert out["rejected"][0]["reasons"][0] == "listing exchange unknown (no listing source)"
 

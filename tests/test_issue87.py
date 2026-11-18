@@ -56,6 +56,9 @@ def packet() -> DecisionPacket:
 
 
 PKT = packet()
+# A packet the debate runs on (#163: a failed analyst skips the debate). The failed run record
+# stays, so its evidence is still not quotable.
+DEBATED = PKT.model_copy(update={"all_ok": True})
 ALLOWED = allowed_values(PKT)
 QUOTED = quoted_values(PKT)
 
@@ -203,7 +206,7 @@ def test_failed_bear_keeps_retry_record():
 
 def test_debate_turn_records_carry_retries():
     bad, good = bull_json(argument="target 110.25"), bull_json()
-    rec = run_debate(PKT, clients=FakeClient([reply(bad), reply(good), reply(bear_json())]),
+    rec = run_debate(DEBATED, clients=FakeClient([reply(bad), reply(good), reply(bear_json())]),
                      configs={"bull": AgentConfig(), "bear": AgentConfig()}, rounds=1)
     bull_turn, bear_turn = rec.turns
     assert [r.attempt for r in bull_turn.run.retries] == [1]
@@ -322,7 +325,7 @@ def test_9_01_is_listed_as_a_non_catalyst_item():
 
 def test_smoke_debate_report_prints_each_retry(capsys):
     from pipeline import smoke_debate as S
-    deb = run_debate(PKT, clients=FakeClient([
+    deb = run_debate(DEBATED, clients=FakeClient([
         reply(bull_json(argument="target 110.25")), reply(bull_json()), reply(bear_json())]),
         configs={"bull": AgentConfig(), "bear": AgentConfig()}, rounds=1)
     reports = {a: PKT.reports["technical"].model_copy(update={"agent": a})

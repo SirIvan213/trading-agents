@@ -272,6 +272,7 @@ def scan(
     today: date | None = None,
     now: datetime | None = None,
     listings: dict | None = None,
+    reporting: dict | None = None,
 ) -> dict:
     """Filter snapshots into candidates; every rejection carries explicit reasons.
 
@@ -295,6 +296,12 @@ def scan(
     any symbol that is not proven listed on Nasdaq, NYSE or NYSE American, with the reason
     from tools.listing.listing_problem (a symbol missing from `listings` is rejected too).
     pipeline.market.run_scan, the sanctioned path, always applies this check.
+
+    Quarterly reporting (#170): pass `reporting` ({symbol: tools.event_gate.reporting_coverage
+    result}) to reject any symbol without an 8-K item 2.02 in the last 100 days, with its
+    reason, before a decision is spent on it (the event gate would only call it UNKNOWN). A
+    symbol missing from `reporting` is rejected too. Without `reporting` the check is not made
+    (the analyst's own scan tool): the event gate still blocks such a symbol.
     """
     if now is not None and (now.tzinfo is None or now.utcoffset() is None):
         raise ValueError("now must be timezone-aware")
@@ -323,6 +330,11 @@ def scan(
             problem = listing_problem(listings.get(sym), sym)
             if problem:
                 reasons.append(problem)
+        if reporting is not None:
+            rep = reporting.get(sym)
+            if not isinstance(rep, dict) or rep.get("covered") is not True:
+                why = rep.get("reason") if isinstance(rep, dict) else None
+                reasons.append(f"quarterly reporting not proven: {why or 'not checked'}")
         m, why = _metrics(snap, avgs, sym)
         if m is None:
             reasons.append(why)

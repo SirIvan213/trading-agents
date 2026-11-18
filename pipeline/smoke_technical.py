@@ -116,11 +116,13 @@ TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
 
 
 def token_totals(calls: list[CallRecord]) -> dict[str, int]:
-    """Sum of the top-level usage fields across all call records."""
+    """Tokens processed across all call records: each call's CallRecord.billed_usage(), which
+    sums usage.iterations when present (a fallback's declined hop included, #58)."""
     totals = dict.fromkeys(TOKEN_KEYS, 0)
     for c in calls:
+        billed = c.billed_usage()
         for k in TOKEN_KEYS:
-            totals[k] += getattr(c.usage, k)
+            totals[k] += getattr(billed, k)
     return totals
 
 

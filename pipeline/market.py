@@ -24,15 +24,19 @@ def run_scan(
     now: datetime,
     avg_volume: dict[str, int] | None = None,
     listings: dict | None = None,
+    reporting: dict | None = None,
 ) -> dict:
     """Run tools.scan.scan with today=ny_today(now) and `now`, so stale daily bars and stale
     trades or quotes (criteria.max_quote_age_s, #12) are rejected, and with `listings`, so a
     symbol not proven listed on Nasdaq, NYSE or NYSE American is rejected (#168). Fails
     closed: without `listings` every symbol is rejected as "listing exchange unknown".
+    With `reporting` (pipeline.events.reporting_check results), a symbol without an 8-K item
+    2.02 in the last 100 days is rejected before a decision is spent on it (#170).
 
     This is the ONLY sanctioned way for the pipeline and agents to scan. Never call
     tools.scan.scan directly elsewhere: without `today`, a pre-market scan ranks
     gaps against yesterday's daily bar.
     """
     return scan(snapshots, criteria, limits, avg_volume=avg_volume, today=ny_today(now),
-                now=now, listings=listings if listings is not None else {})
+                now=now, listings=listings if listings is not None else {},
+                reporting=reporting)

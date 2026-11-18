@@ -41,6 +41,7 @@ from tools.event_gate import (
     NEWS_LOOKBACK_HOURS,
     event_gate,
     previous_session_close,
+    reporting_coverage,
 )
 from tools.halt_feed import parse_halt_feed
 from tools.listing import parse_asset
@@ -282,6 +283,21 @@ def listing_input(data: Any, symbol: str) -> dict:
     return parse_asset(reply, symbol)
 
 
+def filings_input(data: Any, symbol: str) -> dict:
+    """The SEC input: {"ok": True, "submissions": ...} or {"ok": False, "reason"}."""
+    try:
+        return {"ok": True, "submissions": data.submissions(symbol)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": _failure(exc)}
+
+
+def reporting_check(data: Any, symbol: str, now: datetime) -> dict:
+    """tools.event_gate.reporting_coverage on `data`'s SEC submissions (#170): is `symbol`
+    proven to report quarterly? Free (SEC EDGAR), so it runs before any billed call. Never
+    raises for a data failure: that is "covered": False with the reason."""
+    return reporting_coverage(symbol, now, filings_input(data, symbol))
+
+
 def gate_inputs(data: Any, symbol: str, now: datetime, *, calendar: dict | None = None,
                 halts: dict | None = None, fmp_calendar: dict | None = None) -> dict:
     """The six gate inputs for `symbol` at `now`, each {"ok": True, ...} or {"ok": False,
@@ -290,10 +306,7 @@ def gate_inputs(data: Any, symbol: str, now: datetime, *, calendar: dict | None 
     and listing (Alpaca asset, #168). `calendar`, `fmp_calendar` and `halts` may be passed
     in when shared across symbols (smoke_events)."""
     today = now.astimezone(NY).date()
-    try:
-        filings: dict = {"ok": True, "submissions": data.submissions(symbol)}
-    except Exception as exc:  # noqa: BLE001
-        filings = {"ok": False, "reason": _failure(exc)}
+    filings = filings_input(data, symbol)
     try:
         # 24 hours, or back to the previous session's close if that is earlier (a weekend):
         # the earnings news signal looks back that far (#169)
