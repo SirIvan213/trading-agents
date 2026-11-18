@@ -300,7 +300,8 @@ def scan(
     Quarterly reporting (#170): pass `reporting` ({symbol: tools.event_gate.reporting_coverage
     result}) to reject any symbol without an 8-K item 2.02 in the last 100 days, with its
     reason, before a decision is spent on it (the event gate would only call it UNKNOWN). A
-    symbol missing from `reporting` is rejected too. Without `reporting` the check is not made
+    symbol missing from `reporting` (keys are upper-case symbols) is rejected too, and so is
+    every symbol when `reporting` is not a dict. Without `reporting` the check is not made
     (the analyst's own scan tool): the event gate still blocks such a symbol.
     """
     if now is not None and (now.tzinfo is None or now.utcoffset() is None):
@@ -331,7 +332,9 @@ def scan(
             if problem:
                 reasons.append(problem)
         if reporting is not None:
-            rep = reporting.get(sym)
+            # keyed by upper-case symbol, like `listings`; a map that is not a dict fails
+            # closed (every symbol "not checked"), never raises
+            rep = reporting.get(sym) if isinstance(reporting, dict) else None
             if not isinstance(rep, dict) or rep.get("covered") is not True:
                 why = rep.get("reason") if isinstance(rep, dict) else None
                 reasons.append(f"quarterly reporting not proven: {why or 'not checked'}")

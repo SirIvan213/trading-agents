@@ -233,6 +233,14 @@ def test_170_blocked_an_8k_without_item_202_is_not_covered():
     assert out["covered"] is False
 
 
+def test_170_an_item_202_stamped_later_today_than_now_counts_as_reporting():
+    """The only 2.02 in 100 days is today's, stamped after `now` (an estimated 23:59:59 or a
+    clock a little behind EDGAR): the gate's EVENT finding, so reporting is proven."""
+    later_today = submissions_202(NOW, -0.01)  # 14 minutes after NOW, same New York day
+    out = reporting_coverage("TSLA", NOW, {"ok": True, "submissions": later_today})
+    assert out["covered"] is True and out["reason"] is None
+
+
 def test_170_reporting_check_reads_the_data_source_and_never_raises():
     class Data:
         def submissions(self, symbol):
@@ -270,6 +278,17 @@ def test_170_blocked_the_scan_rejects_a_symbol_without_reporting_with_its_reason
     assert "quarterly reporting not proven: not checked" in rejected["TKC"]  # missing: rejected
 
 
+@pytest.mark.parametrize("reporting", [
+    ["GAPA"], "GAPA", 0, {"gapa": {"covered": True}}],
+    ids=["list", "text", "zero", "lower-case-key"])
+def test_170_blocked_a_malformed_reporting_map_fails_closed_never_raises(reporting):
+    out = scan({"GAPA": gap_snapshot()}, ScanCriteria(), load_limits(), listings=LISTED,
+               reporting=reporting)
+    assert out["candidates"] == []
+    (rej,) = out["rejected"]
+    assert "quarterly reporting not proven: not checked" in rej["reasons"]
+
+
 def test_170_without_reporting_the_scan_does_not_check_it():
     out = scan({"OMH": gap_snapshot()}, ScanCriteria(), load_limits(), listings=LISTED)
     reasons = [r for x in out["rejected"] for r in x["reasons"]]
@@ -297,6 +316,26 @@ def test_170_blocked_run_decision_skips_a_symbol_without_reporting_before_any_bi
         encoding="utf-8").splitlines()]
     assert entry["status"] == "skipped" and entry["symbol"] == "VNTR"
     assert "no 8-K item 2.02" in entry["reason"]
+
+
+def test_170_blocked_a_skip_whose_journal_write_fails_is_still_a_skip(monkeypatch, tmp_path):
+    """The skip's journal entry is best effort: a locked or cut-off journal never turns the
+    skip into a decision, and never raises anything but SymbolSkipped."""
+    from journal.log import Journal, JournalLockTimeout
+    tries = []
+
+    def locked(self, entry):
+        tries.append(entry["status"])
+        raise JournalLockTimeout("journal lock timed out")
+
+    def no_analysts(*a, **k):
+        raise AssertionError("an analyst ran: a decision was spent")
+
+    monkeypatch.setattr(Journal, "append", locked)
+    monkeypatch.setattr(decide, "run_analysts", no_analysts)
+    with pytest.raises(decide.SymbolSkipped):
+        run_scenario(monkeypatch, tmp_path, "red-flag", stub_analysts=False)
+    assert tries == ["skipped", "skipped"]  # one retry, then the skip stands
 
 
 def test_170_the_guard_would_catch_an_analyst_run(monkeypatch, tmp_path):
