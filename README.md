@@ -92,8 +92,9 @@ peers, at most twice per run (#43).
 covers only the attempt that produced the message; `usage.iterations` lists every attempt
 (the Claude API docs call it the per-attempt source of truth). A call's tokens are therefore
 the sum of its iterations when they are present, else the top-level usage
-(`CallRecord.billed_usage()`, taking the larger of the two per field). Totals and the daily
-token cap count input, output, cache writes and cache reads this way.
+(`CallRecord.billed_usage()`, taking the larger of the two per field; summed over calls by
+`agents.schemas.token_totals`). The daily token cap, built with `run_day` in Phase 5 PR 6,
+will count input, output, cache writes and cache reads this way.
 
 `risk_check` blocks EVENT and UNKNOWN. The reason names the kind and the source, e.g.
 `event gate EVENT: EVENT (alphavantage): estimated earnings date ...` against

@@ -211,6 +211,19 @@ def test_scan_exactly_5_allowed():
     assert len(data.calls[0][1]) == 5
 
 
+def test_scan_counts_symbols_after_removing_duplicates():
+    data = FakeMarketData()
+    syms = ["GAPA", "gapa", "GAPA", "GAPA", "GAPA", "GAPB"]  # 6 entries, 2 symbols
+    _, err = make(data, symbol="GAPA").execute("scan", {"symbols": syms})
+    assert err is False and data.calls[0] == ("snapshots", ["GAPA", "GAPB"])
+
+
+def test_blocked_a_very_long_list_is_refused_before_validation():
+    res, err = make(FakeMarketData(), symbol="GAPA").execute(
+        "scan", {"symbols": ["GAPA"] * 21})
+    assert err is True and res["error"].startswith("at most 5 symbols")
+
+
 @pytest.mark.parametrize("syms", [["GAPA"], ["GAPA", "GAPB"]])
 def test_blocked_scan_without_the_session_symbol_refused(syms):
     data = FakeMarketData()

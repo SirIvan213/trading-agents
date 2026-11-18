@@ -133,6 +133,22 @@ class CallRecord(BaseModel):
         return UsageRecord(**{k: max(summed[k], getattr(top, k)) for k in keys})
 
 
+TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+              "cache_read_input_tokens")
+
+
+def token_totals(calls: list[CallRecord]) -> dict[str, int]:
+    """Tokens processed across `calls`, per kind: each call's billed_usage(), which sums
+    usage.iterations when present (a fallback's declined hop included, #58). The daily token
+    cap (run_day, Phase 5 PR 6) counts the sum of all four kinds."""
+    totals = dict.fromkeys(TOKEN_KEYS, 0)
+    for c in calls:
+        billed = c.billed_usage()
+        for k in TOKEN_KEYS:
+            totals[k] += getattr(billed, k)
+    return totals
+
+
 class RetryRecord(BaseModel):
     """Why one attempt was rejected and retried (issue #87).
 

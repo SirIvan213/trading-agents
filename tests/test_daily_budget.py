@@ -15,10 +15,9 @@ import pipeline.decide as decide
 from agents.debate import run_debate
 from agents.llm import AgentConfig
 from agents.runner import call_record
-from agents.schemas import CallRecord, IterationRecord, UsageRecord
+from agents.schemas import CallRecord, IterationRecord, UsageRecord, token_totals
 from agents.trader import run_trader
 from pipeline.events import reporting_check
-from pipeline.smoke_technical import token_totals
 from tests.debate_helpers import bear_json, bull_json, reply
 from tests.fakes import FakeClient
 from tests.order_helpers import submissions_202
@@ -101,6 +100,11 @@ def test_58_blocked_iterations_that_under_report_never_count_less_than_the_top_l
                                                                       output_tokens=300))],
     )
     assert rec.billed_usage() == UsageRecord(input_tokens=500, output_tokens=300)
+
+
+def test_58_the_smoke_scripts_use_the_same_totals():
+    import pipeline.smoke_technical as st
+    assert st.token_totals is token_totals
 
 
 def test_58_totals_add_up_across_calls():

@@ -413,13 +413,16 @@ def _scan(s: ToolSession, inp: dict) -> tuple[dict, bool]:
     symbols = inp.get("symbols")
     if not isinstance(symbols, list) or not symbols:
         return _err("symbols must be a non-empty array of strings")
-    if len(symbols) > MAX_SCAN_SYMBOLS:
-        return _err(f"at most {MAX_SCAN_SYMBOLS} symbols (this session's symbol plus "
+    too_many = _err(f"at most {MAX_SCAN_SYMBOLS} symbols (this session's symbol plus "
                     f"{MAX_SCAN_SYMBOLS - 1} peers)")
+    if len(symbols) > 4 * MAX_SCAN_SYMBOLS:  # a bound before validating a long list
+        return too_many
     try:
         syms = validate_symbols(symbols)
     except ValueError:
         raise _Refusal("symbols must be valid tickers (letters and dots)") from None
+    if len(syms) > MAX_SCAN_SYMBOLS:  # counted after de-duplication (#43)
+        return too_many
     if s.symbol.strip().upper() not in syms:
         return _err(f"symbols must include this session's symbol {s.symbol.strip().upper()}")
     if s.scan_calls >= MAX_SCAN_CALLS:
