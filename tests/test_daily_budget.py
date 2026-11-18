@@ -248,13 +248,18 @@ def test_170_without_reporting_the_scan_does_not_check_it():
 
 def test_170_blocked_run_decision_skips_a_symbol_without_reporting_before_any_billed_call(
         monkeypatch, tmp_path):
-    """The red-flag scenario (VNTR) has no 8-K item 2.02: no analyst, debate or Trader runs."""
+    """The red-flag scenario (VNTR) has no 8-K item 2.02: no analyst, debate or Trader runs.
+    The guard below stays installed (stub_analysts=False), so an analyst run would fail."""
+    ran = []
+
     def no_analysts(*a, **k):
+        ran.append(1)
         raise AssertionError("an analyst ran: a decision was spent")
 
     monkeypatch.setattr(decide, "run_analysts", no_analysts)
     with pytest.raises(decide.SymbolSkipped) as exc:
-        run_scenario(monkeypatch, tmp_path, "red-flag")
+        run_scenario(monkeypatch, tmp_path, "red-flag", stub_analysts=False)
+    assert decide.run_analysts is no_analysts and ran == []  # the guard was live, never hit
     assert exc.value.symbol == "VNTR"
     assert f"no 8-K item 2.02 in the last {COVERAGE_DAYS} days" in exc.value.reason
     assert isinstance(exc.value, ValueError)  # run_decision's "before any API call" contract
@@ -262,6 +267,17 @@ def test_170_blocked_run_decision_skips_a_symbol_without_reporting_before_any_bi
         encoding="utf-8").splitlines()]
     assert entry["status"] == "skipped" and entry["symbol"] == "VNTR"
     assert "no 8-K item 2.02" in entry["reason"]
+
+
+def test_170_the_guard_would_catch_an_analyst_run(monkeypatch, tmp_path):
+    """The guard has teeth: with the SEC check passed, the same scenario reaches it."""
+    def no_analysts(*a, **k):
+        raise AssertionError("an analyst ran: a decision was spent")
+
+    monkeypatch.setattr(decide, "run_analysts", no_analysts)
+    with pytest.raises(AssertionError, match="an analyst ran"):
+        run_scenario(monkeypatch, tmp_path, "red-flag", stub_analysts=False,
+                     bypass_prescreen=True)
 
 
 def test_170_a_symbol_that_reports_is_decided_as_before(monkeypatch, tmp_path):

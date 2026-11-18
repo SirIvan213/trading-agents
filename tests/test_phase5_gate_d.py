@@ -736,11 +736,12 @@ class RestampedScenario(ScenarioData):
 
 
 def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=None,
-                 bypass_prescreen=False):
+                 bypass_prescreen=False, stub_analysts=True):
     """run_decision on a saved scenario with every model faked to BUY plan-1. The analysts are
     one stub that records the scenario's real plan; the debaters and the Trader are scripted.
     `bypass_prescreen` turns off run_decision's free SEC reporting check (#170), to prove the
-    event gate still refuses on its own (defence in depth)."""
+    event gate still refuses on its own (defence in depth). `stub_analysts=False` leaves
+    decide.run_analysts as the caller set it (a test's own guard)."""
     if bypass_prescreen:
         monkeypatch.setattr(decide, "reporting_check",
                             lambda data, sym, now: {"covered": True, "reason": None})
@@ -757,7 +758,8 @@ def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=
         from tests.test_smoke_scenarios import packet_for
         return packet_for(symbol, [p], as_of.isoformat())
 
-    monkeypatch.setattr(decide, "run_analysts", fake_analysts)
+    if stub_analysts:
+        monkeypatch.setattr(decide, "run_analysts", fake_analysts)
     replies = [*debaters(symbol), reply(trader(symbol, confidence=trader_confidence))]
     client = FakeClient(replies)
     journal = Journal(tmp_path / f"{name}.jsonl")
