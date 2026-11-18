@@ -16,7 +16,7 @@
  "created_at": "2026-01-02T00:00:00Z",
  "trade_suspended_by_user": false,
  "multiplier": "2",
- "shorting_enabled": true,
+ "shorting_enabled": false,
  "equity": "100000.00",
  "last_equity": "100000.00",
  "long_market_value": "0",

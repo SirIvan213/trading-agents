@@ -75,6 +75,7 @@ class DecisionResult:
     outcome: Outcome | None
     timings_ms: dict[str, int] = field(default_factory=dict)
     budget: dict[str, float | int | None] = field(default_factory=dict)
+    record_error: str | None = None  # a PASS that could not be journaled (#190)
     sends: bool = False  # a broker was given: an approval is sent to the paper account
     sent: SendResult | None = None  # what happened at the broker (None: nothing sent)
 
@@ -97,13 +98,27 @@ JOURNAL_ERROR = "journal_error"
 RECORD_ATTEMPTS = 2  # the record of a failed approval is written with one retry (#129)
 
 
+def _append_with_retry(journal: Journal, entry: dict) -> JournalError | None:
+    """Append `entry`, retried once (#129, #190). None when written, else the last error."""
+    last: JournalError | None = None
+    for _ in range(RECORD_ATTEMPTS):
+        try:
+            journal.append(entry)
+            return None
+        except JournalError as exc:
+            last = exc
+    return last
+
+
 def _journal_failed(proposal: Proposal, journal: Journal, exc: JournalError,
-                    clock: Clock) -> Outcome:
+                    clock: Clock, *, said_yes: bool) -> Outcome:
     """The outcome when approve() raised JournalError (#129): "journal_locked" for a lock
     timeout, else "journal_error". Nothing is approved. The attempt is journaled, retried
-    once; if both writes fail, the outcome's reason says it was not recorded."""
+    once; if both writes fail, the outcome's reason says it was not recorded. The reason says
+    whether the human approved or declined (#192)."""
     status = JOURNAL_LOCKED if isinstance(exc, JournalLockTimeout) else JOURNAL_ERROR
-    reason = f"journal unavailable after the answer, nothing approved: {exc}"
+    answer = "after a yes" if said_yes else "recording a decline"
+    reason = f"journal unavailable {answer}, nothing approved: {exc}"
     try:
         at = clock().astimezone(NY).isoformat()
     except Exception:  # noqa: BLE001 - the record must not fail on the clock
@@ -111,16 +126,20 @@ def _journal_failed(proposal: Proposal, journal: Journal, exc: JournalError,
     entry = {"status": status, "reason": reason, "run_id": proposal.run_id,
              "plan_id": proposal.plan_id,
              "symbol": proposal.plan.symbol if proposal.plan else None,
-             "proposal_checked_at": proposal.checked_at, "checked_at": at}
-    for _ in range(RECORD_ATTEMPTS):
-        try:
-            journal.append(entry)
-            break
-        except JournalError:
-            continue
-    else:
+             "proposal_checked_at": proposal.checked_at, "checked_at": at,
+             "answer": "yes" if said_yes else "declined"}
+    if _append_with_retry(journal, entry) is not None:
         reason += " (and the attempt could not be journaled)"
     return Outcome(status, reason, proposal)
+
+
+def _recording(ask: Ask, answers: list[object]) -> Ask:
+    """`ask`, also keeping each answer in `answers` (an EOFError keeps none: a decline)."""
+    def recorded(prompt: str) -> str:
+        answer = ask(prompt)
+        answers.append(answer)
+        return answer
+    return recorded
 
 
 def run_decision(
@@ -197,11 +216,15 @@ def run_decision(
     result = DecisionResult(packet, debate, trader, ledger.run_id, None, None, timings, budget,
                             sends=broker is not None)
     if decision.action != "BUY" or not decision.plan_id:
-        journal.append({
+        # #190: a PASS record that cannot be written (lock timeout, cut-off journal) is
+        # retried once and reported in the result; it never raises out of the decision.
+        failed = _append_with_retry(journal, {
             "status": "pass", "run_id": ledger.run_id, "symbol": packet.symbol,
             "forced_pass": trader.forced_pass,
             "checked_at": clock().astimezone(NY).isoformat(),
         })
+        if failed is not None:
+            result.record_error = f"the PASS could not be journaled: {failed}"
         return result
 
     plan_id: str = decision.plan_id  # the ONLY value that crosses to the order path
@@ -214,6 +237,8 @@ def run_decision(
     if ask is None:
         return result
     t0 = time.monotonic()
+    answers: list[object] = []
+    ask = _recording(ask, answers)  # #192: tells a yes from a decline if the journal fails
     try:
         result.outcome = approve(result.proposal, ledger, journal=journal, ask=ask,
                                  clock=clock, quotes=quotes, events=events,
@@ -222,7 +247,10 @@ def run_decision(
         # #129: the journal lock timed out (or a write failed) after the answer. Nothing is
         # approved, since an approval exists only once its entry is written, but the attempt
         # must still leave a record: one entry, written with one retry.
-        result.outcome = _journal_failed(result.proposal, journal, exc, clock)
+        said_yes = bool(answers) and isinstance(answers[-1], str) and \
+            answers[-1].strip() == "yes"
+        result.outcome = _journal_failed(result.proposal, journal, exc, clock,
+                                         said_yes=said_yes)
     timings["approval"] = int((time.monotonic() - t0) * 1000)
     budget["plan_age_at_approval_s"] = result.outcome.plan_age_s
     if broker is not None and result.outcome.status == APPROVED:

@@ -154,6 +154,7 @@ def test_128_a_read_that_cannot_take_the_lock_raises_and_propose_refuses(limits,
     monkeypatch.setattr(jl, "LOCK_TIMEOUT_S", 0.2)
     path = tmp_path / "j.jsonl"
     holder = Journal(path)
+    holder.append({"status": "pass"})  # an existing journal: reading it needs the lock (#192)
     hold, release = threading.Event(), threading.Event()
 
     def keep_lock():
