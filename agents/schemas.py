@@ -288,3 +288,14 @@ class DebateRecord(BaseModel):
     # the Trader's PASS is already fixed. A skipped debate has no turns and no final cases.
     skipped: bool = False
     skip_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _skipped_has_no_debate(self) -> DebateRecord:
+        """A skipped record (#163) carries nothing a debate would: no turns, no final cases,
+        not ok, not fatal, and a reason. Its shape cannot drift into a clean-looking run."""
+        if self.skipped and (self.turns or self.final_bull is not None
+                             or self.final_bear is not None or self.all_ok or self.fatal
+                             or self.rounds_run != 0 or self.stopped_early
+                             or not self.skip_reason):
+            raise ValueError("a skipped debate has no turns, no final cases and a reason")
+        return self

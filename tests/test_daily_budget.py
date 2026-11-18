@@ -135,6 +135,36 @@ def test_163_the_trader_then_passes_without_a_call():
     assert trader_client.calls == []
 
 
+def test_163_the_smoke_report_shows_a_skipped_debate_as_skipped(capsys):
+    from pipeline import smoke_debate as S
+    from tests.test_issue87 import run_record
+    reports = {a: PKT.reports["technical"].model_copy(update={"agent": a})
+               for a in ("technical", "sentiment", "fundamentals")}
+    runs = {a: run_record(a, ok=(a != "fundamentals")) for a in reports}
+    pkt = PKT.model_copy(update={"reports": reports, "runs": runs, "all_ok": False})
+    rec = run_debate(pkt, clients=FakeClient([]), rounds=2,
+                     configs={"bull": AgentConfig(), "bear": AgentConfig()})
+    cfgs = {a: AgentConfig() for a in (*reports, "bull", "bear")}
+    S.report(pkt, rec, cfgs)
+    out = capsys.readouterr().out.split("-- Debate --")[1]
+    assert "SKIPPED (no Bull or Bear call): analyst_failed" in out
+    assert "rounds planned 2, run 0 (debate skipped)" in out
+    assert "stopped early: n/a, the debate was skipped" in out
+    assert "stopped early: no" not in out
+
+
+@pytest.mark.parametrize("over", [
+    {"all_ok": True}, {"fatal": True}, {"rounds_run": 1}, {"skip_reason": None},
+    {"stopped_early": True},
+], ids=["ok", "fatal", "ran", "no-reason", "stopped"])
+def test_163_blocked_a_skipped_record_cannot_look_like_a_debate(over):
+    from pydantic import ValidationError
+    rec = run_debate(PKT, clients=FakeClient([]), rounds=1,
+                     configs={"bull": AgentConfig(), "bear": AgentConfig()})
+    with pytest.raises(ValidationError, match="skipped debate"):
+        type(rec).model_validate({**rec.model_dump(), **over})
+
+
 def test_163_blocked_a_healthy_packet_is_still_debated():
     client = FakeClient([reply(bull_json()), reply(bear_json())])
     rec = run_debate(DEBATED, clients=client, rounds=1,

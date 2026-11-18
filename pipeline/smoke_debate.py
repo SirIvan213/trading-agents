@@ -176,15 +176,20 @@ def report(packet: DecisionPacket, debate: DebateRecord, configs: dict[str, Agen
           f"({', '.join(p.plan_id for p in packet.exit_plans) or 'none'})")
 
     print("\n-- Debate --")
+    if debate.skipped:  # #163: no Bull or Bear call was made
+        print(f"SKIPPED (no Bull or Bear call): {debate.skip_reason}")
     for turn in debate.turns:
         # run.reason never quotes money values (count-only by design), so it is safe to print.
         status = "ok" if turn.run.ok else f"FAILED ({turn.run.reason_code}: {turn.run.reason})"
         print(f"\n[round {turn.round}] {turn.side.upper()} {status}")
         print(turn.case.model_dump_json(indent=2))
-    print(f"\nrounds planned {debate.rounds_planned}, run {debate.rounds_run}")
+    print(f"\nrounds planned {debate.rounds_planned}, run {debate.rounds_run}"
+          + (" (debate skipped)" if debate.skipped else ""))
     last_bear = next((t for t in reversed(debate.turns) if t.side == "bear"), None)
     bear_failed = last_bear is not None and not last_bear.run.ok
-    if debate.stopped_early and bear_failed:
+    if debate.skipped:
+        print("stopped early: n/a, the debate was skipped")
+    elif debate.stopped_early and bear_failed:
         print("stopped early: YES, the Bear failed and the debate failed closed (counted as fatal)")
     elif debate.stopped_early:
         print("stopped early: YES, the Bear marked an objection fatal")
