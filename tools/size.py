@@ -86,7 +86,7 @@ def size_position(plan: Plan, limits: Limits, *, slippage: Decimal) -> dict:
             "symbol": symbol,
             "side": "buy",
             "qty": shares,
-            "type": "market",
+            "type": "limit",  # sent as a limit at entry + slippage (#136)
             "order_class": "bracket",
             "entry": str(plan.entry),
             "stop_loss": str(plan.stop),

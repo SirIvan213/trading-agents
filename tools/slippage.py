@@ -1,6 +1,7 @@
-"""Slippage allowance for market entries (issue #68).
+"""Slippage allowance for marketable entries (issue #68).
 
-Orders are market orders, so they fill near the ask when sent, not at the plan's entry.
+Entries fill near the ask when sent, not at the plan's entry. Since Phase 5 (#136) the entry is
+sent as a LIMIT at entry + allowance, so the exchange enforces the price sizing assumed.
 Sizing therefore adds a per-share allowance to the risk, and an order is refused when the live
 ask is already above entry + allowance (the price moved further than the allowance covers):
 

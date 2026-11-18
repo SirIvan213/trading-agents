@@ -527,3 +527,51 @@ def test_ledger_is_sealed_unaccepted_when_run_analysts_raises(monkeypatch):
         asyncio.run(orch.run_analysts(SYMBOL, NOON, data=FakeAllData(), clients=Router({}),
                                       limits=LIMITS, ledger=led))
     assert led.sealed and led.plan_ids() == []
+
+
+# ===================== Phase 5 PR 3: sending, only with a broker =====================
+
+def go_send(tmp_path, scr, broker, *, ask=lambda _: "yes"):
+    router = Router(scr)
+    journal = Journal(tmp_path / "send.jsonl")
+    clock = StepClock(NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=40))
+    data = QuotingData(FakeAllData(), clock, SYMBOL, "103.10")
+    seen = []
+    result = run_decision(SYMBOL, data=data, clients=router, journal=journal, clock=clock,
+                          ask=lambda prompt: seen.append(prompt) or ask(prompt), rounds=1,
+                          timeout_s=10, broker=broker)
+    return result, journal, seen
+
+
+def test_with_a_broker_an_approval_is_sent_once(tmp_path):
+    from tests.order_helpers import FakePaperBroker
+    broker = FakePaperBroker()
+    result, journal, seen = go_send(tmp_path, scripts(), broker)
+    assert result.outcome.status == APPROVED and result.sent.status == "submitted"
+    assert [e["status"] for e in raw_lines(journal)] == [APPROVED, "submitting", "submitted"]
+    assert broker.names() == ["verify", "submit"]
+    assert "SENT to the paper broker" in seen[0] and "approve and SEND" in seen[0]
+    assert "SENT to the paper broker" in result.ticket and "send" in result.timings_ms
+
+
+def test_with_a_broker_a_declined_ticket_never_reaches_it(tmp_path):
+    from tests.order_helpers import FakePaperBroker
+    broker = FakePaperBroker()
+    result, journal, _ = go_send(tmp_path, scripts(), broker, ask=lambda _: "no")
+    assert result.outcome.status == "declined" and result.sent is None
+    assert broker.calls == []
+
+
+def test_with_a_broker_a_pass_never_reaches_it(tmp_path):
+    from tests.order_helpers import FakePaperBroker
+    broker = FakePaperBroker()
+    result, _, _ = go_send(tmp_path, scripts(trader=trader_json(action="PASS", plan_id=None)),
+                           broker)
+    assert result.outcome is None and result.sent is None and broker.calls == []
+
+
+def test_without_a_broker_nothing_is_sent(tmp_path):
+    result, _, journal = go(tmp_path, scripts())
+    assert result.outcome.status == APPROVED and result.sent is None
+    assert "NOT sent to a broker" in result.ticket
+    assert [e["status"] for e in raw_lines(journal)] == [APPROVED]

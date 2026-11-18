@@ -20,6 +20,11 @@ the debate, the Trader and the human together must fit inside it. Therefore:
     that went stale while the human read it.
 Elapsed time is measured from the analysts' start, which is no later than any plan's as_of,
 so the check is conservative. `DecisionResult.budget` records the ages at each step.
+
+Sending (Phase 5 PR 3): only when the caller passes a `broker` (tools.broker's paper client).
+The ticket then says the approved order is SENT to the Alpaca paper account, and an approval
+goes to pipeline.send.send_approved (re-check under the lock, write-ahead "submitting", one
+POST, never resent). Without a broker nothing is sent, as in Phase 4.
 """
 from __future__ import annotations
 
@@ -35,6 +40,7 @@ from agents.orchestrator import AGENTS, load_checked_limits, run_analysts
 from agents.schemas import DebateRecord, DecisionPacket
 from agents.trader import TraderRun, forced_pass, run_trader
 from journal.log import Journal, JournalError, JournalLockTimeout
+from journal.orders import APPROVED
 from pipeline.events import events_from
 from pipeline.ledger import PlanLedger
 from pipeline.market import NY
@@ -49,6 +55,7 @@ from pipeline.order_flow import (
     render_ticket,
     wall_clock,
 )
+from pipeline.send import SendResult, send_approved
 from tools.scan import validate_symbols
 
 ALL_AGENTS = (*AGENTS, "bull", "bear", "trader")
@@ -68,10 +75,13 @@ class DecisionResult:
     outcome: Outcome | None
     timings_ms: dict[str, int] = field(default_factory=dict)
     budget: dict[str, float | int | None] = field(default_factory=dict)
+    sends: bool = False  # a broker was given: an approval is sent to the paper account
+    sent: SendResult | None = None  # what happened at the broker (None: nothing sent)
 
     @property
     def ticket(self) -> str | None:
-        return render_ticket(self.proposal) if self.proposal is not None else None
+        return (render_ticket(self.proposal, sends=self.sends)
+                if self.proposal is not None else None)
 
 
 def _client_for(clients: dict[str, Any] | Any, agent: str) -> Any:
@@ -124,12 +134,17 @@ def run_decision(
     clock: Clock = wall_clock,
     ask: Ask | None = input,
     timeout_s: float | None = None,
+    broker: Any | None = None,
 ) -> DecisionResult:
     """Run one decision. `ask=None` stops after the ticket (no approval, nothing journaled
     as approved). A PASS, or a BUY that cannot be sized or fails the risk check, ends with
     no order. If the journal cannot be locked or written during approval (#129), the outcome
     is "journal_locked" (or "journal_error"), nothing is approved, and the attempt is
     journaled (one retry).
+
+    With a `broker` (the Alpaca paper client), an approved order is sent once through
+    pipeline.send.send_approved; `result.sent` says what happened. Without one nothing is
+    sent.
 
     Raises ValueError before any API call for: a bad symbol, an invalid limits config, a bad
     agent config or debate rounds, a naive clock, or `timeout_s` not below
@@ -179,7 +194,8 @@ def run_decision(
     timings["trader"] = int((time.monotonic() - t0) * 1000)
 
     decision = trader.decision
-    result = DecisionResult(packet, debate, trader, ledger.run_id, None, None, timings, budget)
+    result = DecisionResult(packet, debate, trader, ledger.run_id, None, None, timings, budget,
+                            sends=broker is not None)
     if decision.action != "BUY" or not decision.plan_id:
         journal.append({
             "status": "pass", "run_id": ledger.run_id, "symbol": packet.symbol,
@@ -200,7 +216,8 @@ def run_decision(
     t0 = time.monotonic()
     try:
         result.outcome = approve(result.proposal, ledger, journal=journal, ask=ask,
-                                 clock=clock, quotes=quotes, events=events)
+                                 clock=clock, quotes=quotes, events=events,
+                                 sends=broker is not None)
     except JournalError as exc:
         # #129: the journal lock timed out (or a write failed) after the answer. Nothing is
         # approved, since an approval exists only once its entry is written, but the attempt
@@ -208,4 +225,8 @@ def run_decision(
         result.outcome = _journal_failed(result.proposal, journal, exc, clock)
     timings["approval"] = int((time.monotonic() - t0) * 1000)
     budget["plan_age_at_approval_s"] = result.outcome.plan_age_s
+    if broker is not None and result.outcome.status == APPROVED:
+        t0 = time.monotonic()
+        result.sent = send_approved(result.outcome, journal=journal, broker=broker, clock=clock)
+        timings["send"] = int((time.monotonic() - t0) * 1000)
     return result

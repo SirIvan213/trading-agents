@@ -1,5 +1,5 @@
-"""Alpaca PAPER broker client (Phase 5 PR 2, #154). Nothing in the pipeline calls it yet:
-sending approved orders is PR 3.
+"""Alpaca PAPER broker client (Phase 5 PR 2, #154). pipeline/send.py (PR 3) sends approved
+orders through it.
 
 PAPER ONLY (CLAUDE.md rule 1). The base URL is fixed to the paper API and cannot be changed
 or passed in; there is no live path. The client refuses to start unless `limits.paper is
@@ -26,8 +26,9 @@ What Alpaca documents (read 2026-11-13, docs.alpaca.markets), and what it does n
   - Partial fills: the take-profit and stop-loss legs "won't be active until the first order
     is completely filled", and "if any one of the orders is canceled, any remaining open
     order in the group is canceled". How the legs are sized after a PARTIAL entry fill whose
-    remainder is cancelled is not documented: to confirm with a paper test before PR 3 sends
-    (#136 decision: keep the filled quantity with its legs).
+    remainder is cancelled is not documented. Ivan's decision (#196): don't depend on it.
+    Every open position must always have a working stop for its full quantity; the
+    reconciler (PR 4) flattens one that doesn't, at market, and alerts.
   - Errors: {"code": number, "message": string}; POST /v2/orders documents 403 (buying power
     or shares not sufficient) and 422 (input parameters not recognized).
   - DELETE /v2/positions?cancel_orders=true answers 207 with one {"symbol", "status", "body"}

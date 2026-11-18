@@ -168,7 +168,7 @@ def test_clean_buy_with_a_trader_buy_matches(smoke, capsys):
     assert line.startswith("expected BUY | actual BUY (fatal Bear: no)")
     assert line.endswith("-> MATCH")
     assert "Buy 37 shares of BRKO" in out and "80.38" in out and "81.40" in out
-    assert "slippage allowance 0.09 per share (live ask 80.73)" in out
+    assert "+ slippage allowance 0.09)" in out and "(live ask 80.73)" in out
     assert seen[0][0] == "BRKO" and isinstance(seen[0][2], ScenarioData)
     assert seen[0][1].isoformat() == "2026-11-03T11:00:00-05:00"
     assert len(client.calls) == 3

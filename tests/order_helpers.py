@@ -408,3 +408,80 @@ def verdict_for(gate, now: datetime, symbol: str = "TSLA") -> dict:
     """check_order for the sized order at `now` with this gate result and nothing else wrong."""
     from tools.risk_check import DayState, check_order
     return check_order(sized_order(symbol), _example_limits(), DayState(), now, gate=gate)
+
+
+# ---- the paper broker, faked (Phase 5 PR 3: pipeline/send.py) ----
+
+BROKER_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "alpaca_broker"
+
+
+def broker_reply(body: dict, *, order_id: str = "ord-1", **over) -> dict:
+    """Alpaca's reply to a bracket POST `body` (tools.broker.bracket_request), parsed:
+    the saved bracket fixture with the request's id, symbol, quantity and limit price."""
+    from tools.broker import parse_order
+    raw = json.loads((BROKER_FIXTURES / "order_bracket_new.json").read_text(encoding="utf-8"))
+    raw.update({"id": order_id, "client_order_id": body["client_order_id"],
+                "symbol": body["symbol"], "qty": body["qty"],
+                "limit_price": body["limit_price"]})
+    for leg in raw.get("legs") or []:
+        leg.update({"symbol": body["symbol"], "qty": body["qty"]})
+    raw.update(over)
+    return parse_order(raw)
+
+
+class FakePaperBroker:
+    """The calls pipeline/send.py makes on tools.broker.AlpacaPaperBroker, offline. Records
+    every call; `submit` / `lookup` / `verify` / `cancel` may be set to an exception to raise
+    or (submit, lookup) a reply. By default the POST is accepted and a lookup finds the order
+    once it was posted."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.held: dict[str, dict] = {}  # client_order_id -> the broker's order
+        self.verify: Exception | None = None
+        self.submit: object = None  # None: accept; an Exception: raise; a dict: reply
+        self.lookup: object = "held"  # "held": what was posted; an Exception; a dict; None
+        self.cancel: Exception | None = None
+        self.hold_on_failure = False  # a failed POST that still created the order
+        self.during_call = None  # called (with the method name) inside every call
+
+    def _hook(self, name: str) -> None:
+        if self.during_call is not None:
+            self.during_call(name)
+
+    def verify_paper_account(self) -> dict:
+        self.calls.append(("verify",))
+        self._hook("verify")
+        if self.verify is not None:
+            raise self.verify
+        return {"account_number": "PA-FAKE", "status": "ACTIVE"}
+
+    def submit_bracket(self, order: dict, client_order_id: str) -> dict:
+        from tools.broker import bracket_request
+        self.calls.append(("submit", client_order_id))
+        self._hook("submit")
+        body = bracket_request(order, client_order_id)
+        if isinstance(self.submit, Exception):
+            if self.hold_on_failure:
+                self.held[client_order_id] = broker_reply(body)
+            raise self.submit
+        reply = self.submit if isinstance(self.submit, dict) else broker_reply(body)
+        self.held[client_order_id] = reply
+        return reply
+
+    def get_order_by_client_id(self, client_order_id: str) -> dict | None:
+        self.calls.append(("lookup", client_order_id))
+        self._hook("lookup")
+        if isinstance(self.lookup, Exception):
+            raise self.lookup
+        if self.lookup == "held":
+            return self.held.get(client_order_id)
+        return self.lookup  # type: ignore[return-value]
+
+    def cancel_order(self, order_id: str) -> None:
+        self.calls.append(("cancel", order_id))
+        if self.cancel is not None:
+            raise self.cancel
+
+    def names(self) -> list[str]:
+        return [c[0] for c in self.calls]

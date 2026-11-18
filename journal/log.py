@@ -254,7 +254,7 @@ class Journal:
                     done.append(cid)
         return done
 
-    def day_state(self, now: datetime) -> DayState:
+    def day_state(self, now: datetime, *, exclude: str | None = None) -> DayState:
         """Today's trades, risk, open positions, realized losses and stop-outs (New York
         date of `now`), replayed from the order lifecycle (journal/orders.py, #109):
 
@@ -284,6 +284,8 @@ class Journal:
         trades, risk, lost, opened = 0, Decimal("0"), Decimal("0"), 0
         stopped: set[str] = set()
         for o in self.orders().values():
+            if exclude is not None and o.client_order_id == exclude:
+                continue  # the sender re-checks the day without the order it is sending
             day = o.approved_at.astimezone(NY).date()
             if o.status == APPROVED:
                 if o.live_unsent(now):
