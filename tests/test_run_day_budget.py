@@ -83,6 +83,53 @@ def test_blocked_a_cap_above_claude_md_refuses_to_start(name):
         config_from_dict(cfg(**{f"caps.{name}": CEILINGS[name] + 1}))
 
 
+@pytest.mark.parametrize("key", ["cycle_minute", "candidate_per_cycle", "unvierse"])
+def test_blocked_a_misspelled_top_level_key_refuses(key):
+    with pytest.raises(RunDayConfigError, match="unknown key"):
+        config_from_dict({**EXAMPLE, key: 5})
+
+
+@pytest.mark.parametrize("scan_time", ["09:00", "09:30", "16:00", "17:15", "9", "noon"])
+def test_blocked_a_scan_time_outside_the_session_refuses(scan_time):
+    with pytest.raises(RunDayConfigError, match="scan_time"):
+        config_from_dict(cfg(scan_time=scan_time))
+
+
+def test_blocked_more_than_2_candidates_per_cycle_refuses():
+    """Ivan's decision on #156: at most 2 candidates per cycle."""
+    with pytest.raises(RunDayConfigError, match="candidates_per_cycle"):
+        config_from_dict(cfg(candidates_per_cycle=3))
+    assert config_from_dict(cfg(candidates_per_cycle=1)).candidates_per_cycle == 1
+
+
+@pytest.mark.parametrize("name", list(CEILINGS))
+def test_blocked_a_hand_built_cap_above_claude_md_is_refused_by_the_budget(tmp_path, name):
+    caps = Caps(**{**vars(CAPS), name: CEILINGS[name] + 1})
+    with pytest.raises(RunDayConfigError, match=f"caps.{name}"):
+        DailyBudget(caps, DAY, tmp_path)
+
+
+def test_a_snapshot_never_writes_the_budget_file(tmp_path):
+    b = budget(tmp_path)
+    before = b.path.stat().st_mtime_ns
+    b.path.chmod(0o444)  # read-only: a write would fail
+    try:
+        for _ in range(3):
+            assert b.snapshot()["decisions"] == 0
+        assert b.decided("AAPL") is False
+    finally:
+        b.path.chmod(0o644)
+    assert b.path.stat().st_mtime_ns == before
+
+
+def test_already_decided_is_its_own_kind_of_refusal(tmp_path):
+    from pipeline.budget import AlreadyDecided
+    b = budget(tmp_path)
+    b.start_decision("AAPL")
+    with pytest.raises(AlreadyDecided):
+        b.start_decision("AAPL")
+
+
 def test_blocked_a_missing_caps_object_or_an_unknown_cap_refuses():
     with pytest.raises(RunDayConfigError, match="caps is missing"):
         config_from_dict(cfg(caps=...))

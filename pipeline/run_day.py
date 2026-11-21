@@ -53,6 +53,7 @@ from journal.log import Journal, JournalError
 from journal.orders import APPROVED
 from pipeline.budget import (
     STATE_DIR,
+    AlreadyDecided,
     CapReached,
     DailyBudget,
     RunDayConfig,
@@ -243,9 +244,9 @@ def decide_one(day: Day, symbol: str, limits: Any) -> str | None:
         day.skipped.add(symbol)
         day.write(f"{symbol} skipped: {exc.reason}")
         return None
+    except AlreadyDecided:
+        return None
     except CapReached as exc:
-        if "already decided" in str(exc):
-            return None
         day.note("run_day_cap", reason=str(exc))
         return str(exc)
     except ValueError as exc:  # a config problem found before any call: stop the day

@@ -50,6 +50,10 @@ CONFIG_PATH = CONFIG_DIR / "run_day.json"
 CEILINGS = {"max_decisions": 10, "max_tokens": 600_000, "max_fmp_requests": 3,
             "max_av_calls": 5}
 MAX_UNIVERSE = 200  # symbols in the scan universe (two snapshot requests)
+MAX_CANDIDATES_PER_CYCLE = 2  # Ivan's decision (#156): at most 2 decisions per cycle
+CONFIG_KEYS = frozenset({"caps", "universe", "scan_time", "cycle_minutes",
+                         "candidates_per_cycle"})
+SESSION_OPEN, SESSION_CLOSE = time(9, 30), time(16, 0)
 REQUESTS = {"fmp": "max_fmp_requests", "av": "max_av_calls"}
 LOCK_TIMEOUT_S = 10.0
 
@@ -61,6 +65,11 @@ class RunDayConfigError(ValueError):
 class CapReached(RuntimeError):
     """A daily cap is reached (or the budget cannot be trusted): nothing more of that kind
     may start today."""
+
+
+class AlreadyDecided(CapReached):
+    """This symbol was already decided today (one decision per symbol per day). Not a cap:
+    the day goes on with other symbols."""
 
 
 @dataclass(frozen=True)
@@ -91,6 +100,9 @@ def config_from_dict(d: object) -> RunDayConfig:
     value): every cap is required, a whole number from 1 to its CLAUDE.md ceiling."""
     if not isinstance(d, dict):
         raise RunDayConfigError("run_day config must be a JSON object")
+    unknown_keys = set(d) - CONFIG_KEYS
+    if unknown_keys:  # a misspelled key must not be silently ignored
+        raise RunDayConfigError(f"unknown key(s): {', '.join(sorted(map(str, unknown_keys)))}")
     caps_raw = d.get("caps")
     if not isinstance(caps_raw, dict):
         raise RunDayConfigError("caps is missing")
@@ -117,11 +129,13 @@ def config_from_dict(d: object) -> RunDayConfig:
         scan_time = time(int(hh), int(mm))
     except (ValueError, TypeError):
         raise RunDayConfigError("scan_time must be HH:MM") from None
+    if not SESSION_OPEN < scan_time < SESSION_CLOSE:
+        raise RunDayConfigError("scan_time must be inside the regular session (09:30-16:00)")
     return RunDayConfig(
         caps=Caps(**caps), universe=tuple(syms), scan_time=scan_time,
         cycle_minutes=_whole(d.get("cycle_minutes", 5), "cycle_minutes", low=1, high=60),
         candidates_per_cycle=_whole(d.get("candidates_per_cycle", 2), "candidates_per_cycle",
-                                    low=1, high=5),
+                                    low=1, high=MAX_CANDIDATES_PER_CYCLE),
     )
 
 
@@ -169,12 +183,16 @@ class DailyBudget:
     missing after the day started, lock timeout) raises CapReached: fail closed."""
 
     def __init__(self, caps: Caps, day: date, state_dir: Path = STATE_DIR) -> None:
+        for name, ceiling in CEILINGS.items():  # a hand-built Caps cannot pass CLAUDE.md
+            value = getattr(caps, name, None)
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= ceiling:
+                raise RunDayConfigError(f"caps.{name} must be a whole number from 1 to "
+                                        f"{ceiling}")
         self.caps = caps
         self.day = day
         self.state_dir = Path(state_dir)
         self.path = self.state_dir / f"budget-{day.isoformat()}.json"
         self.lock_path = self.state_dir / "budget.lock"
-        self._started = False  # this object created or opened today's file
         self._mutex = threading.Lock()  # one thread at a time in this process
 
     # ---- file access (call under the locks) ----
@@ -237,11 +255,17 @@ class DailyBudget:
                 raise CapReached("daily budget lock timed out") from None
             except OSError:
                 raise CapReached("daily budget file could not be written") from None
-        self._started = True
 
     def snapshot(self) -> dict[str, Any]:
-        """Today's counts (a copy). CapReached if the budget cannot be trusted."""
-        return self._update(lambda s: json.loads(json.dumps(s)))
+        """Today's counts, read under the locks and never written (a heartbeat or a check
+        must not end the day on a write failure). CapReached if the budget cannot be
+        trusted."""
+        with self._mutex:
+            try:
+                with self._locked():
+                    return self._read()
+            except LockTimeout:
+                raise CapReached("daily budget lock timed out") from None
 
     def tokens_committed(self, s: dict[str, Any]) -> int:
         return s["tokens_used"] + sum(s["reservations"].values())
@@ -259,7 +283,7 @@ class DailyBudget:
             if self.tokens_committed(s) >= self.caps.max_tokens:
                 raise CapReached(f"token cap reached ({self.caps.max_tokens} today)")
             if sym in s["symbols"]:
-                raise CapReached(f"{sym} was already decided today")
+                raise AlreadyDecided(f"{sym} was already decided today")
             s["decisions"] += 1
             s["symbols"].append(sym)
             return s["decisions"]
