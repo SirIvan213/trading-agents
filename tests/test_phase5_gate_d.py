@@ -736,7 +736,7 @@ class RestampedScenario(ScenarioData):
 
 
 def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=None,
-                 bypass_prescreen=False, stub_analysts=True):
+                 bypass_prescreen=False, stub_analysts=True, before_analysts=None):
     """run_decision on a saved scenario with every model faked to BUY plan-1. The analysts are
     one stub that records the scenario's real plan; the debaters and the Trader are scripted.
     `bypass_prescreen` turns off run_decision's free SEC reporting check (#170), to prove the
@@ -774,7 +774,7 @@ def run_scenario(monkeypatch, tmp_path, name, *, trader_confidence=0.8, answers=
         return (answers or "yes")
 
     result = run_decision(symbol, data=data, clients=client, journal=journal, clock=clock,
-                          ask=ask, rounds=1, timeout_s=10)
+                          ask=ask, rounds=1, timeout_s=10, before_analysts=before_analysts)
     return result, journal, asked, client
 
 

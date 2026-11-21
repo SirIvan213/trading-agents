@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -166,6 +167,7 @@ def run_decision(
     ask: Ask | None = input,
     timeout_s: float | None = None,
     broker: Any | None = None,
+    before_analysts: Callable[[], object] | None = None,
 ) -> DecisionResult:
     """Run one decision. `ask=None` stops after the ticket (no approval, nothing journaled
     as approved). A PASS, or a BUY that cannot be sized or fails the risk check, ends with
@@ -185,6 +187,10 @@ def run_decision(
     not show an 8-K item 2.02 in the last 100 days (#170): a foreign private issuer, no SEC
     filer, or SEC unavailable. The event gate could only call it UNKNOWN, so no decision is
     spent on it. The skip is journaled (best effort).
+
+    `before_analysts` (run_day, #156) is called after that check and before the first
+    billed call: the moment a decision starts and counts toward the day's cap. If it raises
+    (a cap is reached), the exception propagates and no billed call is made.
     """
     try:
         validate_symbols([symbol])
@@ -221,6 +227,9 @@ def run_decision(
             "checked_at": checked.astimezone(NY).isoformat(),
         })
         raise SymbolSkipped(sym, reason)
+
+    if before_analysts is not None:
+        before_analysts()  # the decision starts here (run_day counts it); raise = no call
 
     started = clock()  # the plan-age clock starts here, after the SEC check
     t0 = time.monotonic()
