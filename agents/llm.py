@@ -81,11 +81,14 @@ def config_for(agent: str) -> AgentConfig:
     return AgentConfig(**kwargs)
 
 
-def make_client():  # noqa: ANN201 - returns anthropic.Anthropic
-    """Return anthropic.Anthropic using ANTHROPIC_API_KEY from the environment."""
+def make_client(*, max_retries: int | None = None):  # noqa: ANN201 - anthropic.Anthropic
+    """Return anthropic.Anthropic using ANTHROPIC_API_KEY from the environment.
+    `max_retries` overrides the SDK's default (run_day passes 0: its meter retries once)."""
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key or not key.strip():
         raise RuntimeError("ANTHROPIC_API_KEY must be set in the environment")
     import anthropic
 
-    return anthropic.Anthropic(api_key=key)
+    if max_retries is None:
+        return anthropic.Anthropic(api_key=key)
+    return anthropic.Anthropic(api_key=key, max_retries=max_retries)
