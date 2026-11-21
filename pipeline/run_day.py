@@ -30,9 +30,10 @@ A decision counts when it starts (run_decision's before_analysts hook, after the
 check). Each ticket is asked in the watched terminal until the decision's start +
 max_plan_age_s (never after the plan's expiry); no answer by then is declined.
 
-A heartbeat file (journal/state/run_day.heartbeat.json) is rewritten at every step and at
-least every HEARTBEAT_S while waiting. Alerts are a console line and a journal entry (desktop
-notifications are a follow-up).
+A heartbeat file (journal/state/run_day.heartbeat.json) is rewritten at every step and, by a
+background thread, at least every HEARTBEAT_S seconds of real time, during decisions too: a
+heartbeat older than that means run_day stopped. Alerts are a console line and a journal
+entry (desktop notifications are a follow-up).
 """
 from __future__ import annotations
 
@@ -41,7 +42,9 @@ import importlib
 import json
 import os
 import sys
+import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -125,6 +128,7 @@ class Day:
     broker: Any | None = None
     write: Callable[[str], None] = print
     phase: str = "starting"
+    pulse_s: float | None = None  # the background heartbeat's period (None: HEARTBEAT_S)
     listings: dict[str, dict] = field(default_factory=dict)
     reporting: dict[str, dict] = field(default_factory=dict)
     skipped: set[str] = field(default_factory=set)  # SymbolSkipped today (#170): not retried
@@ -166,7 +170,8 @@ class Day:
                 "phase": self.phase, **counts}
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
-            tmp = self.heartbeat_path.with_name(f"run_day.heartbeat.{os.getpid()}.tmp")
+            tmp = self.heartbeat_path.with_name(
+                f"run_day.heartbeat.{os.getpid()}.{uuid.uuid4().hex}.tmp")
             tmp.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
             os.replace(tmp, self.heartbeat_path)
         except OSError:
@@ -197,13 +202,16 @@ def scan_universe(day: Day, limits: Any) -> dict:
     except Exception as exc:  # noqa: BLE001 - a data error is an empty scan, never a crash
         day.note("run_day_scan", ok=False, reason=f"snapshots failed ({type(exc).__name__})")
         return {"candidates": [], "rejected": []}
+    listings, reporting = {}, {}
     for s in syms:
-        if s not in day.listings:
-            day.listings[s] = listing_input(day.data, s)
-        if s not in day.reporting:
-            day.reporting[s] = reporting_check(day.data, s, now)
-    out = run_scan(snaps, ScanCriteria(), limits, now, listings=day.listings,
-                   reporting=day.reporting)
+        listings[s] = day.listings.get(s) or listing_input(day.data, s)
+        if not listings[s].get("fetch_failed"):  # a failed lookup is asked again next scan
+            day.listings[s] = listings[s]
+        reporting[s] = day.reporting.get(s) or reporting_check(day.data, s, now)
+        if not reporting[s].get("fetch_failed"):
+            day.reporting[s] = reporting[s]
+    out = run_scan(snaps, ScanCriteria(), limits, now, listings=listings,
+                   reporting=reporting)
     day.note("run_day_scan", ok=True, candidates=[c["symbol"] for c in out["candidates"]],
              rejected=len(out["rejected"]))
     return out
@@ -227,12 +235,17 @@ def decide_one(day: Day, symbol: str, limits: Any) -> str | None:
     """One decision for `symbol`. Returns a reason to stop the day (a cap), or None."""
     assert day.budget is not None
     start = day.clock()
-    deadline = start + timedelta(seconds=limits.max_plan_age_s)
-    ask = day.terminal.asker(deadline, day.clock)
+    age = timedelta(seconds=limits.max_plan_age_s)
+    # The plan-age clock starts after the free SEC check, when the decision is counted: the
+    # ticket's deadline counts from there, never later than the plan's expiry.
+    due = {"at": start + age}
+    ask = day.terminal.asker(lambda: due["at"], day.clock)
     budget = day.budget
+    day.terminal.last_timed_out = False  # S4: never carried over from the last decision
 
     def count_it() -> None:
         budget.start_decision(symbol)  # CapReached: no billed call is made
+        due["at"] = day.clock() + age
         day.beat(f"deciding {symbol}")
 
     day.write(f"\n=== decision: {symbol} at {start.astimezone(NY):%H:%M:%S} ET ===")
@@ -249,9 +262,9 @@ def decide_one(day: Day, symbol: str, limits: Any) -> str | None:
     except CapReached as exc:
         day.note("run_day_cap", reason=str(exc))
         return str(exc)
-    except ValueError as exc:  # a config problem found before any call: stop the day
-        day.alert(f"decision for {symbol} refused before any call: {exc}")
-        return f"refused: {exc}"
+    except ValueError as exc:  # a config or validation problem: stop the day, safely
+        day.alert(f"decision for {symbol} stopped ({type(exc).__name__}): {exc}")
+        return f"stopped: {type(exc).__name__}"
     except Exception as exc:  # noqa: BLE001 - one decision's crash never ends the day
         day.alert(f"decision for {symbol} failed ({type(exc).__name__})", symbol=symbol)
         return None
@@ -331,8 +344,14 @@ def run_day(day: Day, *, limits: Any | None = None) -> int:
 
 
 def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
-    budget = DailyBudget(day.config.caps, today, day.state_dir)
-    day.budget = budget
+    # S5: ONE budget for the run. The live build made it for the metered client and data;
+    # if the New York day changed since, refuse rather than count against two days.
+    if day.budget is None:
+        day.budget = DailyBudget(day.config.caps, today, day.state_dir)
+    elif day.budget.day != today:
+        day.write("refused: the New York day changed during start-up; start again")
+        return REFUSED
+    budget = day.budget
     try:
         budget.open_day(started_today=started_today(day.journal, today))
     except CapReached as exc:
@@ -342,9 +361,51 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
     except JournalError as exc:
         day.write(f"refused: journal unreadable: {exc}")
         return REFUSED
-    day.skipped |= skipped_today(day.journal, today)
-    day.note("run_day_start", day=today.isoformat(), pid=os.getpid(),
-             caps=vars(day.config.caps), universe=list(day.config.universe))
+    try:
+        day.skipped |= skipped_today(day.journal, today)
+        # S6: the day-started marker is REQUIRED: without it, a lost budget file could
+        # later read as a fresh day.
+        day.journal.append({"status": "run_day_start", "day": today.isoformat(),
+                            "at": day.clock().astimezone(NY).isoformat(), "pid": os.getpid(),
+                            "caps": vars(day.config.caps),
+                            "universe": list(day.config.universe)})
+    except JournalError as exc:
+        day.write(f"\aALERT: refused: the run_day_start entry could not be journaled: {exc}")
+        return REFUSED
+    pulse = _Pulse(day)
+    pulse.start()
+    try:
+        return _the_day(day, limits, now, today, budget)
+    except CapReached as exc:  # S9: a budget doubt anywhere ends the day cleanly
+        return _end(day, today, str(exc))
+    except Exception as exc:  # noqa: BLE001 - S9: never exit without run_day_end
+        day.alert(f"run_day stopped on an unexpected error ({type(exc).__name__})")
+        return _end(day, today, f"error: {type(exc).__name__}")
+    finally:
+        pulse.stop()
+
+
+class _Pulse(threading.Thread):
+    """Rewrites the heartbeat every day.pulse_s (default HEARTBEAT_S) seconds of real time,
+    so a decision (analysts, debate, Trader, up to max_plan_age_s of approval) never looks
+    like a stopped run."""
+
+    def __init__(self, day: Day) -> None:
+        super().__init__(daemon=True, name="run-day-heartbeat")
+        self.day = day
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        period = self.day.pulse_s if self.day.pulse_s is not None else HEARTBEAT_S
+        while not self._stop_event.wait(period):
+            self.day.beat()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self.join(timeout=5)
+
+
+def _the_day(day: Day, limits: Any, now: datetime, today: date, budget: DailyBudget) -> int:
     day.beat("started")
     try:
         hours = session_hours(today)
@@ -462,16 +523,17 @@ def _build_live(config: RunDayConfig, *, clock: Callable[[], datetime], send: bo
     if (ROOT / ".env").is_file():
         load_dotenv(ROOT / ".env")  # keys only from the environment / .env, never logged
     today = clock().astimezone(NY).date()
-    budget = DailyBudget(config.caps, today, STATE_DIR)  # metering's view of the same file
+    budget = DailyBudget(config.caps, today, STATE_DIR)
     from agents.llm import make_client
     client = MeteredClient(make_client(max_retries=0), budget)
     broker = None
     if send:  # unreachable today: main refuses --send until broker_allowed()
         from tools.broker import AlpacaPaperBroker
         broker = AlpacaPaperBroker(load_checked_limits())
+    # ONE budget (S5): the metered client, the metered data and the day's loop share it
     return Day(config=config, data=metered_live_data(budget), clients=client,
                journal=Journal(), clock=clock, sleep=time.sleep, terminal=WatchedTerminal(),
-               state_dir=STATE_DIR, broker=broker)
+               state_dir=STATE_DIR, broker=broker, budget=budget)
 
 
 if __name__ == "__main__":

@@ -294,8 +294,13 @@ def filings_input(data: Any, symbol: str) -> dict:
 def reporting_check(data: Any, symbol: str, now: datetime) -> dict:
     """tools.event_gate.reporting_coverage on `data`'s SEC submissions (#170): is `symbol`
     proven to report quarterly? Free (SEC EDGAR), so it runs before any billed call. Never
-    raises for a data failure: that is "covered": False with the reason."""
-    return reporting_coverage(symbol, now, filings_input(data, symbol))
+    raises for a data failure: that is "covered": False with the reason, and
+    "fetch_failed": True when the SEC request itself failed (a caller may ask again)."""
+    filings = filings_input(data, symbol)
+    out = reporting_coverage(symbol, now, filings)
+    if filings.get("ok") is not True:
+        out["fetch_failed"] = True
+    return out
 
 
 def gate_inputs(data: Any, symbol: str, now: datetime, *, calendar: dict | None = None,

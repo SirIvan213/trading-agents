@@ -500,3 +500,205 @@ def test_blocked_a_cap_in_the_hook_stops_before_any_analyst(monkeypatch, tmp_pat
     with pytest.raises(CapReached):
         run_scenario(monkeypatch, tmp_path, "clean-buy", stub_analysts=False,
                      before_analysts=cap)
+
+
+# ======================= review fixes =======================
+
+class AskOnly(Decisions):
+    """Asks the ticket only for the symbols in `ask_for`, after `ask_after_s`."""
+
+    def __init__(self, clock, ask_for, **kw):
+        super().__init__(clock, **kw)
+        self.ask_for = ask_for
+
+    def __call__(self, symbol, *, before_analysts, ask, broker=None, **kw):
+        before_analysts()
+        self.calls.append((symbol, self.clock()))
+        self.clock.advance(60)
+        if symbol in self.ask_for:
+            self.clock.advance(LIMITS.max_plan_age_s)
+            ask("ORDER TICKET ...")
+        return SimpleNamespace(outcome=SimpleNamespace(status="pass", reason=None),
+                               record_error=None, ledger_run_id=f"run-{symbol}")
+
+
+def test_s4_a_timeout_is_never_carried_into_the_next_decision(tmp_path, monkeypatch):
+    clock = Clock(datetime(2026, 11, 23, 9, 30, tzinfo=NY))
+    dec = AskOnly(clock, ask_for=("SA",))
+    day, clock2, _, out = make_day(tmp_path, monkeypatch, universe=["SA", "SB"],
+                                   decisions=dec)
+    day.clock = day.data.clock = dec.clock = clock2
+    rd.run_day(day, limits=LIMITS)
+    assert [e["symbol"] for e in entries(day, "run_day_approval_timeout")] == ["SA"]
+
+
+def test_the_ticket_deadline_counts_from_when_the_decision_counts(tmp_path, monkeypatch):
+    """A slow SEC check (100 s) before the decision counts does not eat the human's time."""
+    clock = Clock(datetime(2026, 11, 23, 9, 30, tzinfo=NY))
+
+    class SlowSec(Decisions):
+        def __call__(self, symbol, *, before_analysts, ask, broker=None, **kw):
+            self.clock.advance(100)  # the free SEC check
+            before_analysts()
+            counted = self.clock()
+            self.calls.append((symbol, counted))
+            ask("ORDER TICKET ...")
+            self.deadline_seen = counted + timedelta(seconds=LIMITS.max_plan_age_s)
+            return SimpleNamespace(outcome=None, record_error=None, ledger_run_id="r")
+
+    dec = SlowSec(clock)
+    day, clock2, _, out = make_day(tmp_path, monkeypatch, universe=["SA"], decisions=dec)
+    day.clock = day.data.clock = dec.clock = clock2
+    console_out = []
+    day.terminal = WatchedTerminal(readline=lambda: threading.Event().wait() or "",
+                                   write=console_out.append)
+    monkeypatch.setattr(day.terminal, "ask",
+                        lambda prompt, timeout_s, deadline_label="": console_out.append(
+                            (timeout_s, deadline_label)) or "")
+    rd.run_day(day, limits=LIMITS)
+    (left, label) = next(x for x in console_out if isinstance(x, tuple))
+    assert left == LIMITS.max_plan_age_s  # the full plan age, from the count
+    assert label == dec.deadline_seen.strftime("%H:%M:%S ET")
+
+
+def test_s5_a_budget_for_another_day_refuses_to_start(tmp_path, monkeypatch):
+    day, clock, dec, out = make_day(tmp_path, monkeypatch, universe=["SA"])
+    day.budget = DailyBudget(day.config.caps, date(2026, 11, 22), day.state_dir)
+    assert rd.run_day(day, limits=LIMITS) == rd.REFUSED
+    assert dec.calls == [] and "day changed during start-up" in out[-1]
+
+
+def test_s6_the_start_marker_is_required(tmp_path, monkeypatch):
+    from journal.log import JournalError
+    day, clock, dec, out = make_day(tmp_path, monkeypatch, universe=["SA"])
+    real = Journal.append
+
+    def refuse_start(self, entry):
+        if entry.get("status") == "run_day_start":
+            raise JournalError("disk full")
+        return real(self, entry)
+
+    monkeypatch.setattr(Journal, "append", refuse_start)
+    assert rd.run_day(day, limits=LIMITS) == rd.REFUSED
+    assert dec.calls == [] and "run_day_start entry could not be journaled" in out[-1]
+
+
+def test_s8_a_failed_sec_lookup_is_asked_again_at_the_next_scan(tmp_path, monkeypatch):
+    clock = Clock(datetime(2026, 11, 23, 9, 30, tzinfo=NY))
+
+    class Flaky(Data):
+        def __init__(self, clock):
+            super().__init__(clock)
+            self.sec_calls = 0
+
+        def submissions(self, symbol):
+            self.sec_calls += 1
+            if self.sec_calls == 1:
+                raise TimeoutError  # SEC down at 09:40
+            return super().submissions(symbol)
+
+    data = Flaky(clock)
+    day, clock2, dec, out = make_day(tmp_path, monkeypatch, universe=["SA"], data=data)
+    day.clock = data.clock = dec.clock = clock2
+    rd.run_day(day, limits=LIMITS)
+    assert [s for s, _ in dec.calls] == ["SA"]  # decided once SEC answered
+    assert data.sec_calls == 2  # then cached: not asked again all day
+
+
+def test_reporting_check_marks_a_failed_sec_request():
+    from pipeline.events import reporting_check
+
+    class Down:
+        def submissions(self, symbol):
+            raise TimeoutError
+
+    class Foreign:
+        def submissions(self, symbol):
+            return None
+
+    now = datetime(2026, 11, 23, 10, 0, tzinfo=NY)
+    assert reporting_check(Down(), "SA", now)["fetch_failed"] is True
+    assert "fetch_failed" not in reporting_check(Foreign(), "SA", now)  # a real answer
+
+
+def test_s9_a_budget_doubt_inside_a_cycle_still_ends_the_day(tmp_path, monkeypatch):
+    day, clock, dec, out = make_day(tmp_path, monkeypatch, universe=["SA", "SB"])
+
+    def doubt(self, symbol):
+        raise CapReached("daily budget lock timed out")
+
+    monkeypatch.setattr(DailyBudget, "decided", doubt)
+    assert rd.run_day(day, limits=LIMITS) == rd.OK
+    assert entries(day, "run_day_end")[-1]["reason"] == "daily budget lock timed out"
+
+
+def test_s9_an_unexpected_error_alerts_and_still_ends_the_day(tmp_path, monkeypatch):
+    day, clock, dec, out = make_day(tmp_path, monkeypatch, universe=["SA"])
+
+    def boom(*a, **k):
+        raise KeyError("bug")
+
+    monkeypatch.setattr(rd, "scan_universe", boom)
+    assert rd.run_day(day, limits=LIMITS) == rd.OK
+    assert entries(day, "run_day_end")[-1]["reason"] == "error: KeyError"
+    assert any("unexpected error" in e["message"] for e in entries(day, "run_day_alert"))
+
+
+def test_s10_the_heartbeat_keeps_beating_during_a_decision(tmp_path, monkeypatch):
+    import time as _time
+    clock = Clock(datetime(2026, 11, 23, 9, 30, tzinfo=NY))
+
+    class Slow(Decisions):
+        def __call__(self, symbol, *, before_analysts, ask, broker=None, **kw):
+            before_analysts()
+            self.calls.append((symbol, self.clock()))
+            _time.sleep(0.4)  # a long decision, in real time
+            return SimpleNamespace(outcome=None, record_error=None, ledger_run_id="r")
+
+    dec = Slow(clock)
+    day, clock2, _, out = make_day(tmp_path, monkeypatch, universe=["SA"], decisions=dec)
+    day.clock = day.data.clock = dec.clock = clock2
+    day.pulse_s = 0.05
+    beats_during = []
+    real = rd.Day.beat
+
+    def spy(self, phase=None):
+        real(self, phase)
+        if dec.calls and self.phase.startswith("deciding"):
+            beats_during.append(1)
+
+    monkeypatch.setattr(rd.Day, "beat", spy)
+    rd.run_day(day, limits=LIMITS)
+    assert len(beats_during) >= 3  # the pulse beat while the decision ran
+
+
+def test_build_live_wires_one_metered_budget_and_no_broker(tmp_path, monkeypatch):
+    """_build_live, offline: the client is metered with the SDK's retries off, the FMP and
+    Alpha Vantage caches count every request, there is no broker, and the client, the data
+    and the loop share ONE budget for today."""
+    import agents.llm as llm
+    import pipeline.smoke_common as sc
+    from pipeline.metering import MeteredClient
+
+    made = []
+
+    class FakeAnthropic:
+        beta = SimpleNamespace(messages=SimpleNamespace(create=lambda **k: None))
+
+    def fake_make_client(**kw):
+        made.append(kw)
+        return FakeAnthropic()
+
+    monkeypatch.setattr(llm, "make_client", fake_make_client)
+    monkeypatch.setattr(sc, "load_dotenv", lambda path: None)  # never the real .env
+    monkeypatch.setattr(rd, "STATE_DIR", tmp_path / "state")
+    config = config_from_dict({**EXAMPLE, "universe": ["SA"]})
+    now = datetime(2026, 11, 23, 9, 30, tzinfo=NY)
+    day = rd._build_live(config, clock=lambda: now, send=False)
+    assert made == [{"max_retries": 0}]
+    assert isinstance(day.clients, MeteredClient) and day.broker is None
+    assert day.budget is not None and day.budget.day == MONDAY
+    assert day.clients._budget is day.budget
+    assert day.data._calendar.fetch.__name__ == "counted"  # FMP metered
+    assert day.data._av_calendar.fetch.__name__ == "counted"  # Alpha Vantage metered
+    assert day.state_dir == tmp_path / "state"
