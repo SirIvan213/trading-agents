@@ -4,9 +4,9 @@ request goes through the day's DailyBudget (pipeline/budget.py) BEFORE it is mad
 Claude (`MeteredClient`): wraps an Anthropic client built with the SDK's own retries OFF
 (max_retries=0), so no request can happen out of the meter's sight. For each call:
   1. reserve the call's worst case on disk (`worst_case_tokens`): its max_tokens plus a
-     deliberately high input estimate (serialized request length / 2), doubled when a
-     server-side fallback may re-run it. A reservation that would pass the day's cap is
-     refused (CapReached): the call is not made;
+     deliberately high input estimate (the whole serialized request, non-ASCII escaped, / 2),
+     times FALLBACK_FACTOR when a server-side fallback may re-run it. A reservation that
+     would pass the day's cap is refused (CapReached): the call is not made;
   2. make the call;
   3. settle the reservation to the call's actual tokens, CallRecord.billed_usage() (which
      sums usage.iterations, #58: a declined fallback hop counts).
@@ -38,16 +38,22 @@ from pipeline.budget import CapReached, DailyBudget
 RETRY_STATUSES = frozenset({408, 409, 429}) | frozenset(range(500, 600))
 RETRY_WAIT_S = 2.0
 CHARS_PER_TOKEN_BOUND = 2  # a token is rarely under ~3 characters: /2 over-estimates input
-FALLBACK_FACTOR = 2  # a server-side fallback can re-run the whole request once
+# A declined request runs "the next model" in a chain (Claude API docs, refusals and
+# fallback). Today's supported fallback targets are claude-opus-4-8 and claude-opus-5, so one
+# call can run up to 3 attempts (each billed up to its output). Raise this if the docs add
+# more targets.
+FALLBACK_FACTOR = 3
 
 
 def worst_case_tokens(kwargs: dict[str, Any]) -> int:
     """An upper bound for one call's tokens (input, output, cache reads and writes): the
-    serialized request / CHARS_PER_TOKEN_BOUND plus max_tokens, doubled when the request
-    allows a server-side fallback."""
-    request = {k: kwargs.get(k) for k in ("system", "tools", "messages", "output_config",
-                                          "thinking")}
-    chars = len(json.dumps(request, default=str, ensure_ascii=False))
+    serialized request / CHARS_PER_TOKEN_BOUND plus max_tokens, times FALLBACK_FACTOR when
+    the request allows a server-side fallback. Every key is serialized (only the model name,
+    the beta list and max_tokens are left out), so a new field can only raise the estimate.
+    Non-ASCII text is escaped (an emoji becomes 6 characters, about 3 tokens): it never
+    counts for less than it costs."""
+    request = {k: v for k, v in kwargs.items() if k not in ("model", "betas", "max_tokens")}
+    chars = len(json.dumps(request, default=str, ensure_ascii=True, sort_keys=True))
     out = kwargs.get("max_tokens")
     out = out if isinstance(out, int) and not isinstance(out, bool) and out > 0 else 128_000
     total = math.ceil(chars / CHARS_PER_TOKEN_BOUND) + out
@@ -162,8 +168,3 @@ def metered_live_data(budget: DailyBudget, cache_dir: Any = None) -> Any:
             where, fetch=metered_fetch(budget, "av", fetch_av_earnings_calendar_typed)),
     )
 
-
-def metered_client(budget: DailyBudget) -> MeteredClient:
-    """The Anthropic client for run_day: the SDK's retries off, every call metered."""
-    from agents.llm import make_client
-    return MeteredClient(make_client(max_retries=0), budget)

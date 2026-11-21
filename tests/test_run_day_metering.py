@@ -3,7 +3,7 @@ Vantage through metered_fetch. Offline: SDK objects built locally, fake inner cl
 fetches, tmp_path budgets. No network, no billed call."""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import anthropic
@@ -21,6 +21,7 @@ from pipeline.metering import (
     worst_case_tokens,
 )
 from tests.test_daily_budget import sdk_response
+from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (autouse fixtures)
 
 NY = ZoneInfo("America/New_York")
 DAY = date(2026, 11, 23)
@@ -75,10 +76,26 @@ def client(inner, b):
 def test_the_worst_case_covers_input_output_and_a_fallback():
     base = worst_case_tokens(KW)
     assert base >= 1000 + 300  # max_tokens + (600+ chars / 2)
-    assert worst_case_tokens({**KW, "fallbacks": "default"}) == base * FALLBACK_FACTOR
+    assert worst_case_tokens({**KW, "fallbacks": "default"}) >= base * FALLBACK_FACTOR
     assert worst_case_tokens({**KW, "max_tokens": 2000}) == base + 1000
     bigger = {**KW, "messages": [{"role": "user", "content": "m" * 4000}]}
     assert worst_case_tokens(bigger) > base
+
+
+def test_non_ascii_text_never_counts_for_less_than_its_escape():
+    plain = {**KW, "messages": [{"role": "user", "content": "a" * 100}]}
+    emoji = {**KW, "messages": [{"role": "user", "content": "\U0001F680" * 100}]}
+    assert worst_case_tokens(emoji) - worst_case_tokens(plain) >= 500  # ~12 chars each
+
+
+def test_every_request_field_counts_toward_the_worst_case():
+    more = {**KW, "tool_choice": {"type": "auto"}, "extra_body": {"x": "y" * 1000}}
+    assert worst_case_tokens(more) >= worst_case_tokens(KW) + 500
+
+
+def test_the_fallback_factor_covers_the_documented_chain():
+    """Two supported fallback targets today: up to three attempts per call."""
+    assert FALLBACK_FACTOR == 3
 
 
 def test_the_worst_case_over_estimates_a_real_response():
@@ -280,3 +297,48 @@ def test_blocked_after_3_fmp_requests_run_day_runs_without_fmp(tmp_path, monkeyp
         out = fmp_calendar_input(data, NOW.date())
         assert out["ok"] is False  # block-only: its absence clears nothing
     assert len(calls) == 3 and b.snapshot()["fmp_requests"] == 3
+
+
+# ======================= end to end: a real decision through the meter =======================
+
+def test_a_whole_decision_runs_through_the_meter_and_settles_every_call(tmp_path, monkeypatch):
+    """The real run_decision (three analysts in parallel threads, the debate, the Trader)
+    with a MeteredClient over the fake models: every create() reserves and settles, nothing
+    stays reserved, and the day's tokens are exactly the calls' usage."""
+    from types import SimpleNamespace
+
+    import agents.orchestrator as orch
+    import pipeline.order_flow as of
+    from journal.log import Journal
+    from pipeline.decide import run_decision
+    from tests.fakes import FakeAllData
+    from tests.order_helpers import QuotingData, StepClock
+    from tests.test_phase4b_proofs import LIMITS, NOON, SYMBOL, Router, scripts
+
+    monkeypatch.setattr(orch, "load_limits", lambda *a, **k: LIMITS)
+    monkeypatch.setattr(of, "load_checked_limits", lambda *a, **k: LIMITS)
+    router = Router(scripts())
+    made = []
+
+    class WithUsage:  # the fake models, each reply carrying usage like a real response
+        def __init__(self):
+            self.beta = SimpleNamespace(messages=SimpleNamespace(create=self.create))
+
+        def create(self, **kw):
+            r = router.beta.messages.create(**kw)
+            r.usage = SimpleNamespace(input_tokens=100, output_tokens=50,
+                                      cache_creation_input_tokens=0,
+                                      cache_read_input_tokens=0, iterations=None)
+            made.append(1)
+            return r
+
+    b = budget(tmp_path / "state")
+    metered = MeteredClient(WithUsage(), b, sleep=lambda s: None)
+    clock = StepClock(NOON, NOON, NOON + timedelta(seconds=20), NOON + timedelta(seconds=40))
+    result = run_decision(SYMBOL, data=QuotingData(FakeAllData(), clock, SYMBOL, "103.10"),
+                          clients=metered, journal=Journal(tmp_path / "j.jsonl"),
+                          clock=clock, ask=lambda _: "no", rounds=1, timeout_s=10)
+    assert result.trader.ok and len(made) == len(router.calls) >= 6
+    s = b.snapshot()
+    assert s["reservations"] == {}  # every call settled
+    assert s["tokens_used"] == 150 * len(made)
