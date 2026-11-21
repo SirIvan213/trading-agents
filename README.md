@@ -97,8 +97,8 @@ covers only the attempt that produced the message; `usage.iterations` lists ever
 (the Claude API docs call it the per-attempt source of truth). A call's tokens are therefore
 the sum of its iterations when they are present, else the top-level usage
 (`CallRecord.billed_usage()`, taking the larger of the two per field; summed over calls by
-`agents.schemas.token_totals`). The daily token cap, built with `run_day` in Phase 5 PR 6,
-will count input, output, cache writes and cache reads this way.
+`agents.schemas.token_totals`). `run_day`'s daily token cap counts input, output, cache
+writes and cache reads this way (its meter settles each call to `billed_usage()`).
 
 `risk_check` blocks EVENT and UNKNOWN. The reason names the kind and the source, e.g.
 `event gate EVENT: EVENT (alphavantage): estimated earnings date ...` against
@@ -137,10 +137,41 @@ How the calendars are fetched and checked:
   - A failed Alpha Vantage fetch is retried only after 15 minutes, and a reply that does not
     validate (for example one cut short) after 60, to stay under the free key's
     25-calls-a-day limit.
+  - Under `run_day` (CLAUDE.md rule 6), every request is also counted on disk before it is
+    made, shared across processes: at most **3 FMP requests** and **5 Alpha Vantage calls**
+    per New York day, retries and failures included. A valid calendar is reused for the day.
+    After the FMP cap, run_day runs without FMP (block-only, so nothing is cleared). After 5
+    Alpha Vantage calls without a valid calendar, the gate cannot say CLEAR, so every new
+    entry is blocked.
 - **Where they are called.** Both are read by the event gate in the order path and by the
   Sentiment analyst's `get_news` tool.
 - **Approval.** The first live call to each needs Ivan's explicit approval (CLAUDE.md rule
   6). Tests never call either.
+
+## Running a trading day (`run_day`)
+
+`python -m pipeline.run_day --scheduled` runs one trading day. It is launched only by the
+Windows Task Scheduler task Ivan sets up ([docs/run_day_task_scheduler.md](docs/run_day_task_scheduler.md)).
+Without `--scheduled` it prints the day's plan and calls nothing.
+
+- **The day:** a scan at 09:40 ET over `config/run_day.json`'s universe. Then a decision cycle
+  every 5 minutes until the day's entry end (NYSE calendar, early closes included), with at
+  most 2 decisions per cycle and one per symbol per day. Each ticket is approved in the
+  watched console; no answer before the plan expires is declined.
+- **Daily caps** (CLAUDE.md rule 6, `pipeline/budget.py`):
+  - 10 decisions, counted when they start;
+  - 600,000 tokens, every call reserving its worst case before it runs and settling to its
+    billed usage after;
+  - 3 FMP requests and 5 Alpha Vantage calls.
+
+  They are kept in `journal/state/` and shared across processes. A cap that is missing,
+  invalid or above CLAUDE.md's value refuses to start. A lost or unreadable budget file
+  closes the day.
+- **No orders are sent yet.** A broker is refused until the reconciler (#155) and the
+  flatten job (#135) are merged.
+- **Housekeeping:** a single-instance lock, a heartbeat file, the calendar coverage warning
+  at every start, and a hold on the day if an order from an earlier day may still hold a
+  position.
 
 ## Paper broker
 

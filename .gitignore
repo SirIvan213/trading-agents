@@ -19,3 +19,4 @@ trader/
 journal/*.jsonl
 journal/*.lock
 journal/cache/
+journal/state/

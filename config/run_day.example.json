@@ -1,0 +1,13 @@
+{
+  "caps": {
+    "max_decisions": 10,
+    "max_tokens": 600000,
+    "max_fmp_requests": 3,
+    "max_av_calls": 5
+  },
+  "universe": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX", "AVGO",
+               "JPM", "BAC", "XOM", "CVX", "PFE", "KO", "DIS", "INTC", "UBER", "PLTR"],
+  "scan_time": "09:40",
+  "cycle_minutes": 5,
+  "candidates_per_cycle": 2
+}
