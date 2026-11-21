@@ -1,5 +1,9 @@
 # trading-agents
 
+[![CI](https://github.com/SirIvan213/trading-agents/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SirIvan213/trading-agents/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Paper trading only](https://img.shields.io/badge/trading-paper%20only-orange)
+
 A multi-agent intraday trading research system. Specialist LLM agents analyze a
 stock, argue for and against a trade, and propose BUY or PASS (long only).
 Deterministic code then sizes the order, checks it against hard risk limits, and
