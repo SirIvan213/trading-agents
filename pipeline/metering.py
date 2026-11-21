@@ -12,7 +12,8 @@ Claude (`MeteredClient`): wraps an Anthropic client built with the SDK's own ret
      sums usage.iterations, #58: a declined fallback hop counts).
 On a failure:
   - the server answered with an error status (APIStatusError): nothing was billed, the
-    reservation settles to 0;
+    reservation settles to 0 (an assumption: the API bills only successful responses; a
+    5xx such as a gateway timeout is treated the same way);
   - no answer (a connection error or a timeout): the outcome is unknown, so the reservation
     is never settled and keeps counting (fail closed);
   - a retryable failure (no answer, or HTTP 408, 409, 429 or 5xx) is retried ONCE, here,

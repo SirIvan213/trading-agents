@@ -334,3 +334,34 @@ def test_blocked_a_held_budget_lock_counts_as_cap_reached(tmp_path, monkeypatch)
         release.set()
         t.join()
     assert b.snapshot()["av_calls"] == 0
+
+
+def test_two_real_processes_share_the_cap(tmp_path):
+    """A second Python process takes tokens from the same budget file: between them they
+    never pass the cap, and each sees the other's counts."""
+    import subprocess
+    import sys
+    from pathlib import Path as _P
+    b = budget(tmp_path, Caps(10, 1000, 3, 5))
+    b.reserve_tokens(700)
+    child = (
+        "from datetime import date\n"
+        "from pipeline.budget import CapReached, Caps, DailyBudget\n"
+        f"b = DailyBudget(Caps(10, 1000, 3, 5), date(2026, 11, 23), r'{tmp_path}')\n"
+        "b.open_day(started_today=True)\n"
+        "ok = 0\n"
+        "for _ in range(5):\n"
+        "    try:\n"
+        "        b.reserve_tokens(100)\n"
+        "        ok += 1\n"
+        "    except CapReached:\n"
+        "        pass\n"
+        "b.count_request('fmp')\n"
+        "print(ok)\n"
+    )
+    out = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True,
+                         cwd=_P(__file__).resolve().parent.parent, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "3"  # 700 + 3 x 100 = 1000: a 4th would pass the cap
+    s = b.snapshot()
+    assert b.tokens_committed(s) == 1000 and s["fmp_requests"] == 1

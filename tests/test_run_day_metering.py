@@ -241,10 +241,13 @@ def test_blocked_past_the_cap_no_request_is_made(tmp_path, source, cap):
 
 
 # The calendar caches stamp replies with the real clock, so these tests use the real day.
-NOW = datetime.now(NY)
+@pytest.fixture
+def today():
+    """The real New York day, read per test (a run across midnight stays consistent)."""
+    return datetime.now(NY).date()
 
 
-def test_blocked_after_5_av_calls_the_gate_input_is_unavailable(tmp_path, monkeypatch):
+def test_blocked_after_5_av_calls_the_gate_input_is_unavailable(tmp_path, monkeypatch, today):
     """Five failed Alpha Vantage calls, then no more requests: the calendar input reads
     unavailable (the gate says UNKNOWN), and run_day never calls Alpha Vantage again."""
     calls = []
@@ -258,12 +261,12 @@ def test_blocked_after_5_av_calls_the_gate_input_is_unavailable(tmp_path, monkey
     b = budget(tmp_path / "state")
     for _ in range(8):  # a fresh LiveData each time: no in-memory retry wait helps
         data = metered_live_data(b, tmp_path / "cache")
-        out = calendar_input(data, NOW.date())
+        out = calendar_input(data, today)
         assert out["ok"] is False
     assert len(calls) == 5 and b.snapshot()["av_calls"] == 5
 
 
-def test_a_valid_av_calendar_is_reused_for_the_day(tmp_path, monkeypatch):
+def test_a_valid_av_calendar_is_reused_for_the_day(tmp_path, monkeypatch, today):
     from tests.fakes import av_csv
     calls = []
 
@@ -272,18 +275,18 @@ def test_a_valid_av_calendar_is_reused_for_the_day(tmp_path, monkeypatch):
         from datetime import timedelta
 
         from pipeline.events import CALENDAR_HORIZON_DAYS
-        return av_csv(start=NOW.date(),
-                      end=NOW.date() + timedelta(days=CALENDAR_HORIZON_DAYS))
+        return av_csv(start=today,
+                      end=today + timedelta(days=CALENDAR_HORIZON_DAYS))
 
     monkeypatch.setattr(ec, "fetch_av_earnings_calendar_typed", av_ok)
     b = budget(tmp_path / "state")
     for _ in range(4):
         data = metered_live_data(b, tmp_path / "cache")
-        assert calendar_input(data, NOW.date())["ok"] is True
+        assert calendar_input(data, today)["ok"] is True
     assert len(calls) == 1 and b.snapshot()["av_calls"] == 1
 
 
-def test_blocked_after_3_fmp_requests_run_day_runs_without_fmp(tmp_path, monkeypatch):
+def test_blocked_after_3_fmp_requests_run_day_runs_without_fmp(tmp_path, monkeypatch, today):
     calls = []
 
     def fmp_bad(start, end):
@@ -294,7 +297,7 @@ def test_blocked_after_3_fmp_requests_run_day_runs_without_fmp(tmp_path, monkeyp
     b = budget(tmp_path / "state")
     for _ in range(6):
         data = metered_live_data(b, tmp_path / "cache")
-        out = fmp_calendar_input(data, NOW.date())
+        out = fmp_calendar_input(data, today)
         assert out["ok"] is False  # block-only: its absence clears nothing
     assert len(calls) == 3 and b.snapshot()["fmp_requests"] == 3
 
