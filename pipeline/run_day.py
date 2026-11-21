@@ -27,8 +27,8 @@ The day (New York time, the NYSE calendar in tools/market_calendar.py):
   6. it stops making decisions when a cap is reached (or the budget cannot be trusted), and
      journals `run_day_end` with the day's counts.
 A decision counts when it starts (run_decision's before_analysts hook, after the free SEC
-check). Each ticket is asked in the watched terminal until the decision's start +
-max_plan_age_s (never after the plan's expiry); no answer by then is declined.
+check). Each ticket is asked in the watched terminal until the moment the decision was
+counted + max_plan_age_s (never after the plan's expiry); no answer by then is declined.
 
 A heartbeat file (journal/state/run_day.heartbeat.json) is rewritten at every step and, by a
 background thread, at least every HEARTBEAT_S seconds of real time, during decisions too: a
@@ -164,8 +164,9 @@ class Day:
                 counts = {k: s[k] for k in ("decisions", "tokens_used", "fmp_requests",
                                             "av_calls")}
                 counts["tokens_reserved"] = sum(s["reservations"].values())
-            except CapReached as exc:
-                counts = {"budget": str(exc)}
+            except Exception as exc:  # noqa: BLE001 - a heartbeat never stops on the budget
+                counts = {"budget": str(exc) if isinstance(exc, CapReached)
+                          else f"unreadable ({type(exc).__name__})"}
         body = {"pid": os.getpid(), "at": self.clock().astimezone(NY).isoformat(),
                 "phase": self.phase, **counts}
         try:
@@ -203,13 +204,29 @@ def scan_universe(day: Day, limits: Any) -> dict:
         day.note("run_day_scan", ok=False, reason=f"snapshots failed ({type(exc).__name__})")
         return {"candidates": [], "rejected": []}
     listings, reporting = {}, {}
+    listing_down = sec_down = False  # after one failed request, ask no more this scan
     for s in syms:
-        listings[s] = day.listings.get(s) or listing_input(day.data, s)
-        if not listings[s].get("fetch_failed"):  # a failed lookup is asked again next scan
-            day.listings[s] = listings[s]
-        reporting[s] = day.reporting.get(s) or reporting_check(day.data, s, now)
-        if not reporting[s].get("fetch_failed"):
-            day.reporting[s] = reporting[s]
+        if s in day.listings:
+            listings[s] = day.listings[s]
+        elif listing_down:
+            listings[s] = {"ok": False, "reason": "listing lookups stopped for this scan"}
+        else:
+            listings[s] = listing_input(day.data, s)
+            if listings[s].get("fetch_failed") and not str(
+                    listings[s].get("reason", "")).startswith("HTTP 404"):
+                listing_down = True  # a failed lookup is asked again at the next scan
+            elif not listings[s].get("fetch_failed"):
+                day.listings[s] = listings[s]
+        if s in day.reporting:
+            reporting[s] = day.reporting[s]
+        elif sec_down:
+            reporting[s] = {"covered": False, "reason": "SEC lookups stopped for this scan"}
+        else:
+            reporting[s] = reporting_check(day.data, s, now)
+            if reporting[s].get("fetch_failed"):
+                sec_down = True
+            else:
+                day.reporting[s] = reporting[s]
     out = run_scan(snaps, ScanCriteria(), limits, now, listings=listings,
                    reporting=reporting)
     day.note("run_day_scan", ok=True, candidates=[c["symbol"] for c in out["candidates"]],
@@ -351,6 +368,9 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
     elif day.budget.day != today:
         day.write("refused: the New York day changed during start-up; start again")
         return REFUSED
+    elif Path(day.budget.state_dir).resolve() != Path(day.state_dir).resolve():
+        day.write("refused: the budget and the day use different state folders")
+        return REFUSED
     budget = day.budget
     try:
         budget.open_day(started_today=started_today(day.journal, today))
@@ -464,8 +484,9 @@ def _end(day: Day, today: date, reason: str) -> int:
         try:
             s = day.budget.snapshot()
             counts = {k: s[k] for k in ("decisions", "tokens_used", "fmp_requests", "av_calls")}
-        except CapReached as exc:
-            counts = {"budget": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - the end entry is always written
+            counts = {"budget": str(exc) if isinstance(exc, CapReached)
+                      else f"unreadable ({type(exc).__name__})"}
     day.note("run_day_end", day=today.isoformat(), reason=reason, **counts)
     day.write(f"run_day ends: {reason} {counts}")
     day.beat("ended")

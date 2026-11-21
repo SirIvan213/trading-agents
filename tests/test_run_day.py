@@ -702,3 +702,66 @@ def test_build_live_wires_one_metered_budget_and_no_broker(tmp_path, monkeypatch
     assert day.data._calendar.fetch.__name__ == "counted"  # FMP metered
     assert day.data._av_calendar.fetch.__name__ == "counted"  # Alpha Vantage metered
     assert day.state_dir == tmp_path / "state"
+
+
+
+def test_a_budget_lock_that_cannot_be_opened_is_a_cap_reached(tmp_path, monkeypatch):
+    import pipeline.budget as pb
+    from pipeline.budget import Caps
+    b = DailyBudget(Caps(10, 600_000, 3, 5), MONDAY, tmp_path)
+    b.open_day(started_today=False)
+
+    def denied(*a, **k):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(pb, "exclusive_file_lock", denied)
+    with pytest.raises(CapReached, match="could not be opened"):
+        b.snapshot()
+
+
+def test_run_day_end_is_written_even_when_the_budget_breaks_mid_day(tmp_path, monkeypatch):
+    day, clock, dec, out = make_day(tmp_path, monkeypatch, universe=["SA"])
+
+    def broken(self):
+        raise PermissionError(13, "denied")
+
+    real_scan = rd.scan_universe
+
+    def scan_then_break(d, limits):
+        out_ = real_scan(d, limits)
+        monkeypatch.setattr(DailyBudget, "snapshot", broken)
+        return out_
+
+    monkeypatch.setattr(rd, "scan_universe", scan_then_break)
+    assert rd.run_day(day, limits=LIMITS) == rd.OK
+    end = entries(day, "run_day_end")[-1]
+    assert end["budget"] == "unreadable (PermissionError)"
+
+
+def test_a_scan_stops_sec_lookups_after_the_first_failure(tmp_path, monkeypatch):
+    clock = Clock(datetime(2026, 11, 23, 9, 30, tzinfo=NY))
+
+    class SecDown(Data):
+        def __init__(self, clock):
+            super().__init__(clock)
+            self.sec_calls = 0
+
+        def submissions(self, symbol):
+            self.sec_calls += 1
+            raise TimeoutError
+
+    data = SecDown(clock)
+    day, clock2, dec, out = make_day(tmp_path, monkeypatch, universe=["SA", "SB", "SC"],
+                                     data=data,
+                                     start=datetime(2026, 11, 23, 15, 25, tzinfo=NY))
+    day.clock = data.clock = dec.clock = clock2
+    rd.run_day(day, limits=LIMITS)
+    scans = len(entries(day, "run_day_scan"))
+    assert dec.calls == [] and data.sec_calls == scans  # one SEC request per scan, not three
+
+
+def test_blocked_a_budget_in_another_state_folder_refuses(tmp_path, monkeypatch):
+    day, clock, dec, out = make_day(tmp_path, monkeypatch, universe=["SA"])
+    day.budget = DailyBudget(day.config.caps, MONDAY, tmp_path / "elsewhere")
+    assert rd.run_day(day, limits=LIMITS) == rd.REFUSED
+    assert "different state folders" in out[-1]

@@ -266,6 +266,8 @@ class DailyBudget:
                     return self._read()
             except LockTimeout:
                 raise CapReached("daily budget lock timed out") from None
+            except OSError:  # the lock file cannot be opened: the budget cannot be trusted
+                raise CapReached("daily budget lock could not be opened") from None
 
     def tokens_committed(self, s: dict[str, Any]) -> int:
         return s["tokens_used"] + sum(s["reservations"].values())

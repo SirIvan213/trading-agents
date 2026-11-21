@@ -76,6 +76,8 @@ Only the task passes `--scheduled`. Never add `--send`: it is refused until the 
 - **Approving a ticket.** The console shows each order ticket, rings the bell, and says by
   when to answer. Type `yes` and Enter to approve. Anything else, or no answer before the
   plan expires, is declined. A `yes` typed before the ticket appears never counts.
+  Type only after the ticket appears: characters typed earlier without Enter can stay in
+  the console's line and be sent by your next Enter.
 - **Heartbeat.** `journal\state\run_day.heartbeat.json` is rewritten at least every 30 seconds,
   with the phase and the day's counts. A stale heartbeat means run_day stopped.
 - **Daily budget.** `journal\state\budget-YYYY-MM-DD.json` holds the day's counts (decisions,

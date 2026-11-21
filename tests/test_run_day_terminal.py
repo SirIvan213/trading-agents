@@ -104,7 +104,7 @@ def test_blocked_a_yes_typed_before_the_first_ticket_never_approves_it():
     c = Console()
     c.type("yes")  # typed before run_day even built the terminal
     t = terminal(c)
-    wait_for(lambda: c.reads >= 1)  # the reader took it, long before the first ticket
+    wait_for(lambda: t._lines.qsize() >= 1)  # read and stamped, long before the ticket
     assert t.ask("first ticket", 0.3) == NO_ANSWER
 
 
