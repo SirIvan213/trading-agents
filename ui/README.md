@@ -13,11 +13,19 @@ CLAUDE.md ("UI track"). In short, it:
 
 ```
 .venv\Scripts\python.exe -m pip install -r ui\requirements.txt
-.venv\Scripts\python.exe -m ui.api            # http://127.0.0.1:8765/api/health
+cd ui\web; npm ci; npm run build; cd ..\..       # Node 24 (ui/web/.nvmrc)
+.venv\Scripts\python.exe -m ui.api            # http://127.0.0.1:8765/
 .venv\Scripts\python.exe -m ui.api --port 8800
 ```
 
-There is no `--host` option.
+There is no `--host` option. The server serves the built page (`ui/web/dist`) and the API on
+the same origin. Without a build, `/` says how to build it.
+
+For frontend work, run `npm run dev` in `ui/web` (Vite on 127.0.0.1:5173, with `/api` proxied
+to `python -m ui.api`).
+
+Pages: `#/` How it works, `#/live` Live run (UI-5), `#/history` History (UI-3) and
+`#/decision/<id>` Decision detail (UI-4). The last three say "coming" until built.
 
 ## Layout
 
@@ -25,7 +33,10 @@ There is no `--host` option.
 ui/api/            FastAPI app (app.py) and launcher (__main__.py)
 ui/api/readers/    standard-library readers: shared_open, journal_snapshot, state, config
 ui/tests/          pytest; journal fixtures are written by the journal's own code
-ui/web/            React frontend (UI-2, #215)
+ui/api/content/    static page content (the 8 steps, glossary, phases)
+ui/fixtures/api/   golden API responses: the frontend tests render them, the API tests check
+                   the real endpoints against them
+ui/web/            React + TypeScript frontend (Vite); hash routes, no router library
 ```
 
 ## Tests
@@ -33,6 +44,16 @@ ui/web/            React frontend (UI-2, #215)
 ```
 .venv\Scripts\python.exe -m pytest -q ui/tests tests/test_ui_readonly.py
 ```
+
+```
+cd ui\web; npx tsc --noEmit; npx vitest run; npx vite build
+```
+
+On Windows, run Vitest from a path with an upper-case drive letter (`C:\...`). From `c:\...`
+it loads its own runner twice and every suite fails with "failed to find the current suite".
+
+After a deliberate change to an API response, regenerate its golden file with
+`UPDATE_GOLDEN=1 .venv\Scripts\python.exe -m pytest -q ui/tests/test_explainer.py`.
 
 `tests/test_ui_readonly.py` also runs in the required CI job, using the standard library only.
 The rest runs in the non-required `ui` workflow (`.github/workflows/ui.yml`) on Ubuntu and

@@ -15,7 +15,8 @@ Review the current diff (`git diff` and `git diff --staged`) and report, most se
 
 For changes under `ui/`, also check the UI track rules in CLAUDE.md:
 - GET only and 127.0.0.1 only;
-- no forbidden imports;
+- no forbidden imports; from `pipeline.budget` only `load_run_day_config` and `CEILINGS`;
+- nothing loaded from another origin by the page (fonts local, CSP `'self'`);
 - no lock and no write under `journal/` or `config/`;
 - the budget file opened only through `open_shared`, one read at a time, never held open;
 - `journal/cache/` never opened unless the PR needs it, and then only through `open_shared`;
