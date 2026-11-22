@@ -149,6 +149,19 @@ describe("Decision detail", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("No such decision.");
   });
 
+  it("a run_id the API refuses (422) reads as no such decision", async () => {
+    await open({ detail: "bad run_id" }, "RUN_ID", 422);
+    expect(await screen.findByRole("alert")).toHaveTextContent("No such decision.");
+  });
+
+  it("a decision without a readable time shows a dash, not a dangling ET", async () => {
+    const body = structuredClone(buy) as DecisionDetail;
+    body.at = null;
+    await open(body);
+    await screen.findByText("In short");
+    expect(document.querySelector(".detail-when")!.textContent).toBe("—");
+  });
+
   it("a server error says so", async () => {
     await open({ detail: "x" }, "RUN_ID", 500);
     expect(await screen.findByRole("alert")).toHaveTextContent("answered 500");

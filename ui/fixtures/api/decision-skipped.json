@@ -19,7 +19,7 @@
       "title": "Scan",
       "actor": "code",
       "state": "done",
-      "line": "Picked by the run_day scan at 11:59 ET.",
+      "line": "A run_day scan listed it at 11:59 ET.",
       "details": {
         "scan_at": "2026-11-03T11:59:40-05:00"
       }
@@ -31,14 +31,7 @@
       "actor": "code",
       "state": "blocked",
       "line": "Not proven to report earnings (no 8-K item 2.02 in the last 100 days), so no AI time was spent.",
-      "details": {
-        "coverage": {
-          "covered": false,
-          "reason": "no 8-K item 2.02 in the last 100 days",
-          "last_item_202": null,
-          "fetch_failed": false
-        }
-      }
+      "details": null
     },
     {
       "n": 3,

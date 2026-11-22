@@ -32,7 +32,9 @@ export function DecisionDetail({ runId }: { runId: string }) {
       .then((data) => live && setState({ status: "ready", data }))
       .catch((e: unknown) => {
         if (!live) return;
-        if (e instanceof ApiError && / 404 /.test(e.message)) setState({ status: "missing" });
+        if (e instanceof ApiError && (e.status === 404 || e.status === 422)) {
+          setState({ status: "missing" });
+        }
         else setState({ status: "error", message: e instanceof Error ? e.message : String(e) });
       });
     return () => { live = false; };
@@ -80,7 +82,7 @@ function Ready({ d }: { d: Detail }) {
               {OUTCOME_LABEL[d.outcome]}
             </span>
           )}
-          <span className="faint detail-when">{showWhen(d.at)} ET</span>
+          <span className="faint detail-when">{d.at ? `${showWhen(d.at)} ET` : MISSING}</span>
         </div>
 
         {d.problems.length > 0 && (

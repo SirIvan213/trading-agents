@@ -19,7 +19,7 @@
       "title": "Scan",
       "actor": "code",
       "state": "done",
-      "line": "Picked by the run_day scan at 11:59 ET.",
+      "line": "A run_day scan listed it at 11:59 ET.",
       "details": {
         "scan_at": "2026-11-03T11:59:40-05:00"
       }
@@ -127,12 +127,14 @@
         "rounds_planned": 1,
         "fatal": true,
         "stopped_early": false,
+        "all_ok": true,
         "bull": "The breakout holds above the opening range.",
         "bear": "thin volume",
         "turns": [
           {
             "round": 1,
             "side": "bull",
+            "ok": true,
             "argument": "The breakout holds above the opening range.",
             "points": [
               "technical report is bullish"
@@ -142,6 +144,7 @@
           {
             "round": 1,
             "side": "bear",
+            "ok": true,
             "argument": null,
             "points": [
               "thin volume",
@@ -159,7 +162,7 @@
       "title": "Trader",
       "actor": "ai",
       "state": "blocked",
-      "line": "Forced PASS without a Trader call: the Bear raised a fatal objection.",
+      "line": "Forced PASS without a Trader call. The Bear raised a fatal objection, so the decision had to pass.",
       "details": {
         "action": "PASS",
         "plan_id": null,

@@ -140,7 +140,8 @@ def test_an_analyst_failure(paths):
     tech = s["analysts"]["details"]["analysts"][0]
     assert tech["ok"] is False and tech["stance"] is None and tech["evidence"] == []
     assert s["plans"]["state"] == "skipped" and s["debate"]["state"] == "skipped"
-    assert s["trader"]["state"] == "blocked" and "an analyst failed" in s["trader"]["line"]
+    assert s["trader"]["state"] == "blocked" and "An analyst failed" in s["trader"]["line"]
+    assert "without a Trader call" in s["trader"]["line"]
 
 
 def test_a_skip(paths):

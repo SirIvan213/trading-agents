@@ -14,7 +14,8 @@ describe("parseHash", () => {
     expect(parseHash(hash)).toEqual(route);
   });
 
-  it.each(["#/decision/", "#/decision/a/b", "#/decision/<x>", "#/nope", "#steps"])(
+  it.each(["#/decision/", "#/decision/a/b", "#/decision/<x>", "#/decision/a.b",
+    `#/decision/${"x".repeat(65)}`, "#/nope", "#steps"])(
     "%s is not found",
     (hash) => {
       expect(parseHash(hash).page).toBe("not_found");
