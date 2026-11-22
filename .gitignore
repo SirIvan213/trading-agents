@@ -20,6 +20,7 @@ journal/*.jsonl
 journal/*.lock
 journal/cache/
 journal/state/
+journal/records/
 
 # UI track frontend (ui/web): installed and built locally, never committed
 ui/web/node_modules/

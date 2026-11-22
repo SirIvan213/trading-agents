@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "run_id": "RUN_ID",
+  "symbol": "ABCD",
+  "checked_at": "2026-11-03T12:00:00-05:00",
+  "coverage": {
+    "covered": false,
+    "reason": "no 8-K item 2.02 in the last 100 days",
+    "last_item_202": null,
+    "fetch_failed": false
+  },
+  "analysts": {},
+  "packet_ok": null,
+  "exit_plans": [],
+  "debate": null,
+  "trader": null,
+  "proposal": null,
+  "outcome": {
+    "status": "skipped",
+    "record_error": false,
+    "approval": null,
+    "sent": null
+  },
+  "timings_ms": {},
+  "time_budget_s": {},
+  "error": null
+}

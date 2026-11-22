@@ -57,6 +57,7 @@ from pipeline.order_flow import (
     render_ticket,
     wall_clock,
 )
+from pipeline.records import build_record, records_dir, write_record
 from pipeline.send import SendResult, send_approved
 from tools.scan import validate_symbols
 
@@ -188,6 +189,10 @@ def run_decision(
     filer, or SEC unavailable. The event gate could only call it UNKNOWN, so no decision is
     spent on it. The skip is journaled (best effort).
 
+    However the decision ends, a display-only record is written to
+    journal/records/YYYY-MM-DD/<run_id>.json next to the journal (pipeline/records.py, #211):
+    best effort, after the approval flow, and never able to change the outcome.
+
     `before_analysts` (run_day, #156) is called after that check and before the first
     billed call: the moment a decision starts and counts toward the day's cap. If it raises
     (a cap is reached), the exception propagates and no billed call is made.
@@ -218,87 +223,120 @@ def run_decision(
     if not isinstance(checked, datetime) or checked.tzinfo is None or \
             checked.utcoffset() is None:
         raise ValueError("clock must be timezone-aware")  # before any request, free or billed
-    coverage = reporting_check(data, sym, checked)
-    if coverage.get("covered") is not True:
-        reason = str(coverage.get("reason") or "quarterly reporting not proven")
-        # best effort: a journal that cannot record the skip never turns it into a decision
-        _append_with_retry(journal, {
-            "status": "skipped", "symbol": sym, "run_id": ledger.run_id, "reason": reason,
-            "checked_at": checked.astimezone(NY).isoformat(),
-        })
-        raise SymbolSkipped(sym, reason)
-
-    if before_analysts is not None:
-        before_analysts()  # the decision starts here (run_day counts it); raise = no call
-
-    started = clock()  # the plan-age clock starts here, after the SEC check
-    t0 = time.monotonic()
-    packet = asyncio.run(run_analysts(
-        sym, started, data=data, clients=clients, configs={a: cfgs[a] for a in AGENTS},
-        timeout_s=analyst_timeout, limits=limits, ledger=ledger,
-    ))
-    timings["analysts"] = int((time.monotonic() - t0) * 1000)
-
-    t0 = time.monotonic()
-    debate = run_debate(packet, clients=clients,
-                        configs={a: cfgs[a] for a in ("bull", "bear")}, rounds=rounds)
-    timings["debate"] = int((time.monotonic() - t0) * 1000)
-
-    age = _elapsed_s(started, clock())
-    budget["age_before_trader_s"] = age
-    t0 = time.monotonic()
-    if age > max_age - MIN_APPROVAL_S:  # no time left to approve: skip the billed call
-        trader = forced_pass(packet.symbol, "stale_before_trader", cfgs["trader"])
-    else:
-        trader = run_trader(packet, debate, client=_client_for(clients, "trader"),
-                            config=cfgs["trader"])
-    timings["trader"] = int((time.monotonic() - t0) * 1000)
-
-    decision = trader.decision
-    result = DecisionResult(packet, debate, trader, ledger.run_id, None, None, timings, budget,
-                            sends=broker is not None)
-    if decision.action != "BUY" or not decision.plan_id:
-        # #190: a PASS record that cannot be written (lock timeout, cut-off journal) is
-        # retried once and reported in the result; it never raises out of the decision.
-        try:
-            checked_at: str | None = clock().astimezone(NY).isoformat()
-        except Exception:  # noqa: BLE001 - the record must not fail on the clock
-            checked_at = None
-        failed = _append_with_retry(journal, {
-            "status": "pass", "run_id": ledger.run_id, "symbol": packet.symbol,
-            "forced_pass": trader.forced_pass, "checked_at": checked_at,
-        })
-        if failed is not None:
-            result.record_error = f"the PASS could not be journaled: {failed}"
-        return result
-
-    plan_id: str = decision.plan_id  # the ONLY value that crosses to the order path
-    quotes = quotes_from(data)  # live quote, read again in the approval re-check (#68)
-    events = events_from(data)  # earnings and halt gate, read again at the re-check (#112)
-    result.proposal = propose(ledger, plan_id, journal=journal, clock=clock, quotes=quotes,
-                              events=events)
-    budget["age_at_proposal_s"] = _elapsed_s(
-        started, datetime.fromisoformat(result.proposal.checked_at))
-    if ask is None:
-        return result
-    t0 = time.monotonic()
-    answers: list[object] = []
-    ask = _recording(ask, answers)  # #192: tells a yes from a decline if the journal fails
+    # P5-UI-1 (#211): a display-only record of this decision, written however it ends (a
+    # finally), best effort: it never changes the outcome, the journal, timing or approval.
+    rec: dict[str, Any] = {"coverage": None, "packet": None, "debate": None, "trader": None,
+                           "result": None, "error": None, "started": False}
     try:
-        result.outcome = approve(result.proposal, ledger, journal=journal, ask=ask,
-                                 clock=clock, quotes=quotes, events=events,
-                                 sends=broker is not None)
-    except JournalError as exc:
-        # #129: the journal lock timed out (or a write failed) after the answer. Nothing is
-        # approved, since an approval exists only once its entry is written, but the attempt
-        # must still leave a record: one entry, written with one retry.
-        said_yes = bool(answers) and is_yes(answers[-1])
-        result.outcome = _journal_failed(result.proposal, journal, exc, clock,
-                                         said_yes=said_yes)
-    timings["approval"] = int((time.monotonic() - t0) * 1000)
-    budget["plan_age_at_approval_s"] = result.outcome.plan_age_s
-    if broker is not None and result.outcome.status == APPROVED:
+        coverage = reporting_check(data, sym, checked)
+        rec["coverage"] = coverage
+        if coverage.get("covered") is not True:
+            reason = str(coverage.get("reason") or "quarterly reporting not proven")
+            # best effort: a journal that cannot record the skip never turns it into a decision
+            _append_with_retry(journal, {
+                "status": "skipped", "symbol": sym, "run_id": ledger.run_id, "reason": reason,
+                "checked_at": checked.astimezone(NY).isoformat(),
+            })
+            raise SymbolSkipped(sym, reason)
+
+        if before_analysts is not None:
+            before_analysts()  # the decision starts here (run_day counts it); raise = no call
+        rec["started"] = True
+
+        started = clock()  # the plan-age clock starts here, after the SEC check
         t0 = time.monotonic()
-        result.sent = send_approved(result.outcome, journal=journal, broker=broker, clock=clock)
-        timings["send"] = int((time.monotonic() - t0) * 1000)
-    return result
+        packet = asyncio.run(run_analysts(
+            sym, started, data=data, clients=clients, configs={a: cfgs[a] for a in AGENTS},
+            timeout_s=analyst_timeout, limits=limits, ledger=ledger,
+        ))
+        rec["packet"] = packet
+        timings["analysts"] = int((time.monotonic() - t0) * 1000)
+
+        t0 = time.monotonic()
+        debate = run_debate(packet, clients=clients,
+                            configs={a: cfgs[a] for a in ("bull", "bear")}, rounds=rounds)
+        rec["debate"] = debate
+        timings["debate"] = int((time.monotonic() - t0) * 1000)
+
+        age = _elapsed_s(started, clock())
+        budget["age_before_trader_s"] = age
+        t0 = time.monotonic()
+        if age > max_age - MIN_APPROVAL_S:  # no time left to approve: skip the billed call
+            trader = forced_pass(packet.symbol, "stale_before_trader", cfgs["trader"])
+        else:
+            trader = run_trader(packet, debate, client=_client_for(clients, "trader"),
+                                config=cfgs["trader"])
+        timings["trader"] = int((time.monotonic() - t0) * 1000)
+        rec["trader"] = trader
+
+        decision = trader.decision
+        result = DecisionResult(packet, debate, trader, ledger.run_id, None, None, timings, budget,
+                                sends=broker is not None)
+        rec["result"] = result  # the same object: later fields are read at write time
+        if decision.action != "BUY" or not decision.plan_id:
+            # #190: a PASS record that cannot be written (lock timeout, cut-off journal) is
+            # retried once and reported in the result; it never raises out of the decision.
+            try:
+                checked_at: str | None = clock().astimezone(NY).isoformat()
+            except Exception:  # noqa: BLE001 - the record must not fail on the clock
+                checked_at = None
+            failed = _append_with_retry(journal, {
+                "status": "pass", "run_id": ledger.run_id, "symbol": packet.symbol,
+                "forced_pass": trader.forced_pass, "checked_at": checked_at,
+            })
+            if failed is not None:
+                result.record_error = f"the PASS could not be journaled: {failed}"
+            return result
+
+        plan_id: str = decision.plan_id  # the ONLY value that crosses to the order path
+        quotes = quotes_from(data)  # live quote, read again in the approval re-check (#68)
+        events = events_from(data)  # earnings and halt gate, read again at the re-check (#112)
+        result.proposal = propose(ledger, plan_id, journal=journal, clock=clock, quotes=quotes,
+                                  events=events)
+        budget["age_at_proposal_s"] = _elapsed_s(
+            started, datetime.fromisoformat(result.proposal.checked_at))
+        if ask is None:
+            return result
+        t0 = time.monotonic()
+        answers: list[object] = []
+        ask = _recording(ask, answers)  # #192: tells a yes from a decline if the journal fails
+        try:
+            result.outcome = approve(result.proposal, ledger, journal=journal, ask=ask,
+                                     clock=clock, quotes=quotes, events=events,
+                                     sends=broker is not None)
+        except JournalError as exc:
+            # #129: the journal lock timed out (or a write failed) after the answer. Nothing is
+            # approved, since an approval exists only once its entry is written, but the attempt
+            # must still leave a record: one entry, written with one retry.
+            said_yes = bool(answers) and is_yes(answers[-1])
+            result.outcome = _journal_failed(result.proposal, journal, exc, clock,
+                                             said_yes=said_yes)
+        timings["approval"] = int((time.monotonic() - t0) * 1000)
+        budget["plan_age_at_approval_s"] = result.outcome.plan_age_s
+        if broker is not None and result.outcome.status == APPROVED:
+            t0 = time.monotonic()
+            result.sent = send_approved(result.outcome, journal=journal, broker=broker, clock=clock)
+            timings["send"] = int((time.monotonic() - t0) * 1000)
+        return result
+
+    except BaseException as exc:
+        rec["error"] = exc
+        raise
+    finally:
+        _write_record(journal, sym, ledger.run_id, checked, rec)
+        rec.clear()  # drop the exception -> frame -> rec cycle at once
+
+
+def _write_record(journal: Journal, symbol: str, run_id: str, started: datetime,
+                  rec: dict[str, Any]) -> None:
+    """Write the decision record (pipeline/records.py). Never raises: a record that cannot be
+    built or written is logged by exception type and dropped."""
+    try:
+        day = started.astimezone(NY).date().isoformat()
+        write_record(records_dir(journal.path), day, run_id, lambda: build_record(
+            run_id=run_id, symbol=symbol, checked_at=started.astimezone(NY),
+            coverage=rec["coverage"], packet=rec["packet"], debate=rec["debate"],
+            trader=rec["trader"], result=rec["result"], error=rec["error"],
+            started=rec["started"]))
+    except Exception:  # noqa: BLE001 - a record never changes the decision
+        pass
