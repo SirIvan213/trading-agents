@@ -1,15 +1,17 @@
 """run_day's state files, read without locks: the daily budget and the heartbeat.
 
-Both are written by temp file + os.replace (pipeline/budget.py, pipeline/run_day.py), so a
-reader always sees a whole file. The budget's own lock is never taken: a reader holding it
-could make run_day's next reservation time out.
+Both are written by tools/atomic_write.py (temp file, then replace; pipeline/budget.py,
+pipeline/run_day.py), so a reader always sees a whole file. The budget's own lock is never
+taken: a reader holding it could make run_day's next reservation time out.
 
-On Windows, os.replace (MoveFileExW) onto a file that ANY process holds open fails, even when
-that handle shares delete (open_shared): a failed budget write is CapReached and stops the
-day's decisions. A POSIX-semantics rename (FileRenameInfoEx) does succeed over an open_shared
-reader, so until #213 makes the budget write use it (and retry), the app only checks that the
-budget file EXISTS, from the folder's listing, and never opens it (budget_exists). The
-heartbeat may be read: its write is best effort, and the next one follows within 30 s.
+On Windows the writer renames with POSIX semantics (#213), which succeeds over an open_shared
+reader. Any other kind of open can block it (its os.replace fallback fails over ANY open
+handle), and a budget write still blocked after its 0.5 s retry is CapReached and stops the
+day's decisions. So these files are read only through open_shared (read_state_file), one read
+at a time, never held open. /api/health needs only whether today's budget file exists, which
+budget_exists reads from the folder's listing without opening the file; the budget's contents
+are read by the Live run page (UI-5, #218). The heartbeat's write is best effort, and the
+next one follows within 30 s.
 """
 from __future__ import annotations
 
@@ -64,8 +66,9 @@ def budget_path(state_dir: Path, day: date) -> Path:
 
 def budget_exists(state_dir: Path, day: date) -> tuple[bool | None, str | None]:
     """(whether the day's budget file exists, error), from the folder's listing: the file
-    itself is never opened (see the module docstring, #213). A folder that cannot be listed
-    is (None, why), never a quiet False."""
+    itself is not opened (existence is all /api/health needs; any read of its contents goes
+    through read_state_file, see the module docstring). A folder that cannot be listed is
+    (None, why), never a quiet False."""
     name = budget_path(state_dir, day).name
     try:
         with os.scandir(state_dir) as it:

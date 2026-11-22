@@ -104,9 +104,12 @@ label `ui`).
 - It never takes the journal's or the budget's lock and never writes under `journal/` or
   `config/`. Files are read with `ui/api/readers/shared_open.py`, which shares read, write and
   delete.
-- It never opens the budget file or the event caches (`journal/cache/`) until #213 lands. On
-  Windows an open handle makes their `os.replace` fail. A failed budget write stops the day,
-  and a failed cache write costs another billed, capped fetch.
+- It opens the budget file only through `open_shared`, one read at a time, never held open.
+  run_day's state writes (`tools/atomic_write.py`, #213) rename with POSIX semantics, which
+  succeeds over an `open_shared` reader. Any other open can block them, and a budget write
+  still blocked after its 0.5 s retry stops the day.
+- It never opens the event caches (`journal/cache/`) until a UI PR needs them, and then only
+  through `open_shared`. A failed cache write costs another billed, capped fetch.
 - Money values are shown as recorded by the journal and the tools. The UI computes nothing
   that decides money. "In short" summaries come from a fixed template over recorded status
   and numbers, never from model text.

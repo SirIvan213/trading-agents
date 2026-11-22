@@ -81,7 +81,8 @@ def create_app(paths: Paths | None = None, *,
                         "error": snap.error, "orders_ok": orders_ok},
             "limits": limits.view(),
             "state": {
-                # the budget file is never opened until #213 (readers/state.py)
+                # existence only, from the folder's listing; any read of the budget's
+                # contents goes through open_shared (readers/state.py)
                 "budget": {"file": f"budget-{now.date().isoformat()}.json",
                            "exists": budget_found, "error": budget_error},
                 "heartbeat": {**hb.view(), "age_s": age,

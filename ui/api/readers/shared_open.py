@@ -1,11 +1,17 @@
-"""Open a file for reading without ever blocking another process's replace, rename or delete.
+"""Open a file for reading without blocking another process's rename, truncate or delete.
 
 On Windows, a file opened by Python's `open()` is shared for read and write but not for
-delete, so while the UI holds it open another process's `os.replace` onto it fails with
-PermissionError. run_day's DailyBudget._write turns that failure into CapReached and stops the
-day's decisions. Every file the UI reads is therefore opened with CreateFileW and
+delete, so while the UI holds it open another process cannot replace it (PermissionError).
+For the daily budget, a write that stays blocked is CapReached and stops the day's decisions.
+Every file the UI reads is therefore opened with CreateFileW and
 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, then wrapped with
-msvcrt.open_osfhandle. Elsewhere an ordinary open never blocks a rename.
+msvcrt.open_osfhandle.
+
+run_day's state writes (tools/atomic_write.py, #213) rename with POSIX semantics on Windows,
+which succeeds over this reader. A plain os.replace (MoveFileExW) still fails over ANY open
+handle, this one included: atomic_write falls back to it only when the POSIX rename is
+unavailable, and then retries for at most 0.5 s. Elsewhere an ordinary open never blocks a
+rename.
 
 Read-only: the handle is opened with GENERIC_READ only.
 """

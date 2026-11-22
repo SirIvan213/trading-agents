@@ -49,7 +49,14 @@ Windows.
   over the snapshot. They are the same numbers `risk_check` sees.
 - **Every file** is opened with `CreateFileW` sharing read, write and delete (`shared_open.py`).
   The UI therefore never blocks the journal's appends, `journal.repair`'s truncate, or a delete.
-- **The budget file is never opened yet.** On Windows, `os.replace` cannot replace a file that
-  any process holds open, even with delete sharing, and a failed budget write stops run_day's
-  day. #213 makes that write rename with POSIX semantics, which succeeds over this reader, and
-  retry. Until it lands, the UI only checks from the directory listing that the file exists.
+- **The budget file is read only through `open_shared`**, one read at a time, never held
+  open.
+  - On Windows, `os.replace` cannot replace a file that any process holds open, even with
+    delete sharing.
+  - run_day's state writes (`tools/atomic_write.py`, #213) rename with POSIX semantics, which
+    succeeds over this reader, and retry for at most 0.5 s. A budget write that still fails
+    stops run_day's day, so never open the budget file any other way.
+  - `/api/health` needs only whether the file exists, which it reads from the folder's
+    listing. The Live run page (UI-5, #218) reads its contents.
+- **The event caches (`journal/cache/`) stay unread** until a UI PR needs them, and then only
+  through `open_shared`. A cache write that fails costs another billed, capped fetch.
