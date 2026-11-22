@@ -2,8 +2,9 @@
 appends, journal.repair's truncate, a delete, or a POSIX-semantics rename onto the file.
 
 What it does NOT make safe: os.replace (MoveFileExW) onto a file any process holds open fails
-on Windows even when the handle shares delete. That is why the app never opens the budget
-file until #213 (readers/state.py), and why #213 should rename with POSIX semantics.
+on Windows even when the handle shares delete. That is why run_day's state writes
+(tools/atomic_write.py, #213) rename with POSIX semantics on Windows, and why the UI reads the
+budget file only through open_shared.
 """
 from __future__ import annotations
 
@@ -45,7 +46,8 @@ def test_the_handle_is_read_only(tmp_path):
 
 def posix_replace(src, dst) -> int:
     """Rename `src` over `dst` with POSIX semantics (SetFileInformationByHandle,
-    FileRenameInfoEx, REPLACE_IF_EXISTS | POSIX_SEMANTICS): the approach proposed for #213.
+    FileRenameInfoEx, REPLACE_IF_EXISTS | POSIX_SEMANTICS), the call tools/atomic_write.py
+    makes (#213).
     Returns 0 on success, else the Windows error code."""
     from ctypes import wintypes
 
@@ -86,8 +88,8 @@ def test_os_replace_succeeds_while_the_ui_holds_the_file_open_posix(tmp_path):
 
 @windows_only
 def test_os_replace_still_fails_on_windows_while_the_ui_holds_the_file_open(tmp_path):
-    """Why the app never opens the budget file until #213: MoveFileExW cannot replace a file
-    with an open handle, even one that shares delete."""
+    """Why run_day's state writes do not rely only on os.replace (#213): MoveFileExW cannot
+    replace a file with an open handle, even one that shares delete."""
     f, tmp = tmp_path / "budget.json", tmp_path / "budget.json.tmp"
     write(f, "old")
     write(tmp, "new")
@@ -97,8 +99,8 @@ def test_os_replace_still_fails_on_windows_while_the_ui_holds_the_file_open(tmp_
 
 @windows_only
 def test_a_posix_rename_succeeds_while_the_ui_holds_the_file_open(tmp_path):
-    """The rename #213 should use: it succeeds over an open_shared reader, which keeps its
-    snapshot."""
+    """The rename tools/atomic_write.py uses (#213): it succeeds over an open_shared reader,
+    which keeps its snapshot."""
     f, tmp = tmp_path / "budget.json", tmp_path / "budget.json.tmp"
     write(f, "old")
     write(tmp, "new")
@@ -110,8 +112,9 @@ def test_a_posix_rename_succeeds_while_the_ui_holds_the_file_open(tmp_path):
 
 @windows_only
 def test_a_posix_rename_fails_over_a_default_open(tmp_path):
-    """Why #213 also needs its retry: a reader that does not share delete (antivirus, the
-    indexer, an editor, Python's own open) still blocks the rename (sharing violation)."""
+    """Why tools/atomic_write.py also retries (#213), and why the UI never reads with a
+    plain open(): a reader that does not share delete (antivirus, the indexer, an editor,
+    Python's own open) still blocks the rename (sharing violation)."""
     f, tmp = tmp_path / "budget.json", tmp_path / "budget.json.tmp"
     write(f, "old")
     write(tmp, "new")

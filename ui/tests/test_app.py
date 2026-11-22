@@ -53,9 +53,9 @@ def test_health_on_a_healthy_day(paths, journal):
 
 
 def test_health_never_opens_the_budget_file(paths, journal, monkeypatch):
-    """Until #213, opening the budget file could make run_day's write fail on Windows. Every
-    way to open a file is recorded: the readers' helpers, open/io.open, os.open, and (on
-    Windows) CreateFileW itself."""
+    """Health needs only whether the budget file exists (from the folder's listing), so it
+    never opens the file. Every way to open a file is recorded: the readers' helpers,
+    open/io.open, os.open, and (on Windows) CreateFileW itself."""
     import builtins
     import io
 
