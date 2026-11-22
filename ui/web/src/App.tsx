@@ -1,4 +1,5 @@
 import { Header } from "./components/Header";
+import { DecisionDetail } from "./pages/DecisionDetail";
 import { History } from "./pages/History";
 import { HowItWorks } from "./pages/HowItWorks";
 import { NotFound, Placeholder } from "./pages/Placeholder";
@@ -12,7 +13,7 @@ export function App() {
       {route.page === "about" && <HowItWorks />}
       {route.page === "live" && <Placeholder page="live" />}
       {route.page === "history" && <History />}
-      {route.page === "decision" && <Placeholder page="decision" id={route.id} />}
+      {route.page === "decision" && <DecisionDetail key={route.id} runId={route.id} />}
       {route.page === "not_found" && <NotFound hash={route.hash} />}
     </div>
   );

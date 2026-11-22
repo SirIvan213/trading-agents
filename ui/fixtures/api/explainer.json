@@ -91,7 +91,7 @@
       "key": "decision",
       "title": "Decision detail",
       "route": "#/history",
-      "built": false,
+      "built": true,
       "text": "One decision from start to finish: what each agent said and why, the plans, and the order ticket. Open any decision from History."
     },
     {

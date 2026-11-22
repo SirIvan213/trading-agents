@@ -2,7 +2,6 @@
 
 const PLANNED = {
   live: { title: "Live run", pr: "UI-5", issue: 218 },
-  decision: { title: "Decision detail", pr: "UI-4", issue: 217 },
 } as const;
 
 export function Placeholder({ page, id }: { page: keyof typeof PLANNED; id?: string }) {
