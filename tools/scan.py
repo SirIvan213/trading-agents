@@ -18,7 +18,10 @@ from tools.config import Limits
 from tools.http import get_json
 from tools.listing import listing_problem
 from tools.symbols import SYMBOL_RE as _SHARED_SYMBOL_RE
-from tools.symbols import normalize_symbol
+from tools.symbols import (
+    normalize_symbol,
+    validate_symbols,  # moved there (#221); re-exported here
+)
 
 NY = ZoneInfo("America/New_York")
 SNAPSHOTS_URL = "https://data.alpaca.markets/v2/stocks/snapshots"
@@ -99,23 +102,6 @@ def _criteria_dict(c: ScanCriteria) -> dict:
         "direction": c.direction,
         "max_quote_age_s": c.max_quote_age_s,
     }
-
-
-def validate_symbols(symbols: list[str]) -> list[str]:
-    """Normalise with tools.symbols (1-5 ASCII letters, optional one share-class suffix
-    like ".B") and de-duplicate (order kept). Raises ValueError for an invalid symbol."""
-    out: list[str] = []
-    seen: set[str] = set()
-    for s in symbols:
-        if not isinstance(s, str):
-            raise ValueError(f"symbol must be a string, got {s!r}")
-        up = normalize_symbol(s)
-        if up is None:
-            raise ValueError(f"invalid symbol {s!r}")
-        if up not in seen:
-            seen.add(up)
-            out.append(up)
-    return out
 
 
 def fetch_snapshots(symbols: list[str], feed: str = "iex", opener: Callable | None = None) -> dict:

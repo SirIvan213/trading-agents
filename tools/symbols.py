@@ -24,3 +24,20 @@ def normalize_symbol(raw: object) -> str | None:
         return None
     up = text.upper()
     return up if SYMBOL_RE.fullmatch(up) else None
+
+
+def validate_symbols(symbols: list[str]) -> list[str]:
+    """Normalise with normalize_symbol (1-5 ASCII letters, optional one share-class suffix
+    like ".B") and de-duplicate (order kept). Raises ValueError for an invalid symbol."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in symbols:
+        if not isinstance(s, str):
+            raise ValueError(f"symbol must be a string, got {s!r}")
+        up = normalize_symbol(s)
+        if up is None:
+            raise ValueError(f"invalid symbol {s!r}")
+        if up not in seen:
+            seen.add(up)
+            out.append(up)
+    return out
