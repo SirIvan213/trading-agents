@@ -40,7 +40,7 @@ from typing import Any
 from pipeline.filelock import LockTimeout, exclusive_file_lock
 from tools.atomic_write import atomic_write_text
 from tools.config import CONFIG_DIR
-from tools.scan import validate_symbols
+from tools.symbols import validate_symbols  # not tools.scan: it loads tools.http (#221)
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE_DIR = ROOT / "journal" / "state"
