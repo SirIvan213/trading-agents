@@ -1,0 +1,57 @@
+name: UI
+
+# The read-only UI track (ui/). Not a required check: it never blocks a Phase 5 merge. It also
+# runs when the files the UI reads change (the journal, run_day's state, the limits), so a
+# Phase 5 change that breaks a UI reader shows up here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ui/**"
+      - "tests/test_ui_readonly.py"
+      - "tests/conftest.py"
+      - "journal/**"
+      - "pipeline/budget.py"
+      - "pipeline/run_day.py"
+      - "pipeline/decide.py"
+      - "tools/config.py"
+      - "tools/risk_check.py"
+      - "tools/market_calendar.py"
+      - "tools/slippage.py"
+      - "tools/symbols.py"
+      - "config/*.example.json"
+      - "pyproject.toml"
+      - ".github/workflows/ui.yml"
+  pull_request:
+    paths:
+      - "ui/**"
+      - "tests/test_ui_readonly.py"
+      - "tests/conftest.py"
+      - "journal/**"
+      - "pipeline/budget.py"
+      - "pipeline/run_day.py"
+      - "pipeline/decide.py"
+      - "tools/config.py"
+      - "tools/risk_check.py"
+      - "tools/market_calendar.py"
+      - "tools/slippage.py"
+      - "tools/symbols.py"
+      - "config/*.example.json"
+      - "pyproject.toml"
+      - ".github/workflows/ui.yml"
+
+jobs:
+  ui:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]" -r ui/requirements.txt
+      - run: ruff check ui tests/test_ui_readonly.py
+      - run: pytest -q ui/tests tests/test_ui_readonly.py
