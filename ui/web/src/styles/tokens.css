@@ -1,0 +1,22 @@
+/* Design tokens from the approved sketches ("Trading Agents UI" canvas). */
+:root {
+  --bg: #0E1116;
+  --header: #12171E;
+  --panel: #161B22;
+  --panel2: #1C232D;
+  --border: #2A3441;
+  --border2: #3A4656;
+  --text: #E6EDF3;
+  --text2: #C2CCD8;
+  --muted: #A3AFBD;
+  --faint: #8592A2;
+  --accent: #79B0FF;
+  --accent-text: #9CC4FF;
+  --teal: #5FD3B8;
+  --orange: #FFB36B;
+  --chip-code: #232C38;
+
+  --font: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  --radius: 12px;
+}
