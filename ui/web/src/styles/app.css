@@ -137,3 +137,37 @@ p { margin: 0; }
 .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
 .badge-muted { color: var(--faint); border: 1px solid var(--border); }
 .badge-warn { background: rgba(255, 179, 107, 0.18); color: var(--orange); border: 1px solid rgba(255, 179, 107, 0.6); }
+
+/* history */
+.history { gap: 24px; padding-top: 28px; max-width: 1240px; }
+.history h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+.stack-tight { display: flex; flex-direction: column; gap: 4px; }
+.h4 { font-size: 15px; font-weight: 600; }
+.tiles .tile { flex: 1 1 170px; gap: 2px; padding: 16px; }
+.tile-value { font-size: 22px; font-weight: 600; }
+.table-card { gap: 12px; padding: 20px; }
+.table-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.filter {
+  padding: 6px 12px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 13px;
+  background: transparent; color: var(--muted); border: 1px solid var(--border);
+}
+.filter.on { background: var(--panel2); color: var(--text); border-color: var(--border2); }
+.table-scroll { overflow-x: auto; }
+table.decisions { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 760px; }
+table.decisions th { text-align: left; color: var(--muted); font-size: 12px; font-weight: 500; padding: 8px; }
+table.decisions td { padding: 10px 8px; border-top: 1px solid var(--border); vertical-align: top; }
+table.decisions a { text-decoration: none; }
+.strong { font-weight: 600; }
+.nowrap { white-space: nowrap; }
+.outcome { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.outcome-buy { background: rgba(121, 176, 255, 0.16); color: var(--accent-text); }
+.outcome-pass { background: var(--chip-code); color: var(--text2); }
+.outcome-skipped { border: 1px dashed var(--border2); color: var(--muted); }
+.outcome-failed { background: rgba(255, 179, 107, 0.18); color: var(--orange); }
+.gate-clear { color: var(--teal); }
+.gate-warn { color: var(--orange); }
+.table-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; }
+.link-button { background: none; border: none; padding: 4px 0; color: #8CBCFF; cursor: pointer; font: inherit; font-size: 13px; }
+.small-button { padding: 6px 12px; font-size: 13px; }
+.pnl-total { margin-left: auto; }

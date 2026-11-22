@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { showCount, showLimit, showTime } from "../format";
+import { showCount, showLimit, showMoney, showTime, showWhen } from "../format";
 
 describe("format", () => {
   it("shows money exactly as recorded", () => {
@@ -17,6 +17,19 @@ describe("format", () => {
     expect(showTime("12:00")).toBe("12:00 PM ET");
     expect(showTime("00:05")).toBe("12:05 AM ET");
     expect(showTime("odd")).toBe("odd");
+  });
+  it("shows recorded money with a dollar sign, digits unchanged", () => {
+    expect(showMoney("13.55")).toBe("$13.55");
+    expect(showMoney("-31.65")).toBe("-$31.65");
+    expect(showMoney("-0.00")).toBe("-$0.00");
+    expect(showMoney("45.2")).toBe("$45.2");
+    expect(showMoney(null)).toBe("—");
+  });
+  it("shows the recorded New York time as written, in any browser time zone", () => {
+    expect(showWhen("2026-11-23T10:05:00-05:00")).toBe("Nov 23 10:05");
+    expect(showWhen("2026-07-01T09:45:12-04:00")).toBe("Jul 1 09:45");
+    expect(showWhen("odd")).toBe("odd");
+    expect(showWhen(null)).toBe("—");
   });
   it("groups big counts", () => {
     expect(showCount(600000)).toBe("600,000");

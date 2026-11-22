@@ -44,3 +44,39 @@ export interface Explainer {
   caps_source: Source;
   problems: Problem[];
 }
+
+// GET /api/decisions (ui/api/history.py). Golden copy: ui/fixtures/api/decisions.json.
+export type Outcome = "BUY" | "PASS" | "SKIPPED" | "FAILED";
+export type OutcomeFilter = "all" | "buy" | "pass" | "skipped" | "failed";
+
+export interface DecisionRow {
+  run_id: string;
+  seq: number; // position among the journal's parsed entries
+  at: string | null; // New York ISO time as recorded; null when it can't be read
+  day: string | null;
+  symbol: string | null;
+  outcome: Outcome;
+  why: { code: string; text: string; detail: string | null };
+  forced_pass: string | null;
+  order_status: { code: string; text: string } | null;
+  qty: number | null;
+  entry: string | null; // money as recorded
+  max_loss: string | null;
+  realized_pnl: string | null;
+  plan_id: string | null;
+  decided_by: string | null;
+  gate: { status: string; reason: string | null };
+  notes: string[];
+}
+
+export interface Decisions {
+  items: DecisionRow[];
+  tiles: {
+    reviewed: number; buys: number; passed: number; skipped: number; failed: number;
+    realized_pnl: string | null; // Decimal sum of recorded realized_pnl; null until a close
+  };
+  counts: Record<OutcomeFilter, number>;
+  total: number;
+  next_cursor: string | null;
+  problems: Problem[];
+}
