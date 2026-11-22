@@ -44,12 +44,9 @@ def test_the_budget_reads_as_daily_budget_wrote_it(tmp_path):
     assert got.exists and got.error is None and got.data == b.snapshot()
 
 
-@pytest.mark.xfail(os.name == "nt", strict=True, raises=Exception,
-                   reason="#213: os.replace cannot replace an open file on Windows")
 def test_daily_budget_can_write_while_the_ui_reads(tmp_path):
-    """Holding the budget file open must never turn a write into CapReached. On Windows this
-    fails until #213 (strict: it flips to a failure when #213 lands, so the app may then start
-    reading the budget)."""
+    """Holding the budget file open (open_shared) must never turn a write into CapReached:
+    since #213 the budget write renames with POSIX semantics on Windows."""
     b = DailyBudget(CAPS, date(2026, 11, 23), tmp_path)
     b.open_day(started_today=False)
     with open_shared(b.path):
