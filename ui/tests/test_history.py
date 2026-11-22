@@ -245,7 +245,9 @@ def test_every_order_status_has_a_plain_english_name():
 
 def test_a_run_with_two_outcome_entries_shows_the_last_and_says_so(paths):
     j = Journal(paths.journal)
-    j.append({"status": "skipped", "symbol": "SAP", "run_id": "r-dup", "reason": "x",
+    # a decline was written, then the record of a journal failure for the same run
+    j.append({"status": "declined", "reason": "not approved", "run_id": "r-dup",
+              "plan_id": "p", "symbol": "SAP", "order": None, "gate": None,
               "checked_at": HISTORY_NOW.isoformat()})
     j.append({"status": "journal_error", "reason": "journal unavailable recording a decline, "
               "nothing approved: journal write failed (OSError)", "run_id": "r-dup",
@@ -256,7 +258,7 @@ def test_a_run_with_two_outcome_entries_shows_the_last_and_says_so(paths):
     row = body["items"][0]
     assert row["why"]["code"] == "journal_error" and row["outcome"] == "FAILED"
     assert row["why"]["detail"].startswith("journal unavailable recording a decline")
-    assert row["notes"] == ["replaces an earlier skipped entry"]
+    assert row["notes"] == ["replaces an earlier declined entry"]
     assert any("more than one outcome" in p["text"] for p in body["problems"])
 
 

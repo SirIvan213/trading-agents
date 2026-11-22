@@ -200,6 +200,31 @@ describe("History", () => {
     expect(section).toHaveAttribute("aria-busy", "false");
   });
 
+  it("drops a Show more page that returns after the filter changed", async () => {
+    const big = structuredClone(DECISIONS);
+    big.items = Array.from({ length: 60 }, (_, n) => ({
+      ...DECISIONS.items[0], run_id: `r-${n}`, symbol: `S${n}`, outcome: "PASS" as const,
+    }));
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = serve(big);
+    vi.stubGlobal("fetch", vi.fn(async (u: string) => {
+      if (u.includes("cursor=50")) await gate;
+      return base(u);
+    }));
+    window.location.hash = "#/history";
+    render(<App />);
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    fireEvent.click(screen.getByRole("button", { name: /^BUY/ }));
+    await vi.waitFor(() => expect(screen.getByText("No decisions here yet.")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /^All/ })); // and back again
+    await vi.waitFor(() => expect(rows()).toHaveLength(50));
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(rows()).toHaveLength(50); // the stale page was dropped, not appended
+  });
+
   it("never shows a row twice when a page repeats one", async () => {
     const big = structuredClone(DECISIONS);
     big.items = Array.from({ length: 60 }, (_, n) => ({

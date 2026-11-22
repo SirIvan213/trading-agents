@@ -1,7 +1,8 @@
 // History (UI-3, #216): every decision the journal records, newest first, with the outcome
 // filter, 4 tiles, the table and extra columns behind a toggle. Everything shown is recorded:
 // "why" is a fixed string the API mapped from a recorded code, money is the recorded string,
-// and the event check is the recorded gate or "not reached". All text renders as plain text.
+// and the event check is the recorded gate, "check failed" or "not reached". All text renders
+// as plain text.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getJson } from "../api";
@@ -35,17 +36,20 @@ export function History() {
   const [filter, setFilter] = useState<OutcomeFilter>("all");
   const [extra, setExtra] = useState(false);
   const [state, setState] = useState<State>({ status: "loading" });
-  const current = useRef(filter); // the filter a reply must still match to be shown
+  // every request takes a number; only the latest request's reply may change the table, so a
+  // page that returns after the filter changed (even changed and changed back) is dropped
+  const latest = useRef(0);
 
   useEffect(() => {
-    current.current = filter;
+    const mine = ++latest.current;
     let live = true;
     // keep the current table (and the filters) on screen while the next filter loads
     setState((prev) => (prev.status === "ready" ? { ...prev, refreshing: true }
       : { status: "loading" }));
     getJson<Decisions>(url(filter, null))
-      .then((data) => live && setState({ status: "ready", data, loadingMore: false }))
-      .catch((e: unknown) => live && setState({
+      .then((data) => live && latest.current === mine
+        && setState({ status: "ready", data, loadingMore: false }))
+      .catch((e: unknown) => live && latest.current === mine && setState({
         status: "error", message: e instanceof Error ? e.message : String(e),
       }));
     return () => { live = false; };
@@ -55,10 +59,10 @@ export function History() {
     if (state.status !== "ready" || !state.data.next_cursor) return;
     const before = state.data;
     setState({ status: "ready", data: before, loadingMore: true });
-    const asked = filter;
-    getJson<Decisions>(url(asked, before.next_cursor))
+    const mine = ++latest.current;
+    getJson<Decisions>(url(filter, before.next_cursor))
       .then((more) => {
-        if (current.current !== asked) return; // the filter changed: drop the stale page
+        if (latest.current !== mine) return; // a newer request started: drop this page
         // the list grows during the day, so an offset page can repeat rows: never twice
         const seen = new Set(before.items.map((i) => i.run_id));
         setState({
@@ -67,7 +71,7 @@ export function History() {
         });
       })
       .catch((e: unknown) => {
-        if (current.current !== asked) return;
+        if (latest.current !== mine) return;
         setState({ status: "error", message: e instanceof Error ? e.message : String(e) });
       });
   }, [state, filter]);
