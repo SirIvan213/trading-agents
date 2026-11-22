@@ -14,7 +14,8 @@ failed write is CapReached, which stops the day's decisions. So on Windows:
   2. if that call is unsupported (an old Windows, a FAT volume) or fails, os.replace is tried;
   3. a PermissionError (a reader that does not share delete: antivirus, the indexer, an
      editor, Python's own open) is retried with short sleeps for up to RETRY_TOTAL_S in total.
-Elsewhere it is plain os.replace, with the same bounded retry (which never triggers there).
+Elsewhere it is plain os.replace, with the same bounded retry (it rarely triggers there:
+only a PermissionError from the folder's permissions, where retrying is harmless).
 
 After the retries the error is raised to the caller, which decides as before: the budget
 fails closed (CapReached), the heartbeat and the caches stay best effort. A failed write
@@ -67,11 +68,12 @@ def posix_replace(src: Path | str, dst: Path | str) -> bool:
         return False
     try:
         name = os.path.abspath(dst)
+        units = len(name.encode("utf-16-le")) // 2  # UTF-16 code units (surrogates count 2)
 
         class _RenameInfo(ctypes.Structure):
             _fields_ = [("Flags", wintypes.DWORD), ("RootDirectory", wintypes.HANDLE),
                         ("FileNameLength", wintypes.DWORD),
-                        ("FileName", wintypes.WCHAR * (len(name) + 1))]
+                        ("FileName", wintypes.WCHAR * (units + 1))]
 
         handle = _create_file(os.path.abspath(src), _DELETE, _SHARE_ALL, None,
                               _OPEN_EXISTING, _FILE_ATTRIBUTE_NORMAL, None)
@@ -80,7 +82,7 @@ def posix_replace(src: Path | str, dst: Path | str) -> bool:
         try:
             info = _RenameInfo(
                 FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS, None,
-                len(name) * ctypes.sizeof(wintypes.WCHAR), name)
+                units * ctypes.sizeof(wintypes.WCHAR), name)
             return bool(_set_info(handle, FILE_RENAME_INFO_EX, ctypes.byref(info),
                                   ctypes.sizeof(info)))
         finally:

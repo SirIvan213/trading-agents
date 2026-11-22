@@ -81,8 +81,9 @@ def test_the_retries_are_bounded_and_the_temp_file_is_removed(tmp_path, monkeypa
     clock = FakeTime()
     with pytest.raises(PermissionError):
         atomic_write_text(f, "new", sleep=clock.sleep, monotonic=clock.monotonic)
-    assert sum(clock.sleeps) <= RETRY_TOTAL_S + 1e-9
-    assert len(clock.sleeps) == int(RETRY_TOTAL_S / RETRY_SLEEP_S + 1e-9)
+    assert 1 <= len(clock.sleeps) and sum(clock.sleeps) <= RETRY_TOTAL_S + 1e-9
+    assert set(clock.sleeps) == {RETRY_SLEEP_S}
+    assert sum(clock.sleeps) > RETRY_TOTAL_S - 2 * RETRY_SLEEP_S  # it used the time it has
     assert f.read_text(encoding="utf-8") == "old" and temps(tmp_path) == []
 
 
@@ -153,6 +154,52 @@ def test_when_the_posix_call_is_unavailable_os_replace_is_used(tmp_path, monkeyp
 @windows_only
 def test_posix_replace_reports_failure_instead_of_raising(tmp_path):
     assert aw.posix_replace(tmp_path / "missing.tmp", tmp_path / "s.json") is False
+
+
+@windows_only
+def test_the_posix_fast_path_never_calls_os_replace(tmp_path, monkeypatch):
+    def never(*a):
+        raise AssertionError("os.replace called although the POSIX rename worked")
+
+    monkeypatch.setattr(aw.os, "replace", never)
+    f = tmp_path / "s.json"
+    f.write_text("old", encoding="utf-8")
+    with open_shared(f):
+        atomic_write_text(f, "new")
+    assert f.read_text(encoding="utf-8") == "new" and temps(tmp_path) == []
+
+
+@windows_only
+def test_a_relative_path_is_replaced_in_the_current_folder(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "s.json").write_text("old", encoding="utf-8")
+    with open_shared(tmp_path / "s.json"):
+        atomic_write_text("s.json", "new")
+    assert (tmp_path / "s.json").read_text(encoding="utf-8") == "new"
+    assert temps(tmp_path) == []
+
+
+@windows_only
+def test_a_name_outside_the_bmp_uses_the_posix_rename(tmp_path, monkeypatch):
+    """The rename buffer is sized in UTF-16 code units, so a surrogate pair fits."""
+    def never(*a):
+        raise AssertionError("fell back to os.replace")
+
+    monkeypatch.setattr(aw.os, "replace", never)
+    f = tmp_path / "state-\U0001f4c8.json"
+    f.write_text("old", encoding="utf-8")
+    with open_shared(f):
+        atomic_write_text(f, "new")
+    assert f.read_text(encoding="utf-8") == "new" and temps(tmp_path) == []
+
+
+@windows_only
+def test_an_invalid_handle_falls_back_to_os_replace(tmp_path, monkeypatch):
+    monkeypatch.setattr(aw, "_create_file", lambda *a: aw._INVALID_HANDLE)
+    assert aw.posix_replace(tmp_path / "a", tmp_path / "b") is False
+    f = tmp_path / "s.json"
+    atomic_write_text(f, "x")  # os.replace does it (no reader holds the file)
+    assert f.read_text(encoding="utf-8") == "x" and temps(tmp_path) == []
 
 
 @not_windows
@@ -261,6 +308,18 @@ def test_the_heartbeat_stays_best_effort_and_leaves_no_temp(tmp_path, monkeypatc
     monkeypatch.undo()
     day.beat("scan")
     assert json.loads(day.heartbeat_path.read_text(encoding="utf-8"))["phase"] == "scan"
+
+
+@windows_only
+def test_a_heartbeat_blocked_by_an_ordinary_open_returns_within_the_bound(tmp_path):
+    day = heartbeat_day(tmp_path)
+    day.beat("one")
+    with day.heartbeat_path.open("rb"):
+        started = time.monotonic()
+        day.beat("two")  # never raises
+        took = time.monotonic() - started
+    assert took < RETRY_TOTAL_S + 1.5 and temps(tmp_path) == []
+    assert json.loads(day.heartbeat_path.read_text(encoding="utf-8"))["phase"] == "one"
 
 
 @windows_only
