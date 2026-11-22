@@ -12,17 +12,19 @@ its own origin: no CDN fonts, analytics or telemetry can load even if a dependen
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import PlainTextResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
 from journal.log import JournalError
 from ui.api.explainer import explainer
+from ui.api.history import FILTERS, decisions, load_reasons
 from ui.api.paths import Paths
 from ui.api.readers.config import read_limits
 from ui.api.readers.journal_snapshot import JournalReader, SnapshotJournal
@@ -37,6 +39,7 @@ from ui.api.readers.state import (
 
 NY = ZoneInfo("America/New_York")
 ALLOWED_HOSTS = ("127.0.0.1", "localhost")
+OUTCOME_PATTERN = "^(" + "|".join(FILTERS) + ")$"  # module level: annotations resolve here
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; "
        "img-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'none'; "
@@ -72,6 +75,21 @@ def create_app(paths: Paths | None = None, *,
     @app.get("/api/explainer")
     def get_explainer() -> dict:
         return explainer(paths)
+
+    reasons = load_reasons()
+
+    @app.get("/api/decisions")
+    def get_decisions(
+        outcome: Annotated[str, Query(pattern=OUTCOME_PATTERN)] = "all",
+        day_from: Annotated[date | None, Query(alias="from")] = None,
+        day_to: Annotated[date | None, Query(alias="to")] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        cursor: Annotated[str, Query(pattern="^[0-9]{1,9}$")] = "0",
+    ) -> dict:
+        """The History page: decisions grouped by run_id, newest first (ui/api/history.py)."""
+        return decisions(reader.read(), clock().astimezone(NY), outcome=outcome,
+                         day_from=day_from, day_to=day_to, limit=limit, cursor=int(cursor),
+                         reasons=reasons)
 
     @app.get("/api/health")
     def health() -> dict:
