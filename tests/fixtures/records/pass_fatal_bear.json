@@ -1,0 +1,374 @@
+{
+  "schema": 1,
+  "run_id": "RUN_ID",
+  "symbol": "ABCD",
+  "started_at": "2026-11-03T12:00:00-05:00",
+  "coverage": {
+    "covered": true,
+    "reason": null,
+    "last_item_202": "2026-10-04"
+  },
+  "analysts": {
+    "fundamentals": {
+      "report": {
+        "agent": "fundamentals",
+        "symbol": "ABCD",
+        "stance": "bullish",
+        "confidence": 0.7,
+        "evidence": [
+          {
+            "point": "revenue grew",
+            "source": "get_fundamentals"
+          }
+        ],
+        "catalysts": []
+      },
+      "run": {
+        "agent": "fundamentals",
+        "requested_model": "claude-sonnet-5-5",
+        "effort": "high",
+        "ok": true,
+        "reason_code": null,
+        "duration_ms": 0,
+        "calls": [
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "tool_use",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          },
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "end_turn",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          }
+        ],
+        "retries": []
+      }
+    },
+    "sentiment": {
+      "report": {
+        "agent": "sentiment",
+        "symbol": "ABCD",
+        "stance": "bullish",
+        "confidence": 0.7,
+        "evidence": [
+          {
+            "point": "two positive headlines",
+            "source": "get_news"
+          }
+        ],
+        "catalysts": []
+      },
+      "run": {
+        "agent": "sentiment",
+        "requested_model": "claude-sonnet-5-5",
+        "effort": "high",
+        "ok": true,
+        "reason_code": null,
+        "duration_ms": 0,
+        "calls": [
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "tool_use",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          },
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "end_turn",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          }
+        ],
+        "retries": []
+      }
+    },
+    "technical": {
+      "report": {
+        "agent": "technical",
+        "symbol": "ABCD",
+        "stance": "bullish",
+        "confidence": 0.7,
+        "evidence": [
+          {
+            "point": "breakout above the opening range",
+            "source": "get_bars"
+          }
+        ],
+        "catalysts": []
+      },
+      "run": {
+        "agent": "technical",
+        "requested_model": "claude-sonnet-5-5",
+        "effort": "high",
+        "ok": true,
+        "reason_code": null,
+        "duration_ms": 0,
+        "calls": [
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "tool_use",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          },
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "tool_use",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          },
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "end_turn",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          }
+        ],
+        "retries": []
+      }
+    }
+  },
+  "packet_ok": true,
+  "exit_plans": [
+    {
+      "plan_id": "plan-1",
+      "symbol": "ABCD",
+      "setup": "orb",
+      "entry": "103.10",
+      "stop": "99.61",
+      "target": "106.59",
+      "risk_per_share": "3.49",
+      "reward_to_risk": "1.00",
+      "time_exit": "15:55",
+      "entry_level": "last_close",
+      "structure_level": "or_low",
+      "as_of": "2026-11-03T12:00:00-05:00",
+      "last_close": "103.10",
+      "labels": {
+        "extended": false,
+        "stop_within_max_width": false,
+        "suggested_multiple": "1",
+        "atr_5m_provisional": true
+      },
+      "context": {
+        "target_vs_session_high": "at_or_above",
+        "risk_atr_5m": "2.90",
+        "entry_vs_vwap_atr_5m": "1.25",
+        "session_high_vs_entry_atr_5m": "0.08",
+        "atr_5m": "1.2000"
+      }
+    }
+  ],
+  "debate": {
+    "symbol": "ABCD",
+    "as_of": "2026-11-03T12:00:00-05:00",
+    "rounds_planned": 1,
+    "rounds_run": 1,
+    "turns": [
+      {
+        "round": 1,
+        "side": "bull",
+        "case": {
+          "symbol": "ABCD",
+          "plan_id": "plan-1",
+          "argument": "The breakout holds above the opening range.",
+          "key_points": [
+            "technical report is bullish"
+          ]
+        },
+        "run": {
+          "agent": "bull",
+          "requested_model": "claude-sonnet-5-5",
+          "effort": "high",
+          "ok": true,
+          "reason_code": null,
+          "duration_ms": 0,
+          "calls": [
+            {
+              "requested_model": "claude-sonnet-5-5",
+              "serving_model": "claude-sonnet-5-5",
+              "fallback_ran": false,
+              "stop_reason": "end_turn",
+              "refusal_category": null,
+              "fallback_from": null,
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0
+              },
+              "iterations": []
+            }
+          ],
+          "retries": []
+        }
+      },
+      {
+        "round": 1,
+        "side": "bear",
+        "case": {
+          "symbol": "ABCD",
+          "plan_id": "plan-1",
+          "objections": [
+            "thin volume",
+            "late in the move",
+            "one analyst only"
+          ],
+          "fatal": true
+        },
+        "run": {
+          "agent": "bear",
+          "requested_model": "claude-sonnet-5-5",
+          "effort": "high",
+          "ok": true,
+          "reason_code": null,
+          "duration_ms": 0,
+          "calls": [
+            {
+              "requested_model": "claude-sonnet-5-5",
+              "serving_model": "claude-sonnet-5-5",
+              "fallback_ran": false,
+              "stop_reason": "end_turn",
+              "refusal_category": null,
+              "fallback_from": null,
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0
+              },
+              "iterations": []
+            }
+          ],
+          "retries": []
+        }
+      }
+    ],
+    "stopped_early": false,
+    "fatal": true,
+    "requested_same_model": true,
+    "same_model": true,
+    "final_bull": {
+      "symbol": "ABCD",
+      "plan_id": "plan-1",
+      "argument": "The breakout holds above the opening range.",
+      "key_points": [
+        "technical report is bullish"
+      ]
+    },
+    "final_bear": {
+      "symbol": "ABCD",
+      "plan_id": "plan-1",
+      "objections": [
+        "thin volume",
+        "late in the move",
+        "one analyst only"
+      ],
+      "fatal": true
+    },
+    "all_ok": true,
+    "skipped": false,
+    "skip_reason": null
+  },
+  "trader": {
+    "symbol": "ABCD",
+    "action": "PASS",
+    "plan_id": null,
+    "confidence": 0.0,
+    "reasoning": "forced PASS: fatal_bear",
+    "ok": false,
+    "forced_pass": "fatal_bear",
+    "run": {
+      "agent": "trader",
+      "requested_model": "claude-opus-5-5",
+      "effort": "high",
+      "ok": false,
+      "reason_code": null,
+      "duration_ms": 0,
+      "calls": [],
+      "retries": []
+    }
+  },
+  "proposal": null,
+  "outcome": {
+    "status": "pass",
+    "record_error": false,
+    "sent": null
+  },
+  "timings_ms": {
+    "analysts": 0,
+    "debate": 0,
+    "trader": 0
+  },
+  "ages_s": {
+    "max_plan_age_s": 300,
+    "analyst_timeout_s": 10,
+    "age_before_trader_s": 20.0
+  },
+  "error": null
+}
