@@ -9,9 +9,9 @@ msvcrt.open_osfhandle.
 
 run_day's state writes (tools/atomic_write.py, #213) rename with POSIX semantics on Windows,
 which succeeds over this reader. A plain os.replace (MoveFileExW) still fails over ANY open
-handle, this one included: atomic_write falls back to it only when the POSIX rename is
-unavailable, and then retries for at most 0.5 s. Elsewhere an ordinary open never blocks a
-rename.
+handle, this one included. atomic_write falls back to it when the POSIX rename is unavailable
+or fails, and the whole replace is retried on PermissionError for at most 0.5 s. Elsewhere an
+ordinary open never blocks a rename.
 
 Read-only: the handle is opened with GENERIC_READ only.
 """

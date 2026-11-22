@@ -9,8 +9,8 @@ reader. Any other kind of open can block it (its os.replace fallback fails over 
 handle), and a budget write still blocked after its 0.5 s retry is CapReached and stops the
 day's decisions. So these files are read only through open_shared (read_state_file), one read
 at a time, never held open. /api/health needs only whether today's budget file exists, which
-budget_exists reads from the folder's listing without opening the file; the budget's contents
-are read by the Live run page (UI-5, #218). The heartbeat's write is best effort, and the
+budget_exists reads from the folder's listing without opening the file; the Live run page
+(UI-5, #218) will read the budget's contents. The heartbeat's write is best effort, and the
 next one follows within 30 s.
 """
 from __future__ import annotations

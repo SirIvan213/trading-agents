@@ -88,7 +88,7 @@ def test_os_replace_succeeds_while_the_ui_holds_the_file_open_posix(tmp_path):
 
 @windows_only
 def test_os_replace_still_fails_on_windows_while_the_ui_holds_the_file_open(tmp_path):
-    """Why run_day's state writes do not rely on os.replace (#213): MoveFileExW cannot
+    """Why run_day's state writes do not rely only on os.replace (#213): MoveFileExW cannot
     replace a file with an open handle, even one that shares delete."""
     f, tmp = tmp_path / "budget.json", tmp_path / "budget.json.tmp"
     write(f, "old")

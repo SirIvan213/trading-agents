@@ -54,9 +54,11 @@ Windows.
   - On Windows, `os.replace` cannot replace a file that any process holds open, even with
     delete sharing.
   - run_day's state writes (`tools/atomic_write.py`, #213) rename with POSIX semantics, which
-    succeeds over this reader, and retry for at most 0.5 s. A budget write that still fails
-    stops run_day's day, so never open the budget file any other way.
+    succeeds over this reader. When that call is unavailable they fall back to `os.replace`,
+    which fails over any open handle, this one included. The replace is retried for at most
+    0.5 s, and a budget write that still fails stops run_day's day. So never open the budget
+    file any other way, and keep each read short.
   - `/api/health` needs only whether the file exists, which it reads from the folder's
-    listing. The Live run page (UI-5, #218) reads its contents.
+    listing. The Live run page (UI-5, #218) will read its contents.
 - **The event caches (`journal/cache/`) stay unread** until a UI PR needs them, and then only
   through `open_shared`. A cache write that fails costs another billed, capped fetch.
