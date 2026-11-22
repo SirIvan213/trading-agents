@@ -67,8 +67,8 @@ describe("History", () => {
   it("shows the 4 tiles from the recorded totals", async () => {
     await open();
     const tiles = within(await screen.findByRole("region", { name: "Totals" }));
-    expect(tiles.getByText("Stocks the AI reviewed").parentElement).toHaveTextContent("15");
-    expect(tiles.getByText("Trades proposed (BUY)").parentElement).toHaveTextContent("11");
+    expect(tiles.getByText("Stocks the AI reviewed").parentElement).toHaveTextContent("16");
+    expect(tiles.getByText("Trades proposed (BUY)").parentElement).toHaveTextContent("12");
     expect(tiles.getByText("Passed").parentElement).toHaveTextContent("4");
     expect(tiles.getByText("Skipped early").parentElement).toHaveTextContent("1");
   });
@@ -76,12 +76,12 @@ describe("History", () => {
   it("lists every decision, newest first, each linked to its decision page", async () => {
     await open();
     await screen.findByRole("table");
-    expect(rows()).toHaveLength(19);
+    expect(rows()).toHaveLength(22);
     const first = rows()[0];
-    expect(first).toHaveTextContent("DIS");
-    expect(within(first).getByRole("link", { name: "DIS" }))
-      .toHaveAttribute("href", "#/decision/r-odd");
-    expect(rows()[18]).toHaveTextContent("BAC");
+    expect(first).toHaveTextContent("NFLX");
+    expect(within(first).getByRole("link", { name: "NFLX" }))
+      .toHaveAttribute("href", "#/decision/r-lost");
+    expect(rows()[21]).toHaveTextContent("BAC");
   });
 
   it("shows failed and unknown decisions, never hiding them", async () => {
@@ -89,7 +89,7 @@ describe("History", () => {
     await screen.findByRole("table");
     const failed = rows().filter((r) => r.textContent!.includes("Failed"));
     expect(failed.map((r) => r.querySelector("a")!.textContent).sort())
-      .toEqual(["CVX", "DIS", "XOM"]);
+      .toEqual(["CVX", "DIS", "HD", "NFLX", "XOM"]);
     const odd = rows().find((r) => r.textContent!.includes("DIS"))!;
     expect(odd).toHaveTextContent("mystery_status"); // an unknown code is shown as itself
   });
@@ -130,7 +130,7 @@ describe("History", () => {
     await open();
     await screen.findByRole("table");
     const group = within(screen.getByRole("group", { name: "Filter by outcome" }));
-    for (const [label, n] of [["BUY", 11], ["PASS", 4], ["Skipped", 1], ["Failed", 3], ["All", 19]] as const) {
+    for (const [label, n] of [["BUY", 12], ["PASS", 4], ["Skipped", 1], ["Failed", 5], ["All", 22]] as const) {
       fireEvent.click(group.getByRole("button", { name: new RegExp(`^${label}`) }));
       await screen.findByRole("table");
       await vi.waitFor(() => expect(rows()).toHaveLength(n));
@@ -177,7 +177,44 @@ describe("History", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("journal line 31 is not JSON");
     expect(alert).toHaveTextContent("last line is incomplete");
-    expect(rows()).toHaveLength(19); // the rows read before it still show
+    expect(rows()).toHaveLength(22); // the rows read before it still show
+  });
+
+  it("keeps the table on screen, marked busy, while a filter loads", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = serve();
+    vi.stubGlobal("fetch", vi.fn(async (u: string) => {
+      if (u.includes("outcome=buy")) await gate;
+      return base(u);
+    }));
+    window.location.hash = "#/history";
+    render(<App />);
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: /^BUY/ }));
+    const section = screen.getByRole("region", { name: "Decisions" });
+    await vi.waitFor(() => expect(section).toHaveAttribute("aria-busy", "true"));
+    expect(rows()).toHaveLength(22); // the old rows stay until the new ones arrive
+    release();
+    await vi.waitFor(() => expect(rows()).toHaveLength(12));
+    expect(section).toHaveAttribute("aria-busy", "false");
+  });
+
+  it("never shows a row twice when a page repeats one", async () => {
+    const big = structuredClone(DECISIONS);
+    big.items = Array.from({ length: 60 }, (_, n) => ({
+      ...DECISIONS.items[0], run_id: `r-${n}`, symbol: `S${n}`,
+    }));
+    const base = serve(big);
+    vi.stubGlobal("fetch", vi.fn(async (u: string) => {
+      if (u.includes("cursor=50")) return base(u.replace("cursor=50", "cursor=49"));
+      return base(u);
+    }));
+    window.location.hash = "#/history";
+    render(<App />);
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    await vi.waitFor(() => expect(rows()).toHaveLength(60));
   });
 
   it("says so when the API fails", async () => {

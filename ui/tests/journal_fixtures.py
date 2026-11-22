@@ -65,8 +65,9 @@ def write_day(journal: Journal, day: datetime = MONDAY) -> None:
 def outcome_entry(status: str, run_id: str, plan_id: str | None, at: datetime, *,
                   symbol: str, reason: str | None = None, order: bool = True,
                   gate: dict | None = None, **extra: object) -> dict:
-    """An outcome entry in the shape pipeline.order_flow._entry writes (no_order, declined,
-    refused_after_approval, changed_after_approval): the order fields only when it had one."""
+    """An outcome entry in the shape pipeline.order_flow._entry writes. A no_order entry
+    never has order fields (_entry sets order, max_loss, decided_by and quote to None when the
+    proposal is not ok); declined / refused / changed entries do."""
     o = {"symbol": symbol, "side": "buy", "qty": 5, "entry": "101.20", "stop_loss": "99.80",
          "take_profit": "104.00", "slippage": "0.10"} if order else None
     return {
@@ -102,7 +103,10 @@ def write_history(journal: Journal, day: datetime = MONDAY) -> None:
        "forced_pass": "stale_before_trader", "checked_at": t(4).isoformat()})
     a(outcome_entry("no_order", "r-risk", "p-risk", t(5), symbol="NVDA", stage="risk",
                     reason="event gate: EVENT (earnings 2026-11-24 before the open)",
+                    order=False,
                     gate={"status": "EVENT", "reason": "earnings 2026-11-24 before the open"}))
+    a(outcome_entry("no_order", "r-events", "p-ev", t(5.5), symbol="ROKU", stage="events",
+                    reason="event gate failed (RuntimeError)", order=False))
     a(outcome_entry("no_order", "r-quote", "p-quote", t(6), symbol="AMD", stage="quote",
                     reason="live quote unavailable (TimeoutError)", order=False))
     a(outcome_entry("declined", "r-timeout", "p-to", t(7), symbol="MSFT",
@@ -144,6 +148,11 @@ def write_history(journal: Journal, day: datetime = MONDAY) -> None:
        "checked_at": t(21).isoformat(), "answer": "yes"})
     a({"status": "run_day_alert", "at": t(22).isoformat(),
        "message": "decision for CVX failed (RuntimeError)", "symbol": "CVX"})
+    a({"status": "run_day_alert", "at": t(22.5).isoformat(),
+       "message": "HD: the PASS could not be journaled: journal lock timed out", "symbol": "HD"})
+    # a timeout whose decline (and its retried record) could not be written
+    a({"status": "run_day_approval_timeout", "at": t(24).isoformat(), "symbol": "NFLX",
+       "run_id": "r-lost"})
     a({"status": "mystery_status", "run_id": "r-odd", "symbol": "DIS",
        "checked_at": t(23).isoformat()})
     a({"status": "run_day_end", "at": t(330).isoformat(), "day": day.date().isoformat(),

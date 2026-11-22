@@ -12,7 +12,10 @@ or unrecognized entry is always a row, never dropped:
                                                                became of it)
   journal_locked, journal_error                             -> FAILED (nothing was approved)
   run_day_alert naming a symbol (a decision that crashed,
-  or a PASS that could not be journaled)                    -> FAILED (keyed by journal line)
+  or a PASS that could not be journaled: the two cannot be
+  told apart yet, so the why is neutral)                    -> FAILED (keyed "entry-<seq>")
+  run_day_approval_timeout with no outcome entry for its run
+  (both the decline and its retried record failed)          -> FAILED
   any other entry with a run_id, or an unknown status       -> FAILED, its status as the code
 
 "Why" is a recorded code (the status, the forced-pass code, the no_order stage) mapped to a
@@ -21,7 +24,13 @@ The journal never holds model text (journal/log.py); a recorded, code-generated 
 risk-check reason, a skip reason) is passed along as `detail`.
 
 The event check is the recorded gate {status, reason} of a decision that reached the order
-ticket, else "not reached": never a guessed CLEAR.
+ticket; "check failed" when the gate itself could not run (no_order at stage "events"); else
+"not reached": never a guessed CLEAR.
+
+`seq` is an entry's position among the journal's parsed entries (1-based; blank lines are not
+counted), so it is not a file line number. A row without a run_id is keyed "entry-<seq>". A
+run_day_alert carries no run_id, so a crash after a decision's outcome was written shows as
+its own FAILED row next to the decision (a follow-up adds run_id to alerts).
 
 Money values are passed through exactly as recorded (strings). The realized P&L total is the
 Decimal sum of the recorded realized_pnl of closed trades, for display only, and null until a
@@ -81,7 +90,7 @@ def _when(entry: dict) -> datetime | None:
 @dataclass
 class _Row:
     key: str
-    line: int
+    seq: int
     entry: dict
     outcome: str
     code: str
@@ -105,11 +114,13 @@ def _classify(entry: dict) -> tuple[str, str, str | None]:
     if status in BUY_STATUSES:
         return "BUY", str(status), reason
     if status in FAILED_STATUSES:
-        return "FAILED", str(status), None
+        return "FAILED", str(status), reason
     return "FAILED", str(status), reason
 
 
 def _gate(entry: dict) -> dict:
+    if entry.get("status") == "no_order" and entry.get("stage") == "events":
+        return {"status": "check failed", "reason": _as_recorded(entry.get("reason"))}
     gate = entry.get("gate")
     if isinstance(gate, dict) and gate.get("status"):
         return {"status": str(gate.get("status")), "reason": _as_recorded(gate.get("reason"))}
@@ -134,7 +145,8 @@ def decisions(snap: JournalSnapshot, now: datetime, *, outcome: str = "all",
     rows: dict[str, _Row] = {}
     timeouts: set[str] = set()
     closed_pnl: dict[str, str] = {}  # client_order_id -> realized_pnl as recorded
-    for line, entry in enumerate(snap.entries, 1):
+    timeout_entries: dict[str, tuple[int, dict]] = {}
+    for seq, entry in enumerate(snap.entries, 1):
         status = entry.get("status")
         run_id = entry.get("run_id")
         if status in ORDER_EVENTS:
@@ -145,18 +157,24 @@ def decisions(snap: JournalSnapshot, now: datetime, *, outcome: str = "all",
         if isinstance(status, str) and status.startswith("run_day_"):
             if status == "run_day_approval_timeout" and isinstance(run_id, str):
                 timeouts.add(run_id)
+                timeout_entries[run_id] = (seq, entry)
             elif status == "run_day_alert" and isinstance(entry.get("symbol"), str):
-                rows[f"line-{line}"] = _Row(f"line-{line}", line, entry, "FAILED", "failed",
+                rows[f"entry-{seq}"] = _Row(f"entry-{seq}", seq, entry, "FAILED", "alert",
                                             _as_recorded(entry.get("message")))
             continue  # the day's notes (start, scan, cap, end) are not decisions
-        key = run_id if isinstance(run_id, str) and run_id else f"line-{line}"
+        key = run_id if isinstance(run_id, str) and run_id else f"entry-{seq}"
         outcome_, code, detail = _classify(entry)
         if key in rows:  # a second outcome for one run: keep the last, say so
             rows[key].notes.append(f"replaces an earlier {rows[key].entry.get('status')} entry")
             problems.append({"level": "warn", "text": f"run {key} has more than one outcome "
                              "entry; the last is shown"})
-        rows[key] = _Row(key, line, entry, outcome_, code, detail, rows[key].notes
+        rows[key] = _Row(key, seq, entry, outcome_, code, detail, rows[key].notes
                          if key in rows else [])
+
+    # a timeout whose run left no outcome entry is still a decision: never dropped
+    for run_id, (seq, entry) in timeout_entries.items():
+        if run_id not in rows:
+            rows[run_id] = _Row(run_id, seq, entry, "FAILED", "timeout_no_outcome", None)
 
     items: list[dict] = []
     for row in rows.values():
@@ -189,9 +207,9 @@ def decisions(snap: JournalSnapshot, now: datetime, *, outcome: str = "all",
 
 def _newest_first(item: dict) -> tuple:
     """Rows with a time first, newest first (by instant, not by text: offsets change with
-    daylight time); then by journal line."""
+    daylight time); then by position in the journal."""
     at = item["at"]
-    return (at is not None, datetime.fromisoformat(at).timestamp() if at else 0.0, item["line"])
+    return (at is not None, datetime.fromisoformat(at).timestamp() if at else 0.0, item["seq"])
 
 
 def _sum(values: list[str], problems: list[dict]) -> str | None:
@@ -232,7 +250,7 @@ def _item(row: _Row, orders: dict[str, OrderState] | None, closed_pnl: dict[str,
     symbol = e.get("symbol") or order.get("symbol")
     return {
         "run_id": row.key,
-        "line": row.line,
+        "seq": row.seq,
         "at": when.isoformat() if when else None,
         "day": when.date().isoformat() if when else None,
         "symbol": symbol if isinstance(symbol, str) else None,
@@ -244,7 +262,8 @@ def _item(row: _Row, orders: dict[str, OrderState] | None, closed_pnl: dict[str,
         "qty": order.get("qty") if isinstance(order.get("qty"), int) else None,
         "entry": _as_recorded(order.get("entry")),
         "max_loss": _as_recorded(e.get("max_loss")),
-        "realized_pnl": closed_pnl.get(str(cid)) if cid else None,
+        # shown only when the order history replays: never P&L from a history called invalid
+        "realized_pnl": closed_pnl.get(str(cid)) if cid and orders is not None else None,
         "plan_id": e.get("plan_id") if isinstance(e.get("plan_id"), str) else None,
         "decided_by": _as_recorded(e.get("decided_by")),
         "gate": _gate(e),

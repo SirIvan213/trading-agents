@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
@@ -87,6 +87,8 @@ def create_app(paths: Paths | None = None, *,
         cursor: Annotated[str, Query(pattern="^[0-9]{1,9}$")] = "0",
     ) -> dict:
         """The History page: decisions grouped by run_id, newest first (ui/api/history.py)."""
+        if day_from is not None and day_to is not None and day_from > day_to:
+            raise HTTPException(status_code=422, detail="'from' is after 'to'")
         return decisions(reader.read(), clock().astimezone(NY), outcome=outcome,
                          day_from=day_from, day_to=day_to, limit=limit, cursor=int(cursor),
                          reasons=reasons)

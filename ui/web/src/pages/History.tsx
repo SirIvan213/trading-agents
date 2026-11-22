@@ -2,7 +2,7 @@
 // filter, 4 tiles, the table and extra columns behind a toggle. Everything shown is recorded:
 // "why" is a fixed string the API mapped from a recorded code, money is the recorded string,
 // and the event check is the recorded gate or "not reached". All text renders as plain text.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getJson } from "../api";
 import { MISSING, showMoney, showWhen } from "../format";
@@ -35,8 +35,10 @@ export function History() {
   const [filter, setFilter] = useState<OutcomeFilter>("all");
   const [extra, setExtra] = useState(false);
   const [state, setState] = useState<State>({ status: "loading" });
+  const current = useRef(filter); // the filter a reply must still match to be shown
 
   useEffect(() => {
+    current.current = filter;
     let live = true;
     // keep the current table (and the filters) on screen while the next filter loads
     setState((prev) => (prev.status === "ready" ? { ...prev, refreshing: true }
@@ -53,14 +55,21 @@ export function History() {
     if (state.status !== "ready" || !state.data.next_cursor) return;
     const before = state.data;
     setState({ status: "ready", data: before, loadingMore: true });
-    getJson<Decisions>(url(filter, before.next_cursor))
-      .then((more) => setState({
-        status: "ready", loadingMore: false,
-        data: { ...more, items: [...before.items, ...more.items] },
-      }))
-      .catch((e: unknown) => setState({
-        status: "error", message: e instanceof Error ? e.message : String(e),
-      }));
+    const asked = filter;
+    getJson<Decisions>(url(asked, before.next_cursor))
+      .then((more) => {
+        if (current.current !== asked) return; // the filter changed: drop the stale page
+        // the list grows during the day, so an offset page can repeat rows: never twice
+        const seen = new Set(before.items.map((i) => i.run_id));
+        setState({
+          status: "ready", loadingMore: false,
+          data: { ...more, items: [...before.items, ...more.items.filter((i) => !seen.has(i.run_id))] },
+        });
+      })
+      .catch((e: unknown) => {
+        if (current.current !== asked) return;
+        setState({ status: "error", message: e instanceof Error ? e.message : String(e) });
+      });
   }, [state, filter]);
 
   return (

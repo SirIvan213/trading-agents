@@ -51,7 +51,7 @@ export type OutcomeFilter = "all" | "buy" | "pass" | "skipped" | "failed";
 
 export interface DecisionRow {
   run_id: string;
-  line: number;
+  seq: number; // position among the journal's parsed entries
   at: string | null; // New York ISO time as recorded; null when it can't be read
   day: string | null;
   symbol: string | null;

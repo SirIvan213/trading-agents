@@ -26,7 +26,8 @@
     "approved": "Approved in the terminal",
     "journal_locked": "The journal was busy when the answer came, so nothing was approved",
     "journal_error": "The journal could not be written when the answer came, so nothing was approved",
-    "failed": "The decision stopped on an error before it finished"
+    "alert": "run_day raised an alert for this stock and no outcome was recorded (see the detail)",
+    "timeout_no_outcome": "No answer before the plan expired, and the decline could not be recorded"
   },
   "order_status": {
     "approved_not_sent": "approved, not sent",
