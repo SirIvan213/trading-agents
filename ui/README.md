@@ -24,8 +24,13 @@ the same origin. Without a build, `/` says how to build it.
 For frontend work, run `npm run dev` in `ui/web` (Vite on 127.0.0.1:5173, with `/api` proxied
 to `python -m ui.api`).
 
-Pages: `#/` How it works, `#/live` Live run (UI-5), `#/history` History (UI-3) and
-`#/decision/<id>` Decision detail (UI-4). The last three say "coming" until built.
+Pages: `#/` How it works, `#/history` History, `#/live` Live run (UI-5) and
+`#/decision/<id>` Decision detail (UI-4). The last two say "coming" until built.
+
+History's "why" comes from recorded codes mapped to fixed text in
+`ui/api/content/reasons.json` (an unknown code is shown as itself). A new outcome status,
+forced-pass code or `no_order` stage needs an entry there; `ui/tests/test_history.py` checks
+the pipeline's codes against it.
 
 ## Layout
 
