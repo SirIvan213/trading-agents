@@ -37,7 +37,9 @@ TAIL_GRACE_S = 5.0
 
 @dataclass(frozen=True)
 class JournalSnapshot:
-    """The journal's complete lines as of one read."""
+    """The journal's complete lines as of one read. The entry dicts are shared with the
+    reader's cache and with later snapshots: treat them as read-only (copy before changing
+    one)."""
 
     entries: tuple[dict, ...]
     exists: bool
@@ -155,6 +157,17 @@ class SnapshotJournal(Journal):
 
     def entries(self) -> list[dict]:
         return list(self._snapshot)
+
+    # The file-reading internals are refused too, so a future Journal method that reads the
+    # file directly fails loudly instead of quietly reading os.devnull.
+    def _missing(self) -> bool:
+        raise JournalError("read-only snapshot: no file")
+
+    def _ends_cut_off(self) -> bool:
+        raise JournalError("read-only snapshot: no file")
+
+    def _read_entries(self) -> list[dict]:
+        raise JournalError("read-only snapshot: no file")
 
     @contextmanager
     def exclusive(self, timeout_s: float | None = None) -> Iterator[None]:

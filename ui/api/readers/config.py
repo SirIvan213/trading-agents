@@ -45,6 +45,8 @@ def read_limits(config_dir: Path) -> Loaded:
         limits: Limits = limits_from_dict(raw)  # type: ignore[arg-type]
     except FileNotFoundError:
         return Loaded(None, None, "no limits config")
+    except OSError as exc:
+        return Loaded(None, path.name, f"limits config is unreadable ({type(exc).__name__})")
     except Exception:  # noqa: BLE001 - never echo the config's contents
         return Loaded(None, path.name, "limits config is invalid")
     return Loaded(limits, path.name)

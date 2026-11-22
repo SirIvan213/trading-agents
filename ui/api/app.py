@@ -20,6 +20,7 @@ from ui.api.paths import Paths
 from ui.api.readers.config import read_limits
 from ui.api.readers.journal_snapshot import JournalReader, SnapshotJournal
 from ui.api.readers.state import (
+    HEARTBEAT_FUTURE_S,
     HEARTBEAT_STALE_S,
     budget_exists,
     heartbeat_age_s,
@@ -64,6 +65,13 @@ def create_app(paths: Paths | None = None, *,
         age = heartbeat_age_s(hb, now)
         if hb.error:
             problems.append({"level": "error", "text": f"{hb.name} is {hb.error}"})
+        future = age is not None and age < -HEARTBEAT_FUTURE_S
+        if future:
+            problems.append({"level": "error", "text": f"{hb.name} is dated in the future: "
+                             "check the PC's clock"})
+        budget_found, budget_error = budget_exists(paths.state_dir, now.date())
+        if budget_error:
+            problems.append({"level": "error", "text": budget_error})
         return {
             "ok": not any(p["level"] == "error" for p in problems),
             "read_only": True,
@@ -75,9 +83,9 @@ def create_app(paths: Paths | None = None, *,
             "state": {
                 # the budget file is never opened until #213 (readers/state.py)
                 "budget": {"file": f"budget-{now.date().isoformat()}.json",
-                           "exists": budget_exists(paths.state_dir, now.date())},
+                           "exists": budget_found, "error": budget_error},
                 "heartbeat": {**hb.view(), "age_s": age,
-                              "stale": age is None or age > HEARTBEAT_STALE_S},
+                              "stale": age is None or age > HEARTBEAT_STALE_S or future},
             },
             "problems": problems,
         }

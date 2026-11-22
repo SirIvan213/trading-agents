@@ -23,6 +23,7 @@ from ui.api.readers.shared_open import read_bytes_shared
 
 HEARTBEAT_NAME = "run_day.heartbeat.json"  # pipeline.run_day.Day.heartbeat_path
 HEARTBEAT_STALE_S = 90  # run_day rewrites it at least every 30 s (pipeline.run_day.HEARTBEAT_S)
+HEARTBEAT_FUTURE_S = 60  # a heartbeat dated further ahead than this cannot be trusted
 
 
 @dataclass(frozen=True)
@@ -61,15 +62,18 @@ def budget_path(state_dir: Path, day: date) -> Path:
     return Path(state_dir) / f"budget-{day.isoformat()}.json"
 
 
-def budget_exists(state_dir: Path, day: date) -> bool:
-    """Whether the day's budget file exists, from the folder's listing: the file itself is
-    never opened (see the module docstring, #213)."""
+def budget_exists(state_dir: Path, day: date) -> tuple[bool | None, str | None]:
+    """(whether the day's budget file exists, error), from the folder's listing: the file
+    itself is never opened (see the module docstring, #213). A folder that cannot be listed
+    is (None, why), never a quiet False."""
     name = budget_path(state_dir, day).name
     try:
         with os.scandir(state_dir) as it:
-            return any(e.name == name for e in it)
+            return any(e.name == name for e in it), None
     except FileNotFoundError:
-        return False
+        return False, None
+    except OSError as exc:
+        return None, f"state folder unreadable ({type(exc).__name__})"
 
 
 def heartbeat_path(state_dir: Path) -> Path:

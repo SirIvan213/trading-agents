@@ -68,7 +68,11 @@ def open_shared(path: Path | str) -> BinaryIO:
     except OSError:
         _close_handle(handle)
         raise
-    return os.fdopen(fd, "rb")  # closing it closes the fd and the handle
+    try:
+        return os.fdopen(fd, "rb")  # closing it closes the fd and the handle
+    except Exception:
+        os.close(fd)  # the fd owns the handle now
+        raise
 
 
 def read_bytes_shared(path: Path | str) -> bytes:
