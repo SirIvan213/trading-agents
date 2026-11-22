@@ -16,7 +16,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 
 def client(paths, now=MONDAY):
-    return TestClient(create_app(paths, clock=lambda: now), base_url="http://127.0.0.1")
+    return TestClient(create_app(paths, clock=lambda: now, web_dir=None),
+                      base_url="http://127.0.0.1")
 
 
 def configs(paths):
@@ -68,7 +69,7 @@ def test_health_never_opens_the_budget_file(paths, journal, monkeypatch):
     DailyBudget(Caps(10, 600_000, 3, 5), date(2026, 11, 23), paths.state_dir).open_day(
         started_today=False)
     opened = []
-    for mod, name in ((st, "read_bytes_shared"), (cfg, "read_bytes_shared"),
+    for mod, name in ((st, "read_bytes_shared"), (cfg, "load_limits"),
                       (js, "open_shared")):
         real = getattr(mod, name)
         monkeypatch.setattr(mod, name, lambda p, real=real: (opened.append(str(p)),
@@ -159,13 +160,15 @@ def test_no_journal_yet_is_healthy_and_creates_nothing(tmp_path):
 
 @pytest.mark.parametrize("host", ["testserver", "evil.example", "127.0.0.1.evil.example"])
 def test_a_foreign_host_header_is_refused(paths, host):
-    c = TestClient(create_app(paths, clock=lambda: MONDAY), base_url=f"http://{host}")
+    c = TestClient(create_app(paths, clock=lambda: MONDAY, web_dir=None),
+                   base_url=f"http://{host}")
     assert c.get("/api/health").status_code == 400
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "127.0.0.1:8765"])
 def test_local_host_headers_are_accepted(paths, host):
-    c = TestClient(create_app(paths, clock=lambda: MONDAY), base_url=f"http://{host}")
+    c = TestClient(create_app(paths, clock=lambda: MONDAY, web_dir=None),
+                   base_url=f"http://{host}")
     assert c.get("/api/health").status_code == 200
 
 

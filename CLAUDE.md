@@ -92,9 +92,12 @@ label `ui`).
   other than 127.0.0.1 or localhost, and makes no network calls.
 - `ui/api` never imports `tools.broker`, `pipeline.send`, `pipeline.orders`,
   `pipeline.order_flow`, `pipeline.decide`, `pipeline.run_day`, `pipeline.metering`,
-  `pipeline.budget` or `tools.scan` (both load `tools.http`), `agents`, `anthropic`, a network
-  client, or anything else that can place, change or approve an order. This holds directly or
-  through other project modules, and `ui/api` uses no dynamic imports or code.
+  `tools.scan` (it loads `tools.http`), `agents`, `anthropic`, a network client, or anything
+  else that can place, change or approve an order. This holds directly or through other
+  project modules, and `ui/api` uses no dynamic imports or code.
+- From `pipeline.budget` it imports only `load_run_day_config` and `CEILINGS`, and only by
+  `from pipeline.budget import ...`. It never constructs a `DailyBudget`, takes the budget's
+  lock, or names either (the static check refuses it).
   `tests/test_ui_readonly.py` (required job) checks this statically and transitively.
   `ui/tests/test_boundaries.py` checks what the import actually loads against an allow-list.
   The transitive check reads the project modules the UI imports (today `journal/log.py`,
@@ -102,8 +105,10 @@ label `ui`).
   one of them and fails this check, the fix belongs on the UI side: stop importing that
   module from `ui/api`. Never weaken the check, and never hold back the phase change.
 - It never takes the journal's or the budget's lock and never writes under `journal/` or
-  `config/`. Files are read with `ui/api/readers/shared_open.py`, which shares read, write and
-  delete.
+  `config/`. Files the pipeline replaces or appends to (the journal and the state files) are
+  read with `ui/api/readers/shared_open.py`, which shares read, write and delete. The configs,
+  which nothing in the pipeline writes, are read by the pipeline's own loaders
+  (`tools.config.load_limits`, `pipeline.budget.load_run_day_config`).
 - It opens the budget file only through `open_shared`, one read at a time, never held open.
   run_day's state writes (`tools/atomic_write.py`, #213) rename with POSIX semantics, which
   succeeds over an `open_shared` reader. Any other open can block them. So can `open_shared`
@@ -117,8 +122,13 @@ label `ui`).
 - Record and model text render as plain text only. No `dangerouslySetInnerHTML`, no
   `innerHTML`, and no Markdown or HTML rendering (`tests/test_ui_readonly.py`).
 - No billed calls. Tests use journal fixtures with the network blocked.
-- UI Python dependencies live in `ui/requirements.txt`, never in the core dependencies. The
-  `ui` CI workflow (`.github/workflows/ui.yml`) is not a required check.
+- The page loads and fetches nothing from another origin: no CDN fonts, analytics or
+  telemetry. Fonts are bundled locally (`@fontsource`). The server sends a
+  Content-Security-Policy allowing `'self'` only, and `tests/test_ui_readonly.py` refuses
+  another origin's URL in `ui/web`.
+- UI Python dependencies live in `ui/requirements.txt`, pinned, never in the core
+  dependencies. The frontend's are pinned in `ui/web/package-lock.json` (Node from
+  `ui/web/.nvmrc`). The `ui` CI workflow (`.github/workflows/ui.yml`) is not a required check.
 
 ## Conventions
 

@@ -26,17 +26,27 @@ ALLOWED = {
     "journal", "journal.log", "journal.orders",
     "tools", "tools.config", "tools.risk_check", "tools.symbols", "tools.market_calendar",
     "tools.slippage",
+    # pipeline.budget for load_run_day_config and CEILINGS only (#215; the static check
+    # refuses every other name), and what it imports: none reaches the network (#221)
+    "pipeline", "pipeline.budget", "pipeline.filelock", "tools.atomic_write",
 }
 DENIED = ("tools.broker", "pipeline.send", "pipeline.orders", "pipeline.order_flow",
           "pipeline.decide", "pipeline.run_day", "pipeline.metering", "pipeline.probe_broker",
-          "pipeline.budget", "agents", "anthropic", "tools.http", "tools.scan")
+          "agents", "anthropic", "tools.http", "tools.scan")
 # Stdlib network modules are not listed: the framework loads some (starlette imports
 # http.client for its status codes). ui/api's own code may not import them (the static check,
 # tests/test_ui_readonly.py), and the network guard (conftest) fails any call.
 
 
 def loaded_modules() -> list[str]:
-    code = ("import json, sys; import ui.api.app, ui.api.__main__; "
+    # import, then serve one request of each kind: lazily loaded modules count too
+    code = ("import json, sys, tempfile; from pathlib import Path; "
+            "import ui.api.app, ui.api.__main__; "
+            "from fastapi.testclient import TestClient; from ui.api.paths import Paths; "
+            "d = Path(tempfile.mkdtemp()); "
+            "c = TestClient(ui.api.app.create_app(Paths(d / 'j', d / 's', d / 'c'), "
+            "web_dir=None), base_url='http://127.0.0.1'); "
+            "[c.get(u) for u in ('/api/health', '/api/explainer', '/')]; "
             "print(json.dumps(sorted(sys.modules)))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True,
                          text=True, check=True, timeout=120)
@@ -49,12 +59,14 @@ def test_importing_the_api_loads_only_allow_listed_project_modules():
     assert project <= ALLOWED, sorted(project - ALLOWED)
     for bad in DENIED:
         assert not any(m == bad or m.startswith(bad + ".") for m in mods), bad
+    # fastapi depends on opentelemetry-api, which is inert without an SDK and an exporter
+    assert not any(m.startswith(("opentelemetry.sdk", "opentelemetry.exporter")) for m in mods)
 
 
 def test_every_route_is_get(tmp_path):
     from ui.api.paths import Paths
 
-    app = create_app(Paths(tmp_path / "j.jsonl", tmp_path, tmp_path))
+    app = create_app(Paths(tmp_path / "j.jsonl", tmp_path, tmp_path), web_dir=None)
     routes = [r for r in app.routes if isinstance(r, APIRoute)]
     assert routes
     for r in routes:

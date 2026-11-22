@@ -12,6 +12,7 @@ on:
       - "tests/conftest.py"
       - "journal/**"
       - "pipeline/budget.py"
+      - "pipeline/filelock.py"
       - "pipeline/run_day.py"
       - "pipeline/decide.py"
       - "tools/config.py"
@@ -30,6 +31,7 @@ on:
       - "tests/conftest.py"
       - "journal/**"
       - "pipeline/budget.py"
+      - "pipeline/filelock.py"
       - "pipeline/run_day.py"
       - "pipeline/decide.py"
       - "tools/config.py"
@@ -57,3 +59,16 @@ jobs:
       - run: pip install -e ".[dev]" -r ui/requirements.txt
       - run: ruff check ui tests/test_ui_readonly.py
       - run: pytest -q ui/tests tests/test_ui_readonly.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ui/web/.nvmrc
+          cache: npm
+          cache-dependency-path: ui/web/package-lock.json
+      - run: npm ci
+        working-directory: ui/web
+      - run: npx tsc --noEmit
+        working-directory: ui/web
+      - run: npx vitest run
+        working-directory: ui/web
+      - run: npx vite build
+        working-directory: ui/web

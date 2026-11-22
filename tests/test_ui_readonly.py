@@ -4,8 +4,12 @@ FastAPI or Node needed). CLAUDE.md, "UI track".
 1. Nothing ui/api/ imports, directly OR through the project modules it imports (followed
    transitively through agents/, journal/, pipeline/, tools/ and ui/), is on the deny-list:
    code that can place, change or approve an order, run a decision, call Claude, or reach
-   the network. So `from pipeline.budget import ...` is refused here: pipeline.budget imports
-   tools.scan, which imports tools.http.
+   the network. So `from tools.listing import ...` is refused here: tools.listing imports
+   tools.http.
+   pipeline.budget is the one exception, and a narrow one: ui/api may import only
+   load_run_day_config and CEILINGS from it (`from pipeline.budget import ...`), never the
+   module itself, and may never name DailyBudget, the budget's file lock or a function's
+   __globals__. So the UI cannot construct a DailyBudget or take its lock.
    Every import form counts: `import x`, `from x import y`, `from pkg import module`, and
    relative imports. ui/api itself may not use dynamic code at all: importlib, runpy,
    subprocess, exec, eval, compile or __import__, and no star import from the project.
@@ -35,14 +39,22 @@ DENY = (
     # billed calls: the agents, the Claude client, the metered client
     "agents", "anthropic", "pipeline.metering",
     # project modules that load a network client (tools.scan -> tools.http)
-    "pipeline.budget", "tools.scan", "tools.http",
+    "tools.scan", "tools.http",
     # network clients
     "urllib.request", "http.client", "socket", "ssl", "smtplib", "ftplib", "imaplib",
     "poplib", "telnetlib", "nntplib", "xmlrpc", "requests", "httpx", "httpcore", "urllib3",
     "aiohttp", "websockets",
 )
 # ui/api itself: no dynamic imports or code, which a static check cannot follow
-DENY_IN_UI_API = ("importlib", "runpy", "subprocess", "multiprocessing", "ctypes.util")
+DENY_IN_UI_API = ("importlib", "runpy", "subprocess", "multiprocessing", "ctypes.util",
+                  "pipeline.filelock")
+# pipeline.budget: only these names, and only by `from pipeline.budget import ...`
+BUDGET_NAMES = frozenset({"load_run_day_config", "CEILINGS"})
+# names ui/api may never use: what writes or locks the budget, and the way around an import
+BUDGET_FORBIDDEN = frozenset({"DailyBudget", "exclusive_file_lock", "try_lock", "lock_path",
+                              "LockTimeout", "__globals__", "__dict__"})
+# ways around a static name check: refused in ui/api outright
+EVASION_ATTRS = frozenset({"modules", "budget", "__getattribute__"})  # sys.modules, pkg.budget
 # builtins called by name (re.compile and the like are attribute calls and stay allowed)
 DYNAMIC_BUILTINS = ("exec", "eval", "compile", "__import__")
 DYNAMIC_FUNCTIONS = ("import_module", "run_module", "run_path", "__import__")
@@ -61,7 +73,12 @@ RENDERERS = ("markdown", "marked", "remark", "remarkable", "rehype", "showdown",
              "dompurify", "sanitize-html")
 _RENDERER = re.compile(r"(^|[/@-])(" + "|".join(map(re.escape, RENDERERS)) + r")([/-]|$)")
 WEB_SOURCES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".html", ".vue",
-               ".svelte")
+               ".svelte", ".css", ".scss", ".sass", ".less")
+# an absolute URL to another origin in a frontend source: the page talks to its own API only
+# any host (dotted, numeric or bare) except 127.0.0.1 or localhost; "// a comment" is no URL
+EXTERNAL_URL = re.compile(
+    r"(?:https?:)?//(?!(?:127\.0\.0\.1|localhost)(?:[:/\"'\s)]|$))[a-z0-9\[]",
+    re.IGNORECASE)
 DEP_SECTIONS = ("dependencies", "devDependencies", "peerDependencies",
                 "optionalDependencies")
 
@@ -134,12 +151,45 @@ def _with_parents(module: str) -> list[str]:
     return [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
 
 
+def budget_violations(source: str) -> list[str]:
+    """Why `source` (ui/api) uses pipeline.budget beyond load_run_day_config and CEILINGS."""
+    bad: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            bad += [f"import {a.name} (only `from pipeline.budget import ...`)"
+                    for a in node.names if _matches(a.name, ("pipeline.budget",))]
+        elif isinstance(node, ast.ImportFrom) and not node.level:
+            if node.module == "pipeline" and any(a.name == "budget" for a in node.names):
+                bad.append("from pipeline import budget (only its two names)")
+            elif node.module == "pipeline.budget":
+                bad += [f"pipeline.budget.{a.name} (only {sorted(BUDGET_NAMES)})"
+                        for a in node.names if a.name not in BUDGET_NAMES]
+        elif isinstance(node, ast.Name) and node.id in BUDGET_FORBIDDEN:
+            bad.append(f"{node.id} (the UI never writes or locks the budget)")
+        elif isinstance(node, ast.Attribute) and node.attr in BUDGET_FORBIDDEN:
+            bad.append(f".{node.attr} (the UI never writes or locks the budget)")
+        elif isinstance(node, ast.Constant) and node.value in BUDGET_FORBIDDEN:
+            bad.append(f"{node.value!r} (the UI never writes or locks the budget)")
+        if isinstance(node, ast.Import) and any(a.name == "pipeline" for a in node.names):
+            bad.append("import pipeline (reach pipeline.budget only by its two names)")
+        if isinstance(node, ast.Attribute) and node.attr in EVASION_ATTRS:
+            bad.append(f".{node.attr} (cannot be checked statically)")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "vars":
+                bad.append("vars() (cannot be checked statically)")
+            elif node.func.id in ("getattr", "setattr", "hasattr") and not (
+                    len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)):
+                bad.append(f"{node.func.id}() with a computed name (cannot be checked)")
+    return bad
+
+
 def import_violations(source: str, package: str = "ui.api", root: Path = REPO) -> list[str]:
     """Why `source` (a module in ui/api's `package`) breaks rule 1, or []. A transitive
     violation reads as a chain: "pipeline.budget -> tools.scan -> tools.http". `root` is the
     folder project modules are looked up in (the repo; a fake tree in the checker's tests)."""
     mods, bad = _imports(source, package, root)
     bad += [m for m in mods if _matches(m, DENY_IN_UI_API)]
+    bad += budget_violations(source)
     seen: dict[str, str | None] = {}
     denied: set[str] = set()
     queue: list[tuple[str, str | None]] = [(m, None) for m in mods]
@@ -197,6 +247,31 @@ def test_the_frontend_renders_text_as_plain_text_only():
     assert found == {}
 
 
+def web_sources() -> list[Path]:
+    if not WEB.exists():
+        return []
+    return [f for f in WEB.rglob("*") if f.suffix in WEB_SOURCES and f.is_file()
+            and "node_modules" not in f.parts and "dist" not in f.parts]
+
+
+def test_the_frontend_loads_nothing_from_another_origin():
+    """No CDN fonts, analytics or telemetry: no source names another origin's URL."""
+    found = {str(f.relative_to(REPO)): u for f in web_sources()
+             if (u := EXTERNAL_URL.findall(f.read_text(encoding="utf-8")))}
+    assert found == {}
+
+
+def test_the_external_url_checker():
+    for src in ('<link href="https://fonts.googleapis.com/css2">', "fetch('https://x.io/a')",
+                "@import url(//cdn.example.com/a.css);", "src: url(http://evil.test/f.woff2)",
+                "http://10.0.0.5/", "http://127.0.0.1.nip.io/", "https://intranet/",
+                "http://localhost.evil.test/", "fetch('http://[::1]:80/')"):
+        assert EXTERNAL_URL.findall(src), src
+    for src in ('proxy: { "/api": "http://127.0.0.1:8765" }', "fetch('/api/explainer')",
+                "http://localhost:5173/", "// a comment", "a // b"):
+        assert not EXTERNAL_URL.findall(src), src
+
+
 def test_the_frontend_depends_on_no_markdown_or_html_renderer():
     pkg = WEB / "package.json"
     if not pkg.exists():
@@ -238,7 +313,30 @@ def test_the_import_checker_follows_project_imports_transitively(tmp_path):
         "tools.nice -> tools.middle -> tools.http"]
     assert import_violations("from tools.clean import x", root=tmp_path) == []
     assert import_violations("import tools.scan") == ["tools.scan"]
-    assert import_violations("from pipeline import budget") == ["pipeline.budget"]
+    assert import_violations("from pipeline import budget") == [
+        "from pipeline import budget (only its two names)"]
+
+
+def test_pipeline_budget_allows_only_its_two_names():
+    ok = "from pipeline.budget import CEILINGS, load_run_day_config\n"
+    assert import_violations(ok) == []
+    for src in ("from pipeline.budget import DailyBudget",
+                "from pipeline.budget import config_from_dict",
+                "from pipeline.budget import *",
+                "import pipeline.budget",
+                "import pipeline.budget as b",
+                "from pipeline import budget",
+                "from pipeline.filelock import exclusive_file_lock",
+                ok + "load_run_day_config.__globals__['DailyBudget']",
+                ok + "getattr(load_run_day_config, '__globals__')",
+                ok + "x = DailyBudget",
+                ok + "y.lock_path",
+                "import pipeline\npipeline.budget.config_from_dict({})",
+                "import pipeline.filelock",
+                "import sys\nsys.modules['pipeline.budget']",
+                ok + "getattr(load_run_day_config, '__glo' + 'bals__')",
+                "import x\nvars(x)"):
+        assert import_violations(src), src
 
 
 def test_the_import_checker_refuses_dynamic_code_in_ui_api():

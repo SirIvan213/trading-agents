@@ -1,0 +1,35 @@
+{
+  "ok": true,
+  "read_only": true,
+  "as_of": "2026-11-23T10:00:00-05:00",
+  "journal": {
+    "file": "decisions.jsonl",
+    "exists": false,
+    "entries": 0,
+    "tail_incomplete": false,
+    "error": null,
+    "orders_ok": null
+  },
+  "limits": {
+    "source": "limits.json",
+    "ok": true,
+    "error": null
+  },
+  "paper": true,
+  "trading_enabled": true,
+  "state": {
+    "budget": {
+      "file": "budget-2026-11-23.json",
+      "exists": false,
+      "error": null
+    },
+    "heartbeat": {
+      "file": "run_day.heartbeat.json",
+      "exists": false,
+      "error": null,
+      "age_s": null,
+      "stale": true
+    }
+  },
+  "problems": []
+}
