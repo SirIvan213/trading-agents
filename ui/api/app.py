@@ -90,6 +90,12 @@ def create_app(paths: Paths | None = None, *,
         limits = read_limits(paths.config_dir)
         if limits.error:
             problems.append({"level": "error", "text": limits.error})
+        if limits.value is not None and not limits.value.paper:
+            problems.append({"level": "error", "text": "limits say paper: false. This project "
+                             "trades paper only, and run_day refuses to start"})
+        if limits.value is not None and not limits.value.trading_enabled:
+            problems.append({"level": "warn", "text": "the kill switch is on "
+                             "(trading_enabled: false): no new orders"})
         hb = read_state_file(heartbeat_path(paths.state_dir))
         age = heartbeat_age_s(hb, now)
         if hb.error:

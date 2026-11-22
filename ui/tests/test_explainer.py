@@ -219,6 +219,7 @@ def test_the_kill_switch_is_shown_and_a_problem(cfg):
     assert any("kill switch" in p["text"] for p in body["problems"])
     health = get(cfg, "/api/health").json()
     assert health["trading_enabled"] is False and health["paper"] is True
+    assert any("kill switch" in p["text"] for p in health["problems"])
 
 
 def test_health_carries_paper_for_the_header(cfg):
@@ -239,3 +240,12 @@ def test_health_matches_the_golden_json(cfg):
         HEALTH_GOLDEN.write_text(json.dumps(body, indent=2, ensure_ascii=False) + "\n",
                                  encoding="utf-8")
     assert body == json.loads(HEALTH_GOLDEN.read_text(encoding="utf-8"))
+
+
+def test_health_reports_paper_false_as_a_problem(cfg):
+    raw = json.loads((cfg.config_dir / "limits.json").read_text())
+    raw["paper"] = False
+    (cfg.config_dir / "limits.json").write_text(json.dumps(raw))
+    health = get(cfg, "/api/health").json()
+    assert not health["ok"] and health["paper"] in (False, None)
+    assert health["problems"]

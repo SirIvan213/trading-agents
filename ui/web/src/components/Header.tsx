@@ -33,7 +33,11 @@ function useMode(): ModeState {
 function ModeBadges({ state }: { state: ModeState }) {
   if (state.status === "loading") return <span className="badge badge-muted">checking config…</span>;
   if (state.status === "error") {
-    return <span className="badge badge-warn" role="status">Mode unknown: the server did not answer</span>;
+    return (
+      <span className="badge badge-warn" role="status">
+        Mode unknown: the server did not answer or returned an error
+      </span>
+    );
   }
   const { paper, trading_enabled } = state.mode;
   return (
@@ -42,7 +46,7 @@ function ModeBadges({ state }: { state: ModeState }) {
       {paper === false && (
         <span className="badge badge-warn" role="status">NOT PAPER: the config says paper: false</span>
       )}
-      {paper === null && (
+      {paper !== true && paper !== false && (
         <span className="badge badge-warn" role="status">Mode unknown: the limits config can't be read</span>
       )}
       {trading_enabled === false && (

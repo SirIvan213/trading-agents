@@ -183,6 +183,14 @@ describe("the header's mode badges", () => {
     expect(screen.queryByText("PAPER · practice money")).not.toBeInTheDocument();
   });
 
+  it("treats a reply without paper as unknown", async () => {
+    const { paper: _paper, ...rest } = health;
+    void _paper;
+    await header(rest);
+    expect(await screen.findByText(/Mode unknown: the limits config/)).toBeInTheDocument();
+    expect(screen.queryByText("PAPER · practice money")).not.toBeInTheDocument();
+  });
+
   it("warns when the server does not answer", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
     window.location.hash = "#/live";
