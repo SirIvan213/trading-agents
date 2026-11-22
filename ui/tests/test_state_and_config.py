@@ -147,6 +147,6 @@ def test_an_unreadable_limits_file_says_unreadable(tmp_path, monkeypatch):
     def denied(path):
         raise PermissionError(13, "denied")
 
-    monkeypatch.setattr(cfg, "read_bytes_shared", denied)
+    monkeypatch.setattr(cfg, "load_limits", denied)
     assert read_limits(tmp_path).error == "limits config is unreadable (PermissionError)"
 

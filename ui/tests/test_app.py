@@ -68,7 +68,7 @@ def test_health_never_opens_the_budget_file(paths, journal, monkeypatch):
     DailyBudget(Caps(10, 600_000, 3, 5), date(2026, 11, 23), paths.state_dir).open_day(
         started_today=False)
     opened = []
-    for mod, name in ((st, "read_bytes_shared"), (cfg, "read_bytes_shared"),
+    for mod, name in ((st, "read_bytes_shared"), (cfg, "load_limits"),
                       (js, "open_shared")):
         real = getattr(mod, name)
         monkeypatch.setattr(mod, name, lambda p, real=real: (opened.append(str(p)),

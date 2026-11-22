@@ -26,10 +26,13 @@ ALLOWED = {
     "journal", "journal.log", "journal.orders",
     "tools", "tools.config", "tools.risk_check", "tools.symbols", "tools.market_calendar",
     "tools.slippage",
+    # pipeline.budget for load_run_day_config and CEILINGS only (#215; the static check
+    # refuses every other name), and what it imports: none reaches the network (#221)
+    "pipeline", "pipeline.budget", "pipeline.filelock", "tools.atomic_write",
 }
 DENIED = ("tools.broker", "pipeline.send", "pipeline.orders", "pipeline.order_flow",
           "pipeline.decide", "pipeline.run_day", "pipeline.metering", "pipeline.probe_broker",
-          "pipeline.budget", "agents", "anthropic", "tools.http", "tools.scan")
+          "agents", "anthropic", "tools.http", "tools.scan")
 # Stdlib network modules are not listed: the framework loads some (starlette imports
 # http.client for its status codes). ui/api's own code may not import them (the static check,
 # tests/test_ui_readonly.py), and the network guard (conftest) fails any call.
@@ -49,6 +52,8 @@ def test_importing_the_api_loads_only_allow_listed_project_modules():
     assert project <= ALLOWED, sorted(project - ALLOWED)
     for bad in DENIED:
         assert not any(m == bad or m.startswith(bad + ".") for m in mods), bad
+    # fastapi depends on opentelemetry-api, which is inert without an SDK and an exporter
+    assert not any(m.startswith(("opentelemetry.sdk", "opentelemetry.exporter")) for m in mods)
 
 
 def test_every_route_is_get(tmp_path):
