@@ -1,0 +1,127 @@
+{
+  "run_id": "RUN_ID",
+  "symbol": "ABCD",
+  "at": "2026-11-03T12:00:40-05:00",
+  "day": "2026-11-03",
+  "outcome": "BUY",
+  "why": {
+    "code": "approved",
+    "text": "Approved in the terminal",
+    "detail": null
+  },
+  "order_status": {
+    "code": "approved_not_sent",
+    "text": "approved, not sent"
+  },
+  "in_short": "The agents proposed buying 13 shares of ABCD. Approved in the terminal. Order: approved, not sent. Worst case at the stop: $46.80.",
+  "numbers": {
+    "shares": 13,
+    "entry": "103.10",
+    "limit_price": null,
+    "stop": "99.61",
+    "target": "106.59",
+    "max_loss": "46.80"
+  },
+  "steps": [
+    {
+      "n": 1,
+      "key": "scan",
+      "title": "Scan",
+      "actor": "code",
+      "state": "done",
+      "line": "Picked by the run_day scan at 11:59 ET.",
+      "details": {
+        "scan_at": "2026-11-03T11:59:40-05:00"
+      }
+    },
+    {
+      "n": 2,
+      "key": "event_check",
+      "title": "Event check",
+      "actor": "code",
+      "state": "done",
+      "line": "Passed: the decision went on to the analysts. The details are not recorded.",
+      "details": null
+    },
+    {
+      "n": 3,
+      "key": "analysts",
+      "title": "Analysts",
+      "actor": "ai",
+      "state": "not_recorded",
+      "line": "Not recorded for this decision.",
+      "details": null
+    },
+    {
+      "n": 4,
+      "key": "plans",
+      "title": "Plans",
+      "actor": "code",
+      "state": "not_recorded",
+      "line": "Not recorded for this decision.",
+      "details": null
+    },
+    {
+      "n": 5,
+      "key": "debate",
+      "title": "Debate",
+      "actor": "ai",
+      "state": "not_recorded",
+      "line": "Not recorded for this decision.",
+      "details": null
+    },
+    {
+      "n": 6,
+      "key": "trader",
+      "title": "Trader",
+      "actor": "ai",
+      "state": "done",
+      "line": "BUY plan-1. The reasoning is not recorded.",
+      "details": null
+    },
+    {
+      "n": 7,
+      "key": "order_ticket",
+      "title": "Order ticket",
+      "actor": "code",
+      "state": "done",
+      "line": "Buy 13 shares with a limit of —, stop 99.61, target 106.59. Risk check: PASS; earnings and halt: CLEAR.",
+      "details": {
+        "gate": {
+          "status": "CLEAR",
+          "reason": "no earnings through 2026-11-10; no halt"
+        },
+        "risk": "PASS",
+        "risk_reasons": [],
+        "stage": null,
+        "limit_price": null,
+        "decided_by": "max_loss_per_trade"
+      }
+    },
+    {
+      "n": 8,
+      "key": "approve_and_log",
+      "title": "Approve and log",
+      "actor": "you",
+      "state": "done",
+      "line": "Approved at 12:00 ET after the re-check (earnings and halt rechecked). Order: approved, not sent.",
+      "details": {
+        "status": "approved_not_sent",
+        "approved_at": "2026-11-03T12:00:40-05:00",
+        "expires_at": "2026-11-03T12:05:00-05:00",
+        "recheck_at": null,
+        "plan_age_s": 40,
+        "timed_out": false,
+        "events": []
+      }
+    }
+  ],
+  "order_events": [],
+  "record_available": false,
+  "problems": [
+    {
+      "level": "warn",
+      "text": "no decision record was found for this decision: the analysts, plans, debate and Trader are not shown"
+    }
+  ]
+}

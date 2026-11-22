@@ -18,11 +18,13 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Path as PathParam
 from fastapi.responses import PlainTextResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
 from journal.log import JournalError
+from ui.api.detail import RUN_ID_PATTERN, decision_detail, records_dir
 from ui.api.explainer import explainer
 from ui.api.history import FILTERS, decisions, load_reasons
 from ui.api.paths import Paths
@@ -92,6 +94,15 @@ def create_app(paths: Paths | None = None, *,
         return decisions(reader.read(), clock().astimezone(NY), outcome=outcome,
                          day_from=day_from, day_to=day_to, limit=limit, cursor=int(cursor),
                          reasons=reasons)
+
+    @app.get("/api/decisions/{run_id}")
+    def get_decision(run_id: Annotated[str, PathParam(pattern=RUN_ID_PATTERN)]) -> dict:
+        """The Decision detail page (ui/api/detail.py). 404 when nothing knows run_id."""
+        body = decision_detail(reader.read(), clock().astimezone(NY), run_id,
+                               records_dir(paths.journal), reasons)
+        if body is None:
+            raise HTTPException(status_code=404, detail="no such decision")
+        return body
 
     @app.get("/api/health")
     def health() -> dict:

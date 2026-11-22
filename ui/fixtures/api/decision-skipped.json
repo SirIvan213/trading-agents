@@ -1,0 +1,101 @@
+{
+  "run_id": "RUN_ID",
+  "symbol": "ABCD",
+  "at": "2026-11-03T12:00:00-05:00",
+  "day": "2026-11-03",
+  "outcome": "SKIPPED",
+  "why": {
+    "code": "skipped",
+    "text": "Not proven to report earnings (no SEC 8-K item 2.02 in 100 days), so no AI time was spent",
+    "detail": "no 8-K item 2.02 in the last 100 days"
+  },
+  "order_status": null,
+  "in_short": "ABCD was skipped before any AI ran. Not proven to report earnings (no SEC 8-K item 2.02 in 100 days), so no AI time was spent.",
+  "numbers": null,
+  "steps": [
+    {
+      "n": 1,
+      "key": "scan",
+      "title": "Scan",
+      "actor": "code",
+      "state": "done",
+      "line": "Picked by the run_day scan at 11:59 ET.",
+      "details": {
+        "scan_at": "2026-11-03T11:59:40-05:00"
+      }
+    },
+    {
+      "n": 2,
+      "key": "event_check",
+      "title": "Event check",
+      "actor": "code",
+      "state": "blocked",
+      "line": "Not proven to report earnings (no 8-K item 2.02 in the last 100 days), so no AI time was spent.",
+      "details": {
+        "coverage": {
+          "covered": false,
+          "reason": "no 8-K item 2.02 in the last 100 days",
+          "last_item_202": null,
+          "fetch_failed": false
+        }
+      }
+    },
+    {
+      "n": 3,
+      "key": "analysts",
+      "title": "Analysts",
+      "actor": "ai",
+      "state": "not_reached",
+      "line": "Not reached.",
+      "details": null
+    },
+    {
+      "n": 4,
+      "key": "plans",
+      "title": "Plans",
+      "actor": "code",
+      "state": "not_reached",
+      "line": "Not reached.",
+      "details": null
+    },
+    {
+      "n": 5,
+      "key": "debate",
+      "title": "Debate",
+      "actor": "ai",
+      "state": "not_reached",
+      "line": "Not reached.",
+      "details": null
+    },
+    {
+      "n": 6,
+      "key": "trader",
+      "title": "Trader",
+      "actor": "ai",
+      "state": "not_reached",
+      "line": "Not reached.",
+      "details": null
+    },
+    {
+      "n": 7,
+      "key": "order_ticket",
+      "title": "Order ticket",
+      "actor": "code",
+      "state": "not_reached",
+      "line": "Not reached: no plan was chosen.",
+      "details": null
+    },
+    {
+      "n": 8,
+      "key": "approve_and_log",
+      "title": "Approve and log",
+      "actor": "you",
+      "state": "not_reached",
+      "line": "Not reached: no ticket to approve.",
+      "details": null
+    }
+  ],
+  "order_events": [],
+  "record_available": true,
+  "problems": []
+}
