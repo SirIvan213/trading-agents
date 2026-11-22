@@ -17,7 +17,7 @@ For changes under `ui/`, also check the UI track rules in CLAUDE.md:
 - GET only and 127.0.0.1 only;
 - no forbidden imports;
 - no lock and no write under `journal/` or `config/`;
-- no opening of the budget file until #213;
+- no opening of the budget file or `journal/cache/` until #213;
 - money shown as recorded, never computed;
 - record text as plain text only, with no raw HTML or Markdown rendering;
 - problems shown, never hidden.

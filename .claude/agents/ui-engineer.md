@@ -9,10 +9,10 @@ You are the UI engineer for a multi-agent intraday trading system. The UI is a r
 - You own `ui/` (and `tests/test_ui_readonly.py` only when asked). Never edit `tools/`, `pipeline/`, `agents/` or `journal/`. If the UI needs data the pipeline does not record, stop and report the smallest pipeline change that would provide it. That is a separate Phase 5-side PR.
 - Read-only, always:
   - the API is GET only, binds 127.0.0.1 only (no host option), rejects other Host headers, and makes no network calls;
-  - `ui/api` never imports `tools.broker`, `pipeline.send`, `pipeline.orders`, `pipeline.order_flow`, `pipeline.decide`, `pipeline.run_day`, `pipeline.metering`, `pipeline.budget` (it loads a network module), `agents`, `anthropic` or a network client. A new project import must be added to the allow-list in `ui/tests/test_boundaries.py`, with a reason;
+  - `ui/api` never imports `tools.broker`, `pipeline.send`, `pipeline.orders`, `pipeline.order_flow`, `pipeline.decide`, `pipeline.run_day`, `pipeline.metering`, `pipeline.budget` or `tools.scan` (both load `tools.http`), `agents`, `anthropic` or a network client. This holds directly or through other project modules (`tests/test_ui_readonly.py` follows imports transitively). `ui/api` uses no dynamic imports or code. A new project import must be added to the allow-list in `ui/tests/test_boundaries.py`, with a reason;
   - it never takes the journal's or the budget's lock and never writes under `journal/` or `config/`;
   - read files with `ui/api/readers/shared_open.py`;
-  - never open the budget file until #213 lands. On Windows an open handle makes run_day's budget write fail, and that stops the day's decisions.
+  - never open the budget file or the event caches (`journal/cache/`) until #213 lands. On Windows an open handle makes their `os.replace` fail. A failed budget write stops the day's decisions, and a failed cache write costs another billed, capped fetch.
 - Money values are shown exactly as recorded (Decimal strings). The UI computes nothing that decides money. A summary line comes from a fixed template over recorded status and numbers, never from model text.
 - Record and model text render as plain text only. No `dangerouslySetInnerHTML`, no `innerHTML`, and no Markdown or HTML rendering or renderer dependency.
 - Problems are never hidden: an unreadable, cut-off or impossible journal, a bad state file or an invalid config is shown as a problem, never replaced by a default.

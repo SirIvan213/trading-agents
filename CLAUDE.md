@@ -91,15 +91,18 @@ label `ui`).
 - The API is GET only and binds 127.0.0.1 only (no host option). It rejects a Host header
   other than 127.0.0.1 or localhost, and makes no network calls.
 - `ui/api` never imports `tools.broker`, `pipeline.send`, `pipeline.orders`,
-  `pipeline.order_flow`, `pipeline.decide`, `pipeline.run_day`, `pipeline.metering`, `agents`,
-  `anthropic`, a network client, or anything else that can place, change or approve an order.
-  `tests/test_ui_readonly.py` (required job) checks this statically. `ui/tests/test_boundaries.py`
-  checks what the import actually loads against an allow-list.
+  `pipeline.order_flow`, `pipeline.decide`, `pipeline.run_day`, `pipeline.metering`,
+  `pipeline.budget` or `tools.scan` (both load `tools.http`), `agents`, `anthropic`, a network
+  client, or anything else that can place, change or approve an order. This holds directly or
+  through other project modules, and `ui/api` uses no dynamic imports or code.
+  `tests/test_ui_readonly.py` (required job) checks this statically and transitively.
+  `ui/tests/test_boundaries.py` checks what the import actually loads against an allow-list.
 - It never takes the journal's or the budget's lock and never writes under `journal/` or
   `config/`. Files are read with `ui/api/readers/shared_open.py`, which shares read, write and
   delete.
-- Until #213 lands, it never opens the budget file: on Windows, an open handle makes
-  run_day's budget write fail, and that stops the day.
+- It never opens the budget file or the event caches (`journal/cache/`) until #213 lands. On
+  Windows an open handle makes their `os.replace` fail. A failed budget write stops the day,
+  and a failed cache write costs another billed, capped fetch.
 - Money values are shown as recorded by the journal and the tools. The UI computes nothing
   that decides money. "In short" summaries come from a fixed template over recorded status
   and numbers, never from model text.
