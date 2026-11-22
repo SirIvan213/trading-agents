@@ -1,4 +1,4 @@
-"""The one ticker rule shared by scan, sizing and the risk gate (issue #34).
+"""The one ticker rule shared by scan, sizing, the risk gate and run_day's config (#34, #221).
 
 A symbol is 1-5 ASCII capital letters, optionally followed by ONE share-class suffix: a dot and
 1-2 letters ("BRK.B", "BF.A"). Dots appear nowhere else ("A..", "AB.", ".AB" are invalid).
