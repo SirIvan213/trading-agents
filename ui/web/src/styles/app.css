@@ -194,7 +194,8 @@ table.decisions a { text-decoration: none; }
 .orange { color: var(--orange); }
 .jumps { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; }
 .jump { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--text2); cursor: pointer; font: inherit; font-size: 13px; }
-.jump.state-not_recorded, .jump.state-not_reached { color: var(--faint); border-style: dashed; }
+.jump-not_recorded, .jump-not_reached { color: var(--faint); border-style: dashed; }
+.step-card .link-button, .table-scroll .link-button { align-self: flex-start; text-align: left; }
 .step-card { gap: 10px; padding: 18px 20px; }
 .step-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .state { font-size: 12px; font-weight: 700; padding: 2px 10px; border-radius: 999px; }

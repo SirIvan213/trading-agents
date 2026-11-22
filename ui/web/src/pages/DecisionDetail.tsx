@@ -112,7 +112,7 @@ function Ready({ d }: { d: Detail }) {
         <nav aria-label="Jump to step" className="jumps">
           <span className="faint">How it got there:</span>
           {d.steps.map((s) => (
-            <button key={s.key} type="button" className={`jump state-${s.state}`}
+            <button key={s.key} type="button" className={`jump jump-${s.state}`}
               onClick={() => document.getElementById(`step-${s.key}`)?.scrollIntoView()}>
               {s.n} {s.title}
             </button>
