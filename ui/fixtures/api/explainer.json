@@ -98,7 +98,7 @@
       "key": "history",
       "title": "History",
       "route": "#/history",
-      "built": false,
+      "built": true,
       "text": "Every past decision, with filters, and later the results compared with simple strategies."
     }
   ],

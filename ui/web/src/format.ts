@@ -31,3 +31,21 @@ export function showTime(hhmm: string): string {
 export function showCount(n: number | null): string {
   return n === null ? MISSING : n.toLocaleString("en-US");
 }
+
+/** A recorded money string as dollars: "-31.65" -> "-$31.65". The digits are never changed. */
+export function showMoney(value: string | null): string {
+  if (value === null) return MISSING;
+  return value.startsWith("-") ? `-$${value.slice(1)}` : `$${value}`;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+  "Dec"];
+
+/** A recorded New York ISO time ("2026-11-23T10:05:00-05:00") as "Nov 23 10:05", read from
+ * the text itself: the browser's own time zone is never applied. */
+export function showWhen(iso: string | null): string {
+  if (iso === null) return MISSING;
+  const m = /^\d{4}-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso);
+  if (!m) return iso;
+  return `${MONTHS[Number(m[1]) - 1]} ${Number(m[2])} ${m[3]}:${m[4]}`;
+}

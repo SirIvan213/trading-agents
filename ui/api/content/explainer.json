@@ -22,7 +22,7 @@
   "screens": [
     {"key": "live", "title": "Live run", "route": "#/live", "built": false, "text": "What's happening right now: today's limits, the stocks found, the one being decided and any open position."},
     {"key": "decision", "title": "Decision detail", "route": "#/history", "built": false, "text": "One decision from start to finish: what each agent said and why, the plans, and the order ticket. Open any decision from History."},
-    {"key": "history", "title": "History", "route": "#/history", "built": false, "text": "Every past decision, with filters, and later the results compared with simple strategies."}
+    {"key": "history", "title": "History", "route": "#/history", "built": true, "text": "Every past decision, with filters, and later the results compared with simple strategies."}
   ],
   "glossary": [
     {"term": "BUY / PASS", "text": "The Trader's only two answers: propose buying one plan, or don't trade."},

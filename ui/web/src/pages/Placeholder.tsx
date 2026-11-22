@@ -2,7 +2,6 @@
 
 const PLANNED = {
   live: { title: "Live run", pr: "UI-5", issue: 218 },
-  history: { title: "History", pr: "UI-3", issue: 216 },
   decision: { title: "Decision detail", pr: "UI-4", issue: 217 },
 } as const;
 

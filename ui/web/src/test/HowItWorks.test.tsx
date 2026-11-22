@@ -139,7 +139,6 @@ describe("How it works", () => {
 describe("pages not built yet", () => {
   it.each([
     ["#/live", "Live run", "UI-5"],
-    ["#/history", "History", "UI-3"],
     ["#/decision/run-1", "Decision detail", "UI-4"],
   ])("%s says it is coming", (hash, title, pr) => {
     const fetchMock = serve(golden);
