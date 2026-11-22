@@ -186,7 +186,8 @@ def test_a_failed_analyst_skips_the_debate_and_records_its_reason_code_only(tmp_
     result, router, _, _ = run_direct(tmp_path, scr, ask=lambda _: "yes")
     rec = only_record(tmp_path)[1]
     tech = rec["analysts"]["technical"]
-    assert tech["report"] is None
+    # a failed analyst's report is the orchestrator's neutral placeholder, not model output
+    assert (tech["report"]["stance"], tech["report"]["confidence"]) == ("neutral", 0.0)
     assert tech["run"]["ok"] is False and tech["run"]["reason_code"]
     assert "reason" not in tech["run"]
     assert all("reason" not in r for r in tech["run"]["retries"])
