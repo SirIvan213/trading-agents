@@ -13,6 +13,17 @@ Review the current diff (`git diff` and `git diff --staged`) and report, most se
 3. **Missing tests** — new behavior without a test.
 4. **Suggestions** — clarity and design, briefly.
 
+For changes under `ui/`, also check the UI track rules in CLAUDE.md:
+- GET only and 127.0.0.1 only;
+- no forbidden imports;
+- no lock and no write under `journal/` or `config/`;
+- no opening of the budget file until #213;
+- money shown as recorded, never computed;
+- record text as plain text only, with no raw HTML or Markdown rendering;
+- problems shown, never hidden.
+
+A UI PR that edits `tools/`, `pipeline/`, `agents/` or `journal/` is a blocker.
+
 Give file and line for each point. If there are no blockers, say so plainly.
 
 Only run read-only git and gh commands (e.g. `git status`, `git diff`, `git log`, `git show`, `gh pr view`, `gh pr diff`, `gh pr checks`). Any git or gh command that changes the repo locally or on GitHub — including `git add`, `checkout`, `switch`, `reset`, `stash`, `commit`, `push`, and `gh api` writes — is the main session's job; you review and report back.
