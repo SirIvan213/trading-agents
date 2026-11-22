@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.market import NY
+from tools.atomic_write import atomic_write_text
 from tools.earnings_calendar import (
     fetch_av_earnings_calendar_typed,
     fetch_fmp_earnings_calendar,
@@ -159,9 +160,7 @@ class _DailyCalendarCache:
                 self._good = record
             try:
                 self.cache_dir.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-                tmp.write_text(json.dumps(record), encoding="utf-8")
-                os.replace(tmp, path)  # atomic: a reader never sees half a file
+                atomic_write_text(path, json.dumps(record))  # atomic; #213 on Windows
             except OSError:
                 pass  # a cache that cannot be written only costs another fetch
             return record

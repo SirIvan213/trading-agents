@@ -44,7 +44,6 @@ import os
 import sys
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -69,6 +68,7 @@ from pipeline.filelock import LockTimeout, exclusive_file_lock
 from pipeline.market import NY, run_scan
 from pipeline.order_flow import wall_clock
 from pipeline.terminal import WatchedTerminal
+from tools.atomic_write import atomic_write_text
 from tools.market_calendar import (
     CalendarError,
     closed_reason,
@@ -171,12 +171,9 @@ class Day:
                 "phase": self.phase, **counts}
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
-            tmp = self.heartbeat_path.with_name(
-                f"run_day.heartbeat.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-            tmp.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
-            os.replace(tmp, self.heartbeat_path)
+            atomic_write_text(self.heartbeat_path, json.dumps(body, sort_keys=True))  # #213
         except OSError:
-            pass
+            pass  # best effort: the next beat follows; no temp file is left behind
 
     def wait_until(self, when: datetime, phase: str) -> None:
         """Sleep until `when`, rewriting the heartbeat at least every HEARTBEAT_S."""

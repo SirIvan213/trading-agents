@@ -30,7 +30,6 @@ counted. So the day's tokens used plus reserved never exceed the cap (#157).
 from __future__ import annotations
 
 import json
-import os
 import threading
 import uuid
 from dataclasses import dataclass
@@ -39,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.filelock import LockTimeout, exclusive_file_lock
+from tools.atomic_write import atomic_write_text
 from tools.config import CONFIG_DIR
 from tools.scan import validate_symbols
 
@@ -211,9 +211,9 @@ class DailyBudget:
 
     def _write(self, s: dict[str, Any]) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        tmp.write_text(json.dumps(s, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, self.path)  # atomic: a reader never sees half a file
+        # atomic, with POSIX-semantics replace and a bounded PermissionError retry on Windows
+        # (#213); an OSError after that is CapReached in the callers, exactly as before
+        atomic_write_text(self.path, json.dumps(s, sort_keys=True))
 
     def _locked(self):  # noqa: ANN202
         return exclusive_file_lock(self.lock_path, LOCK_TIMEOUT_S)
