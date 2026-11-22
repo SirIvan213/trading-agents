@@ -39,6 +39,7 @@ export interface Explainer {
   limits: Limit[];
   limits_source: Source;
   paper: boolean | null;
+  trading_enabled: boolean | null;
   caps: Cap[];
   caps_source: Source;
   problems: Problem[];

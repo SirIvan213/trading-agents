@@ -132,3 +132,8 @@ p { margin: 0; }
   .hero h1 { font-size: 30px; }
   .glossary { grid-template-columns: 1fr; }
 }
+
+/* header mode badges: anything but a confirmed paper config is a warning */
+.badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.badge-muted { color: var(--faint); border: 1px solid var(--border); }
+.badge-warn { background: rgba(255, 179, 107, 0.18); color: var(--orange); border: 1px solid rgba(255, 179, 107, 0.6); }

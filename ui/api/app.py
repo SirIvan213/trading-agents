@@ -39,7 +39,7 @@ NY = ZoneInfo("America/New_York")
 ALLOWED_HOSTS = ("127.0.0.1", "localhost")
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; "
-       "img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'none'; "
+       "img-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'none'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 SECURITY_HEADERS = {"Content-Security-Policy": CSP, "X-Content-Type-Options": "nosniff",
                     "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY"}
@@ -109,6 +109,10 @@ def create_app(paths: Paths | None = None, *,
                         "entries": len(snap.entries), "tail_incomplete": snap.tail_bytes > 0,
                         "error": snap.error, "orders_ok": orders_ok},
             "limits": limits.view(),
+            # the header's PAPER badge and kill-switch note (None: the limits are unknown)
+            "paper": bool(limits.value.paper) if limits.value is not None else None,
+            "trading_enabled": (bool(limits.value.trading_enabled)
+                                if limits.value is not None else None),
             "state": {
                 # existence only, from the folder's listing; any read of the budget's
                 # contents goes through open_shared (readers/state.py)

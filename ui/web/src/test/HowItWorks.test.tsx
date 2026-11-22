@@ -1,9 +1,11 @@
-// The How it works page rendered from the golden API response (ui/fixtures/api/explainer.json),
-// which ui/tests/test_explainer.py checks against the real endpoint.
+// The How it works page and the shared header, rendered from the golden API responses
+// (ui/fixtures/api/explainer.json and health.json), which ui/tests/test_explainer.py checks
+// against the real endpoints.
 import { render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import golden from "../../../fixtures/api/explainer.json";
+import health from "../../../fixtures/api/health.json";
 import { App } from "../App";
 import type { Explainer } from "../types";
 
@@ -11,11 +13,22 @@ afterEach(() => {
   window.location.hash = "";
 });
 
-function serve(body: unknown, status = 200) {
-  const fetchMock = vi.fn(async (_url: string) =>
-    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }));
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status, headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** Serve the explainer (`body`, `status`) and the health response by URL. */
+function serve(body: unknown, status = 200, healthBody: unknown = health) {
+  const fetchMock = vi.fn(async (url: string) =>
+    url === "/api/health" ? json(healthBody) : json(body, status));
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
+}
+
+function urls(fetchMock: ReturnType<typeof serve>): string[] {
+  return fetchMock.mock.calls.map((c) => c[0]).sort();
 }
 
 function copy(): Explainer {
@@ -33,15 +46,14 @@ async function openAbout(body: unknown = golden) {
 describe("How it works", () => {
   it("fetches only its own API", async () => {
     const fetchMock = await openAbout();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/explainer");
+    expect(urls(fetchMock)).toEqual(["/api/explainer", "/api/health"]);
   });
 
   it("shows the hero, the four facts and the header", async () => {
     await openAbout();
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(golden.hero.title);
     for (const f of golden.facts) expect(screen.getByText(f.title)).toBeInTheDocument();
-    expect(screen.getByText("PAPER · practice money")).toBeInTheDocument();
+    expect(await screen.findByText("PAPER · practice money")).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Main" });
     expect(within(nav).getByRole("link", { name: "How it works" }))
       .toHaveAttribute("aria-current", "page");
@@ -112,7 +124,7 @@ describe("How it works", () => {
   it("renders API text as plain text, never as HTML", async () => {
     const body = copy();
     body.glossary = [{ term: "<img src=x onerror=alert(1)>", text: "<b>bold</b> **md**" }];
-    body.hero = { title: "<script>alert(1)</script>", text: "[link](http://x)" };
+    body.hero = { title: "<script>alert(1)</script>", text: "[link](/x)" };
     await openAbout(body);
     expect(document.querySelector("main img")).toBeNull();
     expect(document.querySelector("main script")).toBeNull();
@@ -135,12 +147,51 @@ describe("pages not built yet", () => {
     render(<App />);
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(title);
     expect(screen.getByText(new RegExp(`coming in ${pr}`))).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(urls(fetchMock)).toEqual(["/api/health"]); // only the header's mode
   });
 
   it("an unknown page is not found", () => {
+    serve(golden);
     window.location.hash = "#/nope";
     render(<App />);
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Page not found");
+  });
+});
+
+describe("the header's mode badges", () => {
+  async function header(healthBody: unknown) {
+    serve(golden, 200, healthBody);
+    window.location.hash = "#/live";
+    render(<App />);
+  }
+
+  it("says PAPER only when the config says paper: true", async () => {
+    await header(health);
+    expect(await screen.findByText("PAPER · practice money")).toBeInTheDocument();
+    expect(screen.queryByText(/Kill switch/)).not.toBeInTheDocument();
+  });
+
+  it("warns when the config says paper: false", async () => {
+    await header({ ...health, paper: false });
+    expect(await screen.findByText(/NOT PAPER/)).toBeInTheDocument();
+    expect(screen.queryByText("PAPER · practice money")).not.toBeInTheDocument();
+  });
+
+  it("warns when the limits can't be read", async () => {
+    await header({ ...health, paper: null, trading_enabled: null });
+    expect(await screen.findByText(/Mode unknown: the limits config/)).toBeInTheDocument();
+    expect(screen.queryByText("PAPER · practice money")).not.toBeInTheDocument();
+  });
+
+  it("warns when the server does not answer", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
+    window.location.hash = "#/live";
+    render(<App />);
+    expect(await screen.findByText(/Mode unknown: the server/)).toBeInTheDocument();
+  });
+
+  it("shows the kill switch", async () => {
+    await header({ ...health, trading_enabled: false });
+    expect(await screen.findByText("Kill switch on: no new orders")).toBeInTheDocument();
   });
 });

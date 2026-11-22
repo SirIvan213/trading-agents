@@ -177,8 +177,10 @@ def test_the_static_files_are_read_only_and_stay_inside_dist(cfg, dist):
     for method in ("post", "put", "delete"):
         assert getattr(c, method)("/index.html").status_code == 405
     (dist.parent / "secret.txt").write_text("no")
-    assert c.get("/../secret.txt").status_code == 404
-    assert c.get("/%2e%2e/secret.txt").status_code == 404
+    for url in ("/../secret.txt", "/%2e%2e/secret.txt", "/..%5csecret.txt",
+                "/%2e%2e%5csecret.txt", "/assets/../../secret.txt", "/assets/..%5c..%5csecret.txt"):
+        r = c.get(url)
+        assert r.status_code == 404 and r.text != "no", url
 
 
 def test_without_a_build_the_root_says_how_to_build(cfg, tmp_path):
@@ -206,3 +208,34 @@ def test_paper_false_is_always_a_problem(cfg):
     body = get(cfg).json()
     assert body["problems"], "paper: false must never read as healthy"
     assert body["paper"] in (False, None)
+
+
+def test_the_kill_switch_is_shown_and_a_problem(cfg):
+    raw = json.loads((cfg.config_dir / "limits.json").read_text())
+    raw["trading_enabled"] = False
+    (cfg.config_dir / "limits.json").write_text(json.dumps(raw))
+    body = get(cfg).json()
+    assert body["trading_enabled"] is False
+    assert any("kill switch" in p["text"] for p in body["problems"])
+    health = get(cfg, "/api/health").json()
+    assert health["trading_enabled"] is False and health["paper"] is True
+
+
+def test_health_carries_paper_for_the_header(cfg):
+    body = get(cfg, "/api/health").json()
+    assert body["paper"] is True and body["trading_enabled"] is True
+    (cfg.config_dir / "limits.json").write_text("{bad")
+    body = get(cfg, "/api/health").json()
+    assert body["paper"] is None and body["trading_enabled"] is None
+
+
+HEALTH_GOLDEN = REPO / "ui" / "fixtures" / "api" / "health.json"
+
+
+def test_health_matches_the_golden_json(cfg):
+    """The header's mode badges render from this golden response in Vitest."""
+    body = get(cfg, "/api/health").json()
+    if os.environ.get("UPDATE_GOLDEN") == "1":
+        HEALTH_GOLDEN.write_text(json.dumps(body, indent=2, ensure_ascii=False) + "\n",
+                                 encoding="utf-8")
+    assert body == json.loads(HEALTH_GOLDEN.read_text(encoding="utf-8"))

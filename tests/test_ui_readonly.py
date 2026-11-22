@@ -53,6 +53,8 @@ BUDGET_NAMES = frozenset({"load_run_day_config", "CEILINGS"})
 # names ui/api may never use: what writes or locks the budget, and the way around an import
 BUDGET_FORBIDDEN = frozenset({"DailyBudget", "exclusive_file_lock", "try_lock", "lock_path",
                               "LockTimeout", "__globals__", "__dict__"})
+# ways around a static name check: refused in ui/api outright
+EVASION_ATTRS = frozenset({"modules", "budget", "__getattribute__"})  # sys.modules, pkg.budget
 # builtins called by name (re.compile and the like are attribute calls and stay allowed)
 DYNAMIC_BUILTINS = ("exec", "eval", "compile", "__import__")
 DYNAMIC_FUNCTIONS = ("import_module", "run_module", "run_path", "__import__")
@@ -71,10 +73,12 @@ RENDERERS = ("markdown", "marked", "remark", "remarkable", "rehype", "showdown",
              "dompurify", "sanitize-html")
 _RENDERER = re.compile(r"(^|[/@-])(" + "|".join(map(re.escape, RENDERERS)) + r")([/-]|$)")
 WEB_SOURCES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".html", ".vue",
-               ".svelte")
+               ".svelte", ".css", ".scss", ".sass", ".less")
 # an absolute URL to another origin in a frontend source: the page talks to its own API only
-EXTERNAL_URL = re.compile(r"(?:https?:)?//(?!127\.0\.0\.1[:/]|localhost[:/])[a-z0-9-]+\.[a-z]",
-                          re.IGNORECASE)
+# any host (dotted, numeric or bare) except 127.0.0.1 or localhost; "// a comment" is no URL
+EXTERNAL_URL = re.compile(
+    r"(?:https?:)?//(?!(?:127\.0\.0\.1|localhost)(?:[:/\"'\s)]|$))[a-z0-9\[]",
+    re.IGNORECASE)
 DEP_SECTIONS = ("dependencies", "devDependencies", "peerDependencies",
                 "optionalDependencies")
 
@@ -166,6 +170,16 @@ def budget_violations(source: str) -> list[str]:
             bad.append(f".{node.attr} (the UI never writes or locks the budget)")
         elif isinstance(node, ast.Constant) and node.value in BUDGET_FORBIDDEN:
             bad.append(f"{node.value!r} (the UI never writes or locks the budget)")
+        if isinstance(node, ast.Import) and any(a.name == "pipeline" for a in node.names):
+            bad.append("import pipeline (reach pipeline.budget only by its two names)")
+        if isinstance(node, ast.Attribute) and node.attr in EVASION_ATTRS:
+            bad.append(f".{node.attr} (cannot be checked statically)")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "vars":
+                bad.append("vars() (cannot be checked statically)")
+            elif node.func.id in ("getattr", "setattr", "hasattr") and not (
+                    len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)):
+                bad.append(f"{node.func.id}() with a computed name (cannot be checked)")
     return bad
 
 
@@ -249,7 +263,9 @@ def test_the_frontend_loads_nothing_from_another_origin():
 
 def test_the_external_url_checker():
     for src in ('<link href="https://fonts.googleapis.com/css2">', "fetch('https://x.io/a')",
-                "@import url(//cdn.example.com/a.css);", "src: url(http://evil.test/f.woff2)"):
+                "@import url(//cdn.example.com/a.css);", "src: url(http://evil.test/f.woff2)",
+                "http://10.0.0.5/", "http://127.0.0.1.nip.io/", "https://intranet/",
+                "http://localhost.evil.test/", "fetch('http://[::1]:80/')"):
         assert EXTERNAL_URL.findall(src), src
     for src in ('proxy: { "/api": "http://127.0.0.1:8765" }', "fetch('/api/explainer')",
                 "http://localhost:5173/", "// a comment", "a // b"):
@@ -314,7 +330,12 @@ def test_pipeline_budget_allows_only_its_two_names():
                 ok + "load_run_day_config.__globals__['DailyBudget']",
                 ok + "getattr(load_run_day_config, '__globals__')",
                 ok + "x = DailyBudget",
-                ok + "y.lock_path"):
+                ok + "y.lock_path",
+                "import pipeline\npipeline.budget.config_from_dict({})",
+                "import pipeline.filelock",
+                "import sys\nsys.modules['pipeline.budget']",
+                ok + "getattr(load_run_day_config, '__glo' + 'bals__')",
+                "import x\nvars(x)"):
         assert import_violations(src), src
 
 

@@ -9,6 +9,7 @@ from tools.config (e.g. "50.00"), a time is "HH:MM" New York time; nothing is co
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 from ui.api.paths import Paths
@@ -23,8 +24,8 @@ LIMITS = (
     ("max_loss_per_trade", "most a single trade can lose", "usd"),
     ("daily_loss_limit", "most a day can lose", "usd"),
     ("max_trades_per_day", "trades per day, at most", "count"),
-    ("max_open_positions", "open position at a time", "count"),
-    ("flat_by", "everything closed by (New York time), nothing held overnight", "time"),
+    ("max_open_positions", "open positions at a time, at most", "count"),
+    ("flat_by", "planned close-out time (New York), earlier on short days", "time"),
     ("max_position_value", "most one position can be worth", "usd"),
     ("max_plan_age_s", "how long a plan stays valid, approval included", "seconds"),
 )
@@ -71,17 +72,23 @@ def explainer(paths: Paths) -> dict:
     run_day = read_run_day_config(paths.config_dir)
     if run_day.error:
         problems.append({"level": "error", "text": run_day.error})
+    if limits.value is not None and not limits.value.trading_enabled:
+        problems.append({"level": "warn", "text": "the kill switch is on (trading_enabled: "
+                         "false): no new orders"})
     ceiling = ceilings()
-    caps = run_day.value.caps if run_day.value is not None else None
+    # dataclass fields by name (asdict), never a getattr with a computed name
+    lim = asdict(limits.value) if limits.value is not None else None
+    caps = asdict(run_day.value.caps) if run_day.value is not None else None
     return {
         **content,
         "limits": [{"key": k, "label": label, "unit": unit,
-                    "value": _show(getattr(limits.value, k)) if limits.value else None}
+                    "value": _show(lim[k]) if lim is not None else None}
                    for k, label, unit in LIMITS],
         "limits_source": limits.view(),
-        "paper": bool(limits.value.paper) if limits.value else None,
+        "paper": bool(lim["paper"]) if lim is not None else None,
+        "trading_enabled": bool(lim["trading_enabled"]) if lim is not None else None,
         "caps": [{"key": k, "label": label, "ceiling": ceiling[k],
-                  "value": getattr(caps, k) if caps is not None else None}
+                  "value": caps[k] if caps is not None else None}
                  for k, label in CAPS],
         "caps_source": run_day.view(),
         "problems": problems,

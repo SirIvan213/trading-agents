@@ -10,14 +10,14 @@
     {"title": "Buy or pass, nothing else", "text": "It only buys a stock or passes. It never short-sells."}
   ],
   "steps": [
-    {"n": 1, "key": "scan", "title": "Scan", "actor": "code", "text": "Every few minutes, check the watchlist for stocks that are moving on unusual volume with a tight spread."},
-    {"n": 2, "key": "event_check", "title": "Event check", "actor": "code", "text": "Before any AI time is spent, skip a stock that isn't proven to report earnings (no SEC 8-K item 2.02 in the last 100 days). The earnings and halt check runs again at the order ticket, and only CLEAR can trade."},
+    {"n": 1, "key": "scan", "title": "Scan", "actor": "code", "text": "Every few minutes, check the watchlist for stocks gapping up on volume with a tight spread and a fresh quote, ranked by relative volume."},
+    {"n": 2, "key": "event_check", "title": "Event check", "actor": "code", "text": "Before any AI time is spent, skip a stock that isn't proven to report earnings (no SEC 8-K item 2.02 in the last 100 days). The earnings and halt check itself runs at the order ticket and again at approval, and only CLEAR can trade."},
     {"n": 3, "key": "analysts", "title": "Analysts", "actor": "ai", "text": "Three AI analysts each look at one thing: the price chart, the news, and the company's finances."},
     {"n": 4, "key": "plans", "title": "Plans", "actor": "code", "text": "For each trade setup, code works out the entry price, the stop-loss (where to get out if it goes wrong) and the target."},
     {"n": 5, "key": "debate", "title": "Debate", "actor": "ai", "text": "A Bull agent argues for buying and a Bear agent argues against. A fatal objection from the Bear forces a pass."},
     {"n": 6, "key": "trader", "title": "Trader", "actor": "ai", "text": "The Trader reads everything, then picks one plan to BUY or decides to PASS."},
     {"n": 7, "key": "order_ticket", "title": "Order ticket", "actor": "code", "text": "Code sizes the order so the worst-case loss stays within the limits, then checks every risk limit and the earnings and halt check. Any failure blocks the order."},
-    {"n": 8, "key": "approve_and_log", "title": "Approve and log", "actor": "you", "text": "A person approves the ticket in the terminal. Every step, including passes, is written to the journal."}
+    {"n": 8, "key": "approve_and_log", "title": "Approve and log", "actor": "you", "text": "A person approves the ticket in the terminal. Every decision, including passes and skips, is written to the journal."}
   ],
   "screens": [
     {"key": "live", "title": "Live run", "route": "#/live", "built": false, "text": "What's happening right now: today's limits, the stocks found, the one being decided and any open position."},
@@ -31,7 +31,7 @@
     {"term": "Stop-loss", "text": "A price below the entry where the position is sold automatically to cap the loss."},
     {"term": "Target", "text": "A price above the entry where the position is sold automatically to take the profit."},
     {"term": "R (2R, 1R)", "text": "Reward compared with risk. 2R means the target would earn twice what the stop would lose."},
-    {"term": "Worst-case loss", "text": "What the trade loses if the stop is hit after a fill at the limit price. Code keeps it within the per-trade loss limit."},
+    {"term": "Worst-case loss", "text": "What the trade loses if it fills at the limit price and the stop fills at its price. Code keeps it within the per-trade loss limit; a gap through the stop can lose more."},
     {"term": "VWAP", "text": "The day's average price, weighted by volume. Price above it is a sign of strength."},
     {"term": "ORB", "text": "Opening-range breakout: price climbing above its high from the first minutes of the day."},
     {"term": "ATR", "text": "Average true range: how much the price typically moves per bar. Used to judge whether a stop is too wide or an entry too far."},

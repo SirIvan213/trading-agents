@@ -27,14 +27,14 @@
       "key": "scan",
       "title": "Scan",
       "actor": "code",
-      "text": "Every few minutes, check the watchlist for stocks that are moving on unusual volume with a tight spread."
+      "text": "Every few minutes, check the watchlist for stocks gapping up on volume with a tight spread and a fresh quote, ranked by relative volume."
     },
     {
       "n": 2,
       "key": "event_check",
       "title": "Event check",
       "actor": "code",
-      "text": "Before any AI time is spent, skip a stock that isn't proven to report earnings (no SEC 8-K item 2.02 in the last 100 days). The earnings and halt check runs again at the order ticket, and only CLEAR can trade."
+      "text": "Before any AI time is spent, skip a stock that isn't proven to report earnings (no SEC 8-K item 2.02 in the last 100 days). The earnings and halt check itself runs at the order ticket and again at approval, and only CLEAR can trade."
     },
     {
       "n": 3,
@@ -76,7 +76,7 @@
       "key": "approve_and_log",
       "title": "Approve and log",
       "actor": "you",
-      "text": "A person approves the ticket in the terminal. Every step, including passes, is written to the journal."
+      "text": "A person approves the ticket in the terminal. Every decision, including passes and skips, is written to the journal."
     }
   ],
   "screens": [
@@ -129,7 +129,7 @@
     },
     {
       "term": "Worst-case loss",
-      "text": "What the trade loses if the stop is hit after a fill at the limit price. Code keeps it within the per-trade loss limit."
+      "text": "What the trade loses if it fills at the limit price and the stop fills at its price. Code keeps it within the per-trade loss limit; a gap through the stop can lose more."
     },
     {
       "term": "VWAP",
@@ -237,13 +237,13 @@
     },
     {
       "key": "max_open_positions",
-      "label": "open position at a time",
+      "label": "open positions at a time, at most",
       "unit": "count",
       "value": "1"
     },
     {
       "key": "flat_by",
-      "label": "everything closed by (New York time), nothing held overnight",
+      "label": "planned close-out time (New York), earlier on short days",
       "unit": "time",
       "value": "15:55"
     },
@@ -266,6 +266,7 @@
     "error": null
   },
   "paper": true,
+  "trading_enabled": true,
   "caps": [
     {
       "key": "max_decisions",

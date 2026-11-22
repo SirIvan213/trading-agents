@@ -1,3 +1,6 @@
+import { useEffect, useState } from "react";
+
+import { getJson } from "../api";
 import type { Route } from "../router";
 
 const NAV = [
@@ -6,7 +9,51 @@ const NAV = [
   { href: "#/", label: "How it works", pages: ["about"] },
 ] as const;
 
+// From GET /api/health: the limits config as recorded (null: it could not be read).
+interface Mode {
+  paper: boolean | null;
+  trading_enabled: boolean | null;
+}
+
+type ModeState = { status: "loading" } | { status: "error" } | { status: "ready"; mode: Mode };
+
+/** The PAPER badge says only what the config says: never "PAPER" when it is false or unknown. */
+function useMode(): ModeState {
+  const [state, setState] = useState<ModeState>({ status: "loading" });
+  useEffect(() => {
+    let live = true;
+    getJson<Mode>("/api/health")
+      .then((mode) => live && setState({ status: "ready", mode }))
+      .catch(() => live && setState({ status: "error" }));
+    return () => { live = false; };
+  }, []);
+  return state;
+}
+
+function ModeBadges({ state }: { state: ModeState }) {
+  if (state.status === "loading") return <span className="badge badge-muted">checking config…</span>;
+  if (state.status === "error") {
+    return <span className="badge badge-warn" role="status">Mode unknown: the server did not answer</span>;
+  }
+  const { paper, trading_enabled } = state.mode;
+  return (
+    <>
+      {paper === true && <span className="paper-badge">PAPER · practice money</span>}
+      {paper === false && (
+        <span className="badge badge-warn" role="status">NOT PAPER: the config says paper: false</span>
+      )}
+      {paper === null && (
+        <span className="badge badge-warn" role="status">Mode unknown: the limits config can't be read</span>
+      )}
+      {trading_enabled === false && (
+        <span className="badge badge-warn" role="status">Kill switch on: no new orders</span>
+      )}
+    </>
+  );
+}
+
 export function Header({ route }: { route: Route }) {
+  const mode = useMode();
   return (
     <header className="app-header">
       <a className="brand" href="#/">
@@ -17,7 +64,7 @@ export function Header({ route }: { route: Route }) {
         </svg>
         <span className="brand-name">trading-agents</span>
       </a>
-      <span className="paper-badge">PAPER · practice money</span>
+      <ModeBadges state={mode} />
       <nav aria-label="Main" className="main-nav">
         {NAV.map((item) => {
           const current = (item.pages as readonly string[]).includes(route.page);

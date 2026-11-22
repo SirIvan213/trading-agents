@@ -39,7 +39,14 @@ DENIED = ("tools.broker", "pipeline.send", "pipeline.orders", "pipeline.order_fl
 
 
 def loaded_modules() -> list[str]:
-    code = ("import json, sys; import ui.api.app, ui.api.__main__; "
+    # import, then serve one request of each kind: lazily loaded modules count too
+    code = ("import json, sys, tempfile; from pathlib import Path; "
+            "import ui.api.app, ui.api.__main__; "
+            "from fastapi.testclient import TestClient; from ui.api.paths import Paths; "
+            "d = Path(tempfile.mkdtemp()); "
+            "c = TestClient(ui.api.app.create_app(Paths(d / 'j', d / 's', d / 'c'), "
+            "web_dir=None), base_url='http://127.0.0.1'); "
+            "[c.get(u) for u in ('/api/health', '/api/explainer', '/')]; "
             "print(json.dumps(sorted(sys.modules)))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True,
                          text=True, check=True, timeout=120)
@@ -59,7 +66,7 @@ def test_importing_the_api_loads_only_allow_listed_project_modules():
 def test_every_route_is_get(tmp_path):
     from ui.api.paths import Paths
 
-    app = create_app(Paths(tmp_path / "j.jsonl", tmp_path, tmp_path))
+    app = create_app(Paths(tmp_path / "j.jsonl", tmp_path, tmp_path), web_dir=None)
     routes = [r for r in app.routes if isinstance(r, APIRoute)]
     assert routes
     for r in routes:

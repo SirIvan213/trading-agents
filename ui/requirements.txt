@@ -1,5 +1,6 @@
-# The UI track's Python dependencies, pinned to the versions the ui CI job tests (optional:
-# the core stays standard-library first).
+# The UI track's Python dependencies: the top-level packages are pinned to the versions the
+# ui CI job tests (their own dependencies are not; follow-up). Optional: the core stays
+# standard-library first.
 #   pip install -e ".[dev]" -r ui/requirements.txt
 fastapi==0.165.0
 starlette==1.10.0
