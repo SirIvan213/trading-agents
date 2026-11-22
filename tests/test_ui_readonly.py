@@ -46,6 +46,11 @@ DENY_IN_UI_API = ("importlib", "runpy", "subprocess", "multiprocessing", "ctypes
 # builtins called by name (re.compile and the like are attribute calls and stay allowed)
 DYNAMIC_BUILTINS = ("exec", "eval", "compile", "__import__")
 DYNAMIC_FUNCTIONS = ("import_module", "run_module", "run_path", "__import__")
+# attribute calls that run code or start a process (os.system, builtins.exec, os.spawnv ...);
+# `compile` only off `re` (re.compile is allowed)
+PROCESS_ATTRS = ("system", "popen", "startfile", "exec", "eval", "compile", "fork",
+                 "forkpty", "posix_spawn", "posix_spawnp")
+PROCESS_PREFIXES = ("spawn", "exec")
 PROJECT = ("agents", "journal", "pipeline", "tools", "ui")
 
 DANGEROUS_WEB = re.compile(
@@ -65,22 +70,29 @@ def _matches(module: str, names: tuple[str, ...]) -> bool:
     return any(module == d or module.startswith(d + ".") for d in names)
 
 
-def _package_of(path: Path) -> str:
+def _package_of(path: Path, root: Path = REPO) -> str:
     """The package a relative import in `path` resolves against (for an __init__.py, the
     package itself; for a module, its package: the same parts either way)."""
-    return ".".join(path.relative_to(REPO).with_suffix("").parts[:-1])
+    return ".".join(path.relative_to(root).with_suffix("").parts[:-1])
 
 
-def _module_file(module: str) -> Path | None:
-    """The repo file for a project module (`a.b` -> a/b.py or a/b/__init__.py), or None."""
-    base = REPO.joinpath(*module.split("."))
+def _module_file(module: str, root: Path = REPO) -> Path | None:
+    """The file for a project module (`a.b` -> a/b.py or a/b/__init__.py), or None."""
+    base = root.joinpath(*module.split("."))
     for f in (base.with_suffix(".py"), base / "__init__.py"):
         if f.is_file():
             return f
     return None
 
 
-def _imports(source: str, package: str) -> tuple[list[str], list[str]]:
+def _process_call(f: ast.Attribute) -> bool:
+    if f.attr == "compile":
+        return not (isinstance(f.value, ast.Name) and f.value.id == "re")
+    return f.attr in PROCESS_ATTRS or f.attr.startswith(PROCESS_PREFIXES)
+
+
+def _imports(source: str, package: str,
+             root: Path = REPO) -> tuple[list[str], list[str]]:
     """(modules imported by `source`, dynamic-code problems) for a module in `package`.
     `from x import y` yields x, and x.y too when x.y is a module of the project."""
     mods: list[str] = []
@@ -100,7 +112,8 @@ def _imports(source: str, package: str) -> tuple[list[str], list[str]]:
                 if a.name == "*":
                     if mod.split(".")[0] in PROJECT:
                         dynamic.append(f"{mod}.* (star import from the project)")
-                elif mod.split(".")[0] in PROJECT and _module_file(f"{mod}.{a.name}"):
+                elif mod.split(".")[0] in PROJECT and _module_file(f"{mod}.{a.name}",
+                                                                     root):
                     mods.append(f"{mod}.{a.name}")
                 elif _matches(f"{mod}.{a.name}", DENY):
                     mods.append(f"{mod}.{a.name}")
@@ -110,6 +123,8 @@ def _imports(source: str, package: str) -> tuple[list[str], list[str]]:
                     or (isinstance(f, ast.Attribute) and f.attr in DYNAMIC_FUNCTIONS):
                 name = f.id if isinstance(f, ast.Name) else f.attr
                 dynamic.append(f"{name}() (dynamic code)")
+            elif isinstance(f, ast.Attribute) and _process_call(f):
+                dynamic.append(f"{f.attr}() (runs code or a process)")
     return mods, dynamic
 
 
@@ -119,10 +134,11 @@ def _with_parents(module: str) -> list[str]:
     return [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
 
 
-def import_violations(source: str, package: str = "ui.api") -> list[str]:
+def import_violations(source: str, package: str = "ui.api", root: Path = REPO) -> list[str]:
     """Why `source` (a module in ui/api's `package`) breaks rule 1, or []. A transitive
-    violation reads as a chain: "pipeline.budget -> tools.scan -> tools.http"."""
-    mods, bad = _imports(source, package)
+    violation reads as a chain: "pipeline.budget -> tools.scan -> tools.http". `root` is the
+    folder project modules are looked up in (the repo; a fake tree in the checker's tests)."""
+    mods, bad = _imports(source, package, root)
     bad += [m for m in mods if _matches(m, DENY_IN_UI_API)]
     seen: dict[str, str | None] = {}
     denied: set[str] = set()
@@ -144,9 +160,9 @@ def import_violations(source: str, package: str = "ui.api") -> list[str]:
                 break  # its submodules are part of the same violation
             if m.split(".")[0] not in PROJECT:
                 continue
-            f = _module_file(m)
+            f = _module_file(m, root)
             if f is not None:
-                sub, _ = _imports(f.read_text(encoding="utf-8"), _package_of(f))
+                sub, _ = _imports(f.read_text(encoding="utf-8"), _package_of(f, root), root)
                 queue += [(s, m) for s in sub]
     return bad
 
@@ -208,13 +224,21 @@ def test_the_import_checker_catches_every_form():
         assert import_violations(src) == expected, src
 
 
-def test_the_import_checker_follows_project_imports_transitively():
-    assert import_violations("from pipeline.budget import config_from_dict") == [
-        "pipeline.budget"]
-    # an innocent-looking module that loads a network client through the project
-    bad = import_violations("from tools.listing import listing_problem")
-    assert bad == ["tools.listing -> tools.http"]
+def test_the_import_checker_follows_project_imports_transitively(tmp_path):
+    """On a fake tree, so the test does not depend on what real modules import today."""
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "__init__.py").write_text("")
+    (tmp_path / "tools" / "nice.py").write_text("from tools import middle\n")
+    (tmp_path / "tools" / "middle.py").write_text(
+        "def later():\n    from .http import get_json\n")  # inside a function, relative
+    (tmp_path / "tools" / "clean.py").write_text("import json\n")
+    assert import_violations("from tools.nice import x", root=tmp_path) == [
+        "tools.nice -> tools.middle -> tools.http"]
+    assert import_violations("from tools import nice", root=tmp_path) == [
+        "tools.nice -> tools.middle -> tools.http"]
+    assert import_violations("from tools.clean import x", root=tmp_path) == []
     assert import_violations("import tools.scan") == ["tools.scan"]
+    assert import_violations("from pipeline import budget") == ["pipeline.budget"]
 
 
 def test_the_import_checker_refuses_dynamic_code_in_ui_api():
@@ -222,7 +246,11 @@ def test_the_import_checker_refuses_dynamic_code_in_ui_api():
                 "from importlib import import_module as im\nim('tools.broker')",
                 "__import__('tools.broker')", "exec('import tools.broker')",
                 "eval('1')", "import runpy\nrunpy.run_module('pipeline.send')",
-                "import subprocess", "compile('x', 'f', 'exec')"):
+                "import subprocess", "compile('x', 'f', 'exec')",
+                "import os\nos.system('x')", "import os\nos.popen('x')",
+                "import os\nos.spawnv(0, 'x', [])", "import os\nos.execv('x', [])",
+                "import os\nos.startfile('x')", "import builtins\nbuiltins.exec('x')",
+                "import builtins\nbuiltins.eval('1')", "import regex\nregex.compile('x')"):
         assert import_violations(src), src
 
 

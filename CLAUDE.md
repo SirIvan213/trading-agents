@@ -97,6 +97,10 @@ label `ui`).
   through other project modules, and `ui/api` uses no dynamic imports or code.
   `tests/test_ui_readonly.py` (required job) checks this statically and transitively.
   `ui/tests/test_boundaries.py` checks what the import actually loads against an allow-list.
+  The transitive check reads the project modules the UI imports (today `journal/log.py`,
+  `journal/orders.py` and a few pure `tools/` modules). If a phase PR adds a denied import to
+  one of them and fails this check, the fix belongs on the UI side: stop importing that
+  module from `ui/api`. Never weaken the check, and never hold back the phase change.
 - It never takes the journal's or the budget's lock and never writes under `journal/` or
   `config/`. Files are read with `ui/api/readers/shared_open.py`, which shares read, write and
   delete.
