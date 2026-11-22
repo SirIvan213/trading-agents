@@ -2,11 +2,12 @@
   "schema": 1,
   "run_id": "RUN_ID",
   "symbol": "ABCD",
-  "started_at": "2026-11-03T12:00:00-05:00",
+  "checked_at": "2026-11-03T12:00:00-05:00",
   "coverage": {
     "covered": false,
     "reason": "no 8-K item 2.02 in the last 100 days",
-    "last_item_202": null
+    "last_item_202": null,
+    "fetch_failed": null
   },
   "analysts": {},
   "packet_ok": null,
@@ -17,9 +18,10 @@
   "outcome": {
     "status": "skipped",
     "record_error": false,
+    "approval": null,
     "sent": null
   },
   "timings_ms": {},
-  "ages_s": {},
+  "time_budget_s": {},
   "error": null
 }

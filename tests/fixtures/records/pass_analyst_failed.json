@@ -1,0 +1,242 @@
+{
+  "schema": 1,
+  "run_id": "RUN_ID",
+  "symbol": "ABCD",
+  "checked_at": "2026-11-03T12:00:00-05:00",
+  "coverage": {
+    "covered": true,
+    "reason": null,
+    "last_item_202": "2026-10-04",
+    "fetch_failed": null
+  },
+  "analysts": {
+    "fundamentals": {
+      "report": {
+        "agent": "fundamentals",
+        "symbol": "ABCD",
+        "stance": "bullish",
+        "confidence": 0.7,
+        "evidence": [
+          {
+            "point": "revenue grew",
+            "source": "get_fundamentals"
+          }
+        ],
+        "catalysts": []
+      },
+      "run": {
+        "agent": "fundamentals",
+        "requested_model": "claude-sonnet-5-5",
+        "effort": "high",
+        "ok": true,
+        "reason_code": null,
+        "duration_ms": 0,
+        "calls": [
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "tool_use",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          },
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "end_turn",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          }
+        ],
+        "retries": []
+      }
+    },
+    "sentiment": {
+      "report": {
+        "agent": "sentiment",
+        "symbol": "ABCD",
+        "stance": "bullish",
+        "confidence": 0.7,
+        "evidence": [
+          {
+            "point": "two positive headlines",
+            "source": "get_news"
+          }
+        ],
+        "catalysts": []
+      },
+      "run": {
+        "agent": "sentiment",
+        "requested_model": "claude-sonnet-5-5",
+        "effort": "high",
+        "ok": true,
+        "reason_code": null,
+        "duration_ms": 0,
+        "calls": [
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "tool_use",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          },
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "end_turn",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          }
+        ],
+        "retries": []
+      }
+    },
+    "technical": {
+      "report": {
+        "agent": "technical",
+        "symbol": "ABCD",
+        "stance": "neutral",
+        "confidence": 0.0,
+        "evidence": [
+          {
+            "point": "technical analysis unavailable: output failed validation at '': Invalid JSON: expected ident at line 1 column 2",
+            "source": "analyst_unavailable"
+          }
+        ],
+        "catalysts": []
+      },
+      "run": {
+        "agent": "technical",
+        "requested_model": "claude-sonnet-5-5",
+        "effort": "high",
+        "ok": false,
+        "reason_code": "invalid_output",
+        "duration_ms": 0,
+        "calls": [
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "end_turn",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          },
+          {
+            "requested_model": "claude-sonnet-5-5",
+            "serving_model": "claude-sonnet-5-5",
+            "fallback_ran": false,
+            "stop_reason": "end_turn",
+            "refusal_category": null,
+            "fallback_from": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            },
+            "iterations": []
+          }
+        ],
+        "retries": [
+          {
+            "attempt": 1,
+            "reason_code": "invalid_output"
+          }
+        ]
+      }
+    }
+  },
+  "packet_ok": false,
+  "exit_plans": [],
+  "debate": {
+    "symbol": "ABCD",
+    "as_of": "2026-11-03T12:00:00-05:00",
+    "rounds_planned": 1,
+    "rounds_run": 0,
+    "turns": [],
+    "stopped_early": false,
+    "fatal": false,
+    "requested_same_model": true,
+    "same_model": false,
+    "final_bull": null,
+    "final_bear": null,
+    "all_ok": false,
+    "skipped": true,
+    "skip_reason": "analyst_failed: the Trader passes without a call, so no debate"
+  },
+  "trader": {
+    "symbol": "ABCD",
+    "action": "PASS",
+    "plan_id": null,
+    "confidence": 0.0,
+    "reasoning": "forced PASS: analyst_failed",
+    "ok": false,
+    "forced_pass": "analyst_failed",
+    "run": {
+      "agent": "trader",
+      "requested_model": "claude-opus-5-5",
+      "effort": "high",
+      "ok": false,
+      "reason_code": null,
+      "duration_ms": 0,
+      "calls": [],
+      "retries": []
+    }
+  },
+  "proposal": null,
+  "outcome": {
+    "status": "pass",
+    "record_error": false,
+    "approval": null,
+    "sent": null
+  },
+  "timings_ms": {
+    "analysts": 0,
+    "debate": 0,
+    "trader": 0
+  },
+  "time_budget_s": {
+    "max_plan_age_s": 300,
+    "analyst_timeout_s": 10,
+    "age_before_trader_s": 20.0
+  },
+  "error": null
+}

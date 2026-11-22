@@ -2,11 +2,12 @@
   "schema": 1,
   "run_id": "RUN_ID",
   "symbol": "ABCD",
-  "started_at": "2026-11-03T12:00:00-05:00",
+  "checked_at": "2026-11-03T12:00:00-05:00",
   "coverage": {
     "covered": true,
     "reason": null,
-    "last_item_202": "2026-10-04"
+    "last_item_202": "2026-10-04",
+    "fetch_failed": null
   },
   "analysts": {
     "fundamentals": {
@@ -377,11 +378,13 @@
     "checked_at": "2026-11-03T12:00:40-05:00",
     "expires_at": "2026-11-03T12:05:00-05:00",
     "limit_price": "103.21",
+    "approved_limit_price": "103.21",
     "gate_status": "CLEAR"
   },
   "outcome": {
     "status": "approved_not_sent",
     "record_error": false,
+    "approval": "approved_not_sent",
     "sent": null
   },
   "timings_ms": {
@@ -390,7 +393,7 @@
     "trader": 0,
     "approval": 0
   },
-  "ages_s": {
+  "time_budget_s": {
     "max_plan_age_s": 300,
     "analyst_timeout_s": 10,
     "age_before_trader_s": 20.0,

@@ -22,13 +22,15 @@ import pytest
 
 import pipeline.decide as decide
 import pipeline.records as records
+from journal.log import APPROVED, Journal
 from pipeline.order_flow import limit_price
 from tests.debate_helpers import bear_json
-from tests.fakes import NOON
-from tests.order_helpers import StepClock
+from tests.fakes import NOON, FakeAllData, response, text
+from tests.order_helpers import QuotingData, StepClock
 from tests.test_orchestrator import clean_env, loopback_only  # noqa: F401  (autouse)
 from tests.test_phase4b_proofs import (  # noqa: F401 - autouse fixtures
     SYMBOL,
+    Router,
     fixed_limits,
     go,
     isolated_agent_env,
@@ -95,7 +97,9 @@ def test_an_approved_buy_writes_the_whole_record(tmp_path):
     assert rec["proposal"]["limit_price"] == limit_price(result.proposal)
     assert rec["outcome"]["status"] == "approved_not_sent" and rec["error"] is None
     assert set(rec["timings_ms"]) == set(result.timings_ms)
-    assert rec["ages_s"] == {k: v for k, v in result.budget.items()}
+    assert rec["time_budget_s"] == {k: v for k, v in result.budget.items()}
+    assert rec["checked_at"] == NOON.isoformat() and rec["outcome"]["approval"] == APPROVED
+    assert rec["proposal"]["approved_limit_price"] == rec["proposal"]["limit_price"]
     check_golden("buy_approved", rec)
 
 
@@ -124,7 +128,7 @@ def test_a_stale_forced_pass_is_recorded(tmp_path):
     go(tmp_path, scripts(), clock=clock)
     rec = only_record(tmp_path)[1]
     assert rec["trader"]["forced_pass"] == "stale_before_trader"
-    assert rec["ages_s"]["age_before_trader_s"] == 290.0
+    assert rec["time_budget_s"]["age_before_trader_s"] == 290.0
 
 
 def test_a_skip_is_recorded_before_any_analyst(tmp_path, monkeypatch):
@@ -135,36 +139,122 @@ def test_a_skip_is_recorded_before_any_analyst(tmp_path, monkeypatch):
         go(tmp_path, scripts())
     rec = only_record(tmp_path)[1]
     assert rec["outcome"]["status"] == "skipped" and rec["error"] is None
-    assert rec["coverage"] == {"covered": False, "last_item_202": None,
+    assert rec["coverage"] == {"covered": False, "last_item_202": None, "fetch_failed": None,
                                "reason": "no 8-K item 2.02 in the last 100 days"}
     assert rec["analysts"] == {} and rec["trader"] is None
     check_golden("skipped", rec)
 
 
-def test_a_cap_stop_is_recorded_by_type_only(tmp_path):
-    from pipeline.budget import CapReached
+def run_direct(tmp_path, scr=None, **kw):
+    """run_decision with the fakes, keeping the router and the clock."""
+    router = Router(scr or scripts())
+    clock = kw.pop("clock", None) or StepClock(NOON, NOON, NOON + timedelta(seconds=20),
+                                               NOON + timedelta(seconds=40))
+    journal = Journal(tmp_path / "j.jsonl")
+    result = decide.run_decision(
+        SYMBOL, data=QuotingData(FakeAllData(), clock, SYMBOL, "103.10"), clients=router,
+        journal=journal, clock=clock, rounds=1, timeout_s=10, **kw)
+    return result, router, clock, journal
+
+
+@pytest.mark.parametrize(("exc", "code"), [("CapReached", "cap_reached"),
+                                           ("AlreadyDecided", "already_decided")])
+def test_a_stop_before_the_analysts_is_not_started_and_recorded_by_type_only(tmp_path, exc,
+                                                                              code):
+    import pipeline.budget as budget
 
     def stop():
-        raise CapReached("decision cap reached (10 today)")
+        raise getattr(budget, exc)("decision cap reached (10 today)")
 
-    router_calls = []
-    with pytest.raises(CapReached):
-        from journal.log import Journal
-        from tests.fakes import FakeAllData
-        from tests.order_helpers import QuotingData
-        from tests.test_phase4b_proofs import Router
-
-        router = Router(scripts())
-        router_calls = router.calls
+    router = Router(scripts())
+    with pytest.raises(budget.CapReached):
         clock = StepClock(NOON)
         decide.run_decision(SYMBOL, data=QuotingData(FakeAllData(), clock, SYMBOL, "103.10"),
                             clients=router, journal=Journal(tmp_path / "j.jsonl"), clock=clock,
                             ask=None, rounds=1, timeout_s=10, before_analysts=stop)
-    assert router_calls == []
+    assert router.calls == []
     rec = only_record(tmp_path)[1]
-    assert rec["outcome"]["status"] == "stopped"
-    assert rec["error"] == {"type": "CapReached", "reason_code": "cap_reached"}
+    assert rec["outcome"]["status"] == "not_started"  # never counted, no billed call
+    assert rec["error"] == {"type": exc, "reason_code": code}
     assert "decision cap reached" not in json.dumps(rec)
+
+
+def test_a_failed_analyst_skips_the_debate_and_records_its_reason_code_only(tmp_path):
+    bad = [response([text("this is not a JSON report")], "end_turn") for _ in range(4)]
+    scr = scripts()
+    scr["technical"] = bad
+    result, router, _, _ = run_direct(tmp_path, scr, ask=lambda _: "yes")
+    rec = only_record(tmp_path)[1]
+    tech = rec["analysts"]["technical"]
+    assert tech["report"] is None or tech["run"]["ok"] is False
+    assert tech["run"]["ok"] is False and tech["run"]["reason_code"]
+    assert "reason" not in tech["run"]
+    assert all("reason" not in r for r in tech["run"]["retries"])
+    assert rec["debate"]["skipped"] is True and rec["debate"]["skip_reason"]
+    assert rec["trader"]["forced_pass"] == "analyst_failed"
+    assert rec["outcome"]["status"] == "pass" and "trader" not in router.calls
+    check_golden("pass_analyst_failed", rec)
+
+
+def test_a_sent_order_is_recorded_after_the_send(tmp_path, monkeypatch):
+    from tests.order_helpers import FakePaperBroker
+
+    order = []
+    broker = FakePaperBroker()
+    real_send = decide.send_approved
+    monkeypatch.setattr(decide, "send_approved",
+                        lambda *a, **k: (order.append("send"), real_send(*a, **k))[1])
+    real = records.write_record
+    monkeypatch.setattr(decide, "write_record",
+                        lambda *a, **k: (order.append("record"), real(*a, **k))[1])
+    run_direct(tmp_path, ask=lambda _: "yes", broker=broker)
+    rec = only_record(tmp_path)[1]
+    assert order == ["send", "record"]
+    assert rec["outcome"]["sent"] == "submitted"
+    assert rec["outcome"]["status"] == rec["outcome"]["approval"] == APPROVED
+
+
+def test_a_ticket_not_asked_is_recorded(tmp_path):
+    run_direct(tmp_path, ask=None)
+    rec = only_record(tmp_path)[1]
+    assert rec["outcome"]["status"] == "not_asked" and rec["proposal"]["ok"] is True
+
+
+def test_a_journal_lock_at_approval_is_recorded(tmp_path, monkeypatch):
+    from journal.log import JournalLockTimeout
+
+    def locked(*a, **k):
+        raise JournalLockTimeout("journal lock timed out")
+
+    monkeypatch.setattr(decide, "approve", locked)
+    run_direct(tmp_path, ask=lambda _: "yes")
+    rec = only_record(tmp_path)[1]
+    assert rec["outcome"]["status"] == rec["outcome"]["approval"] == "journal_locked"
+
+
+def test_a_pass_that_could_not_be_journaled_is_flagged(tmp_path, monkeypatch):
+    from journal.log import JournalError
+
+    monkeypatch.setattr(decide, "_append_with_retry",
+                        lambda journal, entry: JournalError("journal write failed (OSError)"))
+    run_direct(tmp_path, scripts(trader=trader_json(action="PASS", plan_id=None)),
+               ask=lambda _: "yes")
+    rec = only_record(tmp_path)[1]
+    assert rec["outcome"]["status"] == "pass" and rec["outcome"]["record_error"] is True
+
+
+def test_an_error_after_the_approval_keeps_the_approval(tmp_path, monkeypatch):
+    from tests.order_helpers import FakePaperBroker
+
+    def boom(*a, **k):
+        raise RuntimeError("broker client crashed: token sk-SECRET")
+
+    monkeypatch.setattr(decide, "send_approved", boom)
+    with pytest.raises(RuntimeError):
+        run_direct(tmp_path, ask=lambda _: "yes", broker=FakePaperBroker())
+    path, rec = only_record(tmp_path)
+    assert rec["outcome"]["status"] == "error" and rec["outcome"]["approval"] == APPROVED
+    assert "SECRET" not in path.read_text(encoding="utf-8")
 
 
 def test_a_failure_is_recorded_by_type_never_by_message(tmp_path, monkeypatch):
@@ -201,20 +291,23 @@ def journal_shape(journal, run_id):
     return re.sub(r"ta-[0-9a-f]{32}", "CID", text)
 
 
-def baseline_run(tmp_path, **kw):
+def baseline_run(tmp_path):
     prompts = []
 
     def ask(prompt):
         prompts.append(prompt)
         return "yes"
 
-    result, router, journal = go(tmp_path, scripts(), ask=ask, **kw)
-    return result, router, journal, [p.replace(result.ledger_run_id, "RUN") for p in prompts]
+    result, router, clock, journal = run_direct(tmp_path, ask=ask)
+    return (result, router, journal, [p.replace(result.ledger_run_id, "RUN") for p in prompts],
+            clock.calls)
 
 
 @pytest.mark.parametrize("failure", ["disk_full", "permission", "unserializable", "builder"])
 def test_a_failed_record_changes_nothing(tmp_path, monkeypatch, caplog, failure):
-    ok_result, ok_router, ok_journal, ok_prompts = baseline_run(tmp_path / "ok")
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "bad").mkdir()
+    ok_result, ok_router, ok_journal, ok_prompts, ok_clock_calls = baseline_run(tmp_path / "ok")
 
     if failure == "disk_full":
         def fail(*a, **k):
@@ -235,7 +328,7 @@ def test_a_failed_record_changes_nothing(tmp_path, monkeypatch, caplog, failure)
         monkeypatch.setattr(decide, "build_record", broken)
 
     with caplog.at_level(logging.WARNING, logger="pipeline.records"):
-        result, router, journal, prompts = baseline_run(tmp_path / "bad")
+        result, router, journal, prompts, clock_calls = baseline_run(tmp_path / "bad")
     assert record_files(tmp_path / "bad") == []
     assert any("not written" in r.getMessage() for r in caplog.records)
     # the decision is exactly the same: outcome, journal entries, approval, calls, timings
@@ -246,6 +339,7 @@ def test_a_failed_record_changes_nothing(tmp_path, monkeypatch, caplog, failure)
     assert prompts == ok_prompts and sorted(router.calls) == sorted(ok_router.calls)
     assert set(result.timings_ms) == set(ok_result.timings_ms)
     assert result.budget == ok_result.budget
+    assert clock_calls == ok_clock_calls  # not one extra clock reading
 
 
 def test_the_record_is_written_after_the_approval(tmp_path, monkeypatch):
@@ -286,33 +380,40 @@ def test_an_unsafe_record_path_is_refused(tmp_path, run_id, day):
 
 MONEY_PATH = [*sorted((REPO / "tools").glob("*.py")),
               *(REPO / "pipeline" / n for n in ("order_flow.py", "orders.py", "send.py",
-                                                "budget.py")),
-              REPO / "journal" / "log.py"]
+                                                "budget.py", "events.py", "ledger.py")),
+              REPO / "journal" / "log.py", REPO / "journal" / "orders.py"]
+FORBIDDEN_MODULES = ("pipeline.records", "pipeline.decide")
+
+
+RECORDS_PATH = re.compile(r"(^|[/\\])records([/\\]|$)")
+
+
+def money_path_hits(source: str) -> list[str]:
+    """Every way `source` could reach the decision records: an import of pipeline.records or
+    pipeline.decide (any form, a dynamic import by its literal name included), a path with a
+    `records` segment, or the records module's names."""
+    hits: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            full = [f"{node.module}.{a.name}" for a in node.names] + [node.module or ""]
+            hits += [m for m in full if m in FORBIDDEN_MODULES]
+        elif isinstance(node, ast.Import):
+            hits += [a.name for a in node.names if a.name in FORBIDDEN_MODULES]
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and (
+                RECORDS_PATH.search(node.value) or node.value in FORBIDDEN_MODULES):
+            hits.append(repr(node.value))
+        elif isinstance(node, ast.Name | ast.Attribute):
+            name = node.id if isinstance(node, ast.Name) else node.attr
+            if name in ("records_dir", "build_record", "write_record"):
+                hits.append(name)
+    return hits
 
 
 def test_no_money_path_module_reads_the_records():
     """So model text can never reach sizing, the risk check or an order (the journal's own
     rule: it holds no analyst or trader text)."""
-    found = {}
-    for f in MONEY_PATH:
-        tree = ast.parse(f.read_text(encoding="utf-8"))
-        bad = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module in ("pipeline.records",
-                                                                    "pipeline.decide"):
-                bad.append(f"from {node.module}")
-            elif isinstance(node, ast.Import):
-                bad += [a.name for a in node.names if a.name in ("pipeline.records",
-                                                                 "pipeline.decide")]
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and \
-                    re.search(r"(^|[/\\\\])records([/\\\\]|$)", node.value):
-                bad.append(repr(node.value))
-            elif isinstance(node, ast.Name | ast.Attribute):
-                name = node.id if isinstance(node, ast.Name) else node.attr
-                if name in ("records_dir", "build_record", "write_record"):
-                    bad.append(name)
-        if bad:
-            found[str(f.relative_to(REPO))] = bad
+    found = {str(f.relative_to(REPO)): hits for f in MONEY_PATH
+             if (hits := money_path_hits(f.read_text(encoding="utf-8")))}
     assert len(MONEY_PATH) > 10 and found == {}
 
 
@@ -327,3 +428,14 @@ def test_the_records_module_only_writes():
 def test_the_records_folder_is_git_ignored():
     text = (REPO / ".gitignore").read_text(encoding="utf-8")
     assert "journal/records/" in text.splitlines()
+
+
+def test_the_money_path_checker_catches_each_form():
+    """The read check is not vacuous: each way in is caught."""
+    for src in ("from pipeline import records", "import pipeline.records",
+                "from pipeline.records import write_record",
+                "import importlib; importlib.import_module('pipeline.records')",
+                "p = journal_dir / 'records' / day", "x = 'journal/records/2026-11-16'",
+                "x = records_dir(p)", "from pipeline import decide"):
+        assert money_path_hits(src), src
+    assert money_path_hits("x = record_count + 1; y = 'record'") == []

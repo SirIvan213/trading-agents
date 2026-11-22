@@ -15,6 +15,15 @@ Rules:
     decision's outcome, journal entries, timing and approval flow are exactly the same;
   - errors are recorded by exception type and reason_code only, never by message (CLAUDE.md
     rule 4): an agent run's `reason` and its retries' `reason` are left out for that reason.
+
+The record stores model text (analyst evidence, the Bull's and Bear's cases, the Trader's
+reasoning). Whoever displays it treats every string as untrusted plain text.
+
+`checked_at` is the SEC check's clock reading (the moment the decision began; the plan-age
+clock starts a little later). `outcome.status` says how it ended; `outcome.approval` keeps the
+approval's own status even when a later error ended the decision; "not_started" means a cap
+stopped it in before_analysts, so it was never counted and no billed call was made.
+`time_budget_s` holds the plan-age limits and the ages measured against them.
 """
 from __future__ import annotations
 
@@ -25,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from journal.orders import APPROVED
 from tools.atomic_write import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -45,7 +55,9 @@ def _run(run: Any) -> dict | None:
 
 def _reason_code(exc: BaseException) -> str:
     name = type(exc).__name__
-    if name in ("CapReached", "AlreadyDecided"):
+    if name == "AlreadyDecided":
+        return "already_decided"
+    if name == "CapReached":
         return "cap_reached"
     if name == "SymbolSkipped":
         return "skipped"
@@ -54,14 +66,20 @@ def _reason_code(exc: BaseException) -> str:
     return "exception"
 
 
-def _outcome(result: Any, trader: Any, error: BaseException | None, skipped: bool) -> dict:
+def _outcome(result: Any, trader: Any, error: BaseException | None, skipped: bool,
+             started: bool) -> dict:
     sent = getattr(result, "sent", None) if result is not None else None
+    approval = getattr(result, "outcome", None) if result is not None else None
     out: dict[str, Any] = {"status": None, "record_error": False,
+                           "approval": approval.status if approval is not None else None,
                            "sent": getattr(sent, "status", None) if sent is not None else None}
     if skipped:
         out["status"] = "skipped"
+    elif error is not None and not started:
+        out["status"] = "not_started"  # stopped in before_analysts: never counted, no call
     elif error is not None:
-        out["status"] = "stopped" if _reason_code(error) == "cap_reached" else "error"
+        out["status"] = "stopped" if _reason_code(error) in ("cap_reached",
+                                                             "already_decided") else "error"
     elif result is not None and result.outcome is not None:
         out["status"] = result.outcome.status
     elif trader is not None and trader.decision.action == "PASS":
@@ -79,15 +97,21 @@ def _proposal(result: Any) -> dict | None:
         return None
     from pipeline.order_flow import limit_price  # the ticket's limit price, from the tool
 
+    outcome = getattr(result, "outcome", None)
+    recheck = getattr(outcome, "recheck", None) if outcome is not None else None
     return {"ok": p.ok, "stage": p.stage, "plan_id": p.plan_id, "checked_at": p.checked_at,
             "expires_at": p.expires_at, "limit_price": limit_price(p),
+            # the order actually approved: the re-check's (it must equal the ticket's)
+            "approved_limit_price": (limit_price(recheck)
+                                     if recheck is not None and outcome.status == APPROVED
+                                     else None),
             "gate_status": (p.gate or {}).get("status") if isinstance(p.gate, dict) else None}
 
 
-def build_record(*, run_id: str, symbol: str, started_at: datetime,
+def build_record(*, run_id: str, symbol: str, checked_at: datetime,
                  coverage: dict | None, packet: Any = None, debate: Any = None,
                  trader: Any = None, result: Any = None,
-                 error: BaseException | None = None) -> dict:
+                 error: BaseException | None = None, started: bool = True) -> dict:
     """The record as written: JSON types only (pydantic's mode="json")."""
     skipped = error is not None and type(error).__name__ == "SymbolSkipped"
     analysts: dict[str, Any] = {}
@@ -112,8 +136,9 @@ def build_record(*, run_id: str, symbol: str, started_at: datetime,
         "schema": SCHEMA,
         "run_id": run_id,
         "symbol": symbol,
-        "started_at": started_at.isoformat(),
-        "coverage": ({k: coverage.get(k) for k in ("covered", "reason", "last_item_202")}
+        "checked_at": checked_at.isoformat(),
+        "coverage": ({k: coverage.get(k)
+                      for k in ("covered", "reason", "last_item_202", "fetch_failed")}
                      if isinstance(coverage, dict) else None),
         "analysts": analysts,
         "packet_ok": packet.all_ok if packet is not None else None,
@@ -122,9 +147,9 @@ def build_record(*, run_id: str, symbol: str, started_at: datetime,
         "debate": debate_out,
         "trader": trader_out,
         "proposal": _proposal(result),
-        "outcome": _outcome(result, trader, None if skipped else error, skipped),
+        "outcome": _outcome(result, trader, None if skipped else error, skipped, started),
         "timings_ms": dict(result.timings_ms) if result is not None else {},
-        "ages_s": dict(result.budget) if result is not None else {},
+        "time_budget_s": dict(result.budget) if result is not None else {},
         "error": (None if error is None or skipped
                   else {"type": type(error).__name__, "reason_code": _reason_code(error)}),
     }

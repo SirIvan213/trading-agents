@@ -226,7 +226,7 @@ def run_decision(
     # P5-UI-1 (#211): a display-only record of this decision, written however it ends (a
     # finally), best effort: it never changes the outcome, the journal, timing or approval.
     rec: dict[str, Any] = {"coverage": None, "packet": None, "debate": None, "trader": None,
-                           "result": None, "error": None}
+                           "result": None, "error": None, "started": False}
     try:
         coverage = reporting_check(data, sym, checked)
         rec["coverage"] = coverage
@@ -241,6 +241,7 @@ def run_decision(
 
         if before_analysts is not None:
             before_analysts()  # the decision starts here (run_day counts it); raise = no call
+        rec["started"] = True
 
         started = clock()  # the plan-age clock starts here, after the SEC check
         t0 = time.monotonic()
@@ -323,6 +324,7 @@ def run_decision(
         raise
     finally:
         _write_record(journal, sym, ledger.run_id, checked, rec)
+        rec.clear()  # drop the exception -> frame -> rec cycle at once
 
 
 def _write_record(journal: Journal, symbol: str, run_id: str, started: datetime,
@@ -332,8 +334,9 @@ def _write_record(journal: Journal, symbol: str, run_id: str, started: datetime,
     try:
         day = started.astimezone(NY).date().isoformat()
         write_record(records_dir(journal.path), day, run_id, lambda: build_record(
-            run_id=run_id, symbol=symbol, started_at=started.astimezone(NY),
+            run_id=run_id, symbol=symbol, checked_at=started.astimezone(NY),
             coverage=rec["coverage"], packet=rec["packet"], debate=rec["debate"],
-            trader=rec["trader"], result=rec["result"], error=rec["error"]))
+            trader=rec["trader"], result=rec["result"], error=rec["error"],
+            started=rec["started"]))
     except Exception:  # noqa: BLE001 - a record never changes the decision
         pass

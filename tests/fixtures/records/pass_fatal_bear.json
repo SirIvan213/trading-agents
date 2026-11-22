@@ -2,11 +2,12 @@
   "schema": 1,
   "run_id": "RUN_ID",
   "symbol": "ABCD",
-  "started_at": "2026-11-03T12:00:00-05:00",
+  "checked_at": "2026-11-03T12:00:00-05:00",
   "coverage": {
     "covered": true,
     "reason": null,
-    "last_item_202": "2026-10-04"
+    "last_item_202": "2026-10-04",
+    "fetch_failed": null
   },
   "analysts": {
     "fundamentals": {
@@ -358,6 +359,7 @@
   "outcome": {
     "status": "pass",
     "record_error": false,
+    "approval": null,
     "sent": null
   },
   "timings_ms": {
@@ -365,7 +367,7 @@
     "debate": 0,
     "trader": 0
   },
-  "ages_s": {
+  "time_budget_s": {
     "max_plan_age_s": 300,
     "analyst_timeout_s": 10,
     "age_before_trader_s": 20.0
