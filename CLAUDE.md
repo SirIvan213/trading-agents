@@ -138,6 +138,8 @@ label `ui`).
 - Money is computed in `Decimal` or integer cents; round stops down, never up.
 - Times are US/Eastern (`America/New_York`) for anything market-related.
 - Run `pytest -q` before saying work is done.
+- Judge test runs by pytest's exit code. Never pipe pytest (or ruff) through `tail`, `head`
+  or `grep` when deciding whether to commit, push or report success.
 
 ## Working with subagents
 
