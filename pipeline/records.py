@@ -38,7 +38,7 @@ from journal.orders import APPROVED
 from tools.atomic_write import atomic_write_text
 
 log = logging.getLogger(__name__)
-SCHEMA = 1
+SCHEMA = 1  # bump on any change to the record's shape: UI-4 checks it
 RUN_ID = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 # an agent run without its free-text `reason` (it can hold an error message): reason_code stays
 RUN_EXCLUDE: dict[str, Any] = {"reason": True, "retries": {"__all__": {"reason"}}}
@@ -137,8 +137,8 @@ def build_record(*, run_id: str, symbol: str, checked_at: datetime,
         "run_id": run_id,
         "symbol": symbol,
         "checked_at": checked_at.isoformat(),
-        "coverage": ({k: coverage.get(k)
-                      for k in ("covered", "reason", "last_item_202", "fetch_failed")}
+        "coverage": ({**{k: coverage.get(k) for k in ("covered", "reason", "last_item_202")},
+                      "fetch_failed": bool(coverage.get("fetch_failed"))}
                      if isinstance(coverage, dict) else None),
         "analysts": analysts,
         "packet_ok": packet.all_ok if packet is not None else None,

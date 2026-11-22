@@ -139,7 +139,7 @@ def test_a_skip_is_recorded_before_any_analyst(tmp_path, monkeypatch):
         go(tmp_path, scripts())
     rec = only_record(tmp_path)[1]
     assert rec["outcome"]["status"] == "skipped" and rec["error"] is None
-    assert rec["coverage"] == {"covered": False, "last_item_202": None, "fetch_failed": None,
+    assert rec["coverage"] == {"covered": False, "last_item_202": None, "fetch_failed": False,
                                "reason": "no 8-K item 2.02 in the last 100 days"}
     assert rec["analysts"] == {} and rec["trader"] is None
     check_golden("skipped", rec)
@@ -186,7 +186,7 @@ def test_a_failed_analyst_skips_the_debate_and_records_its_reason_code_only(tmp_
     result, router, _, _ = run_direct(tmp_path, scr, ask=lambda _: "yes")
     rec = only_record(tmp_path)[1]
     tech = rec["analysts"]["technical"]
-    assert tech["report"] is None or tech["run"]["ok"] is False
+    assert tech["report"] is None
     assert tech["run"]["ok"] is False and tech["run"]["reason_code"]
     assert "reason" not in tech["run"]
     assert all("reason" not in r for r in tech["run"]["retries"])

@@ -7,7 +7,7 @@
     "covered": false,
     "reason": "no 8-K item 2.02 in the last 100 days",
     "last_item_202": null,
-    "fetch_failed": null
+    "fetch_failed": false
   },
   "analysts": {},
   "packet_ok": null,
