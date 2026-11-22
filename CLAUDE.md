@@ -77,7 +77,44 @@ journal/     decision log and outcomes
 evals/       saved scenarios + scoring
 config/      *.example.json only; real config is git-ignored
 tests/       pytest + fixtures
+ui/          read-only local web UI (separate track): api/ FastAPI, web/ React; tests in ui/tests
 ```
+
+## UI track (read-only)
+
+A local web UI runs alongside the phases and never blocks them (milestone "UI track",
+label `ui`).
+
+- All UI code and its tests live in `ui/`. UI PRs never edit `tools/`, `pipeline/`, `agents/`
+  or `journal/`. Data the UI needs that the pipeline does not record is a separate
+  Phase 5-side PR.
+- The API is GET only and binds 127.0.0.1 only (no host option). It rejects a Host header
+  other than 127.0.0.1 or localhost, and makes no network calls.
+- `ui/api` never imports `tools.broker`, `pipeline.send`, `pipeline.orders`,
+  `pipeline.order_flow`, `pipeline.decide`, `pipeline.run_day`, `pipeline.metering`,
+  `pipeline.budget` or `tools.scan` (both load `tools.http`), `agents`, `anthropic`, a network
+  client, or anything else that can place, change or approve an order. This holds directly or
+  through other project modules, and `ui/api` uses no dynamic imports or code.
+  `tests/test_ui_readonly.py` (required job) checks this statically and transitively.
+  `ui/tests/test_boundaries.py` checks what the import actually loads against an allow-list.
+  The transitive check reads the project modules the UI imports (today `journal/log.py`,
+  `journal/orders.py` and a few pure `tools/` modules). If a phase PR adds a denied import to
+  one of them and fails this check, the fix belongs on the UI side: stop importing that
+  module from `ui/api`. Never weaken the check, and never hold back the phase change.
+- It never takes the journal's or the budget's lock and never writes under `journal/` or
+  `config/`. Files are read with `ui/api/readers/shared_open.py`, which shares read, write and
+  delete.
+- It never opens the budget file or the event caches (`journal/cache/`) until #213 lands. On
+  Windows an open handle makes their `os.replace` fail. A failed budget write stops the day,
+  and a failed cache write costs another billed, capped fetch.
+- Money values are shown as recorded by the journal and the tools. The UI computes nothing
+  that decides money. "In short" summaries come from a fixed template over recorded status
+  and numbers, never from model text.
+- Record and model text render as plain text only. No `dangerouslySetInnerHTML`, no
+  `innerHTML`, and no Markdown or HTML rendering (`tests/test_ui_readonly.py`).
+- No billed calls. Tests use journal fixtures with the network blocked.
+- UI Python dependencies live in `ui/requirements.txt`, never in the core dependencies. The
+  `ui` CI workflow (`.github/workflows/ui.yml`) is not a required check.
 
 ## Conventions
 
@@ -92,7 +129,7 @@ tests/       pytest + fixtures
 
 Specialists live in `.claude/agents/`. Split work by folder so agents don't edit
 the same files: tools-engineer → `tools/`, agents-engineer → `agents/`,
-qa-engineer → `tests/`, code-reviewer is read-only.
+qa-engineer → `tests/`, ui-engineer → `ui/`, code-reviewer is read-only.
 
 ## Git workflow
 
