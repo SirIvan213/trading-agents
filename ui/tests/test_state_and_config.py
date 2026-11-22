@@ -61,10 +61,22 @@ def test_daily_budget_can_write_while_the_ui_reads(tmp_path):
 
 def test_budget_exists_comes_from_the_listing(tmp_path):
     day = date(2026, 11, 23)
-    assert not budget_exists(tmp_path / "missing", day)
-    assert not budget_exists(tmp_path, day)
+    assert budget_exists(tmp_path / "missing", day) == (False, None)
+    assert budget_exists(tmp_path, day) == (False, None)
     DailyBudget(CAPS, day, tmp_path).open_day(started_today=False)
-    assert budget_exists(tmp_path, day) and not budget_exists(tmp_path, date(2026, 11, 24))
+    assert budget_exists(tmp_path, day) == (True, None)
+    assert budget_exists(tmp_path, date(2026, 11, 24)) == (False, None)
+
+
+def test_an_unlistable_state_folder_is_an_error_not_false(tmp_path, monkeypatch):
+    import ui.api.readers.state as st
+
+    def denied(path):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(st.os, "scandir", denied)
+    found, error = budget_exists(tmp_path, date(2026, 11, 23))
+    assert found is None and error == "state folder unreadable (PermissionError)"
 
 
 def test_reading_the_budget_never_takes_its_lock_or_creates_files(tmp_path):
@@ -128,4 +140,16 @@ def test_invalid_limits_are_an_error_that_never_echoes_the_file(tmp_path):
 
 def test_no_limits_file_at_all(tmp_path):
     assert read_limits(tmp_path).error == "no limits config"
+
+
+def test_an_unreadable_limits_file_says_unreadable(tmp_path, monkeypatch):
+    import ui.api.readers.config as cfg
+
+    (tmp_path / "limits.json").write_text("{}")
+
+    def denied(path):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(cfg, "read_bytes_shared", denied)
+    assert read_limits(tmp_path).error == "limits config is unreadable (PermissionError)"
 

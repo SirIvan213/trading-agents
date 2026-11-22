@@ -48,13 +48,20 @@ def test_health_on_a_healthy_day(paths, journal):
     assert body["limits"] == {"source": "limits.json", "ok": True, "error": None}
     assert body["state"]["heartbeat"]["age_s"] == 10.0
     assert not body["state"]["heartbeat"]["stale"]
-    assert body["state"]["budget"] == {"file": "budget-2026-11-23.json", "exists": True}
+    assert body["state"]["budget"] == {"file": "budget-2026-11-23.json", "exists": True,
+                                       "error": None}
 
 
 def test_health_never_opens_the_budget_file(paths, journal, monkeypatch):
-    """Until #213, opening the budget file could make run_day's write fail on Windows."""
+    """Until #213, opening the budget file could make run_day's write fail on Windows. Every
+    way to open a file is recorded: the readers' helpers, open/io.open, os.open, and (on
+    Windows) CreateFileW itself."""
+    import builtins
+    import io
+
     import ui.api.readers.config as cfg
     import ui.api.readers.journal_snapshot as js
+    import ui.api.readers.shared_open as so
     import ui.api.readers.state as st
 
     configs(paths)
@@ -66,6 +73,18 @@ def test_health_never_opens_the_budget_file(paths, journal, monkeypatch):
         real = getattr(mod, name)
         monkeypatch.setattr(mod, name, lambda p, real=real: (opened.append(str(p)),
                                                               real(p))[1])
+
+    def recording(real):
+        def wrapper(file, *a, **k):
+            opened.append(str(file))
+            return real(file, *a, **k)
+        return wrapper
+
+    monkeypatch.setattr(builtins, "open", recording(builtins.open))
+    monkeypatch.setattr(io, "open", recording(io.open))
+    monkeypatch.setattr(os, "open", recording(os.open))
+    if os.name == "nt":
+        monkeypatch.setattr(so, "_create_file", recording(so._create_file))
     assert client(paths).get("/api/health").status_code == 200
     assert opened and not any("budget-" in p for p in opened)
 
@@ -106,6 +125,27 @@ def test_a_stale_heartbeat_reads_as_stale(paths, journal):
     configs(paths)
     heartbeat(paths, MONDAY - timedelta(seconds=91))
     assert client(paths).get("/api/health").json()["state"]["heartbeat"]["stale"]
+
+
+def test_a_heartbeat_from_the_future_is_stale_and_a_problem(paths, journal):
+    configs(paths)
+    heartbeat(paths, MONDAY + timedelta(minutes=5))
+    body = client(paths).get("/api/health").json()
+    assert body["state"]["heartbeat"]["stale"] and not body["ok"]
+    assert any("in the future" in p["text"] for p in body["problems"])
+
+
+def test_an_unlistable_state_folder_is_a_problem(paths, journal, monkeypatch):
+    import ui.api.readers.state as st
+
+    configs(paths)
+
+    def denied(path):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(st.os, "scandir", denied)
+    body = client(paths).get("/api/health").json()
+    assert body["state"]["budget"]["exists"] is None and not body["ok"]
 
 
 def test_no_journal_yet_is_healthy_and_creates_nothing(tmp_path):

@@ -143,6 +143,12 @@ def test_a_default_python_open_would_block_the_replace(tmp_path):
 
 
 @windows_only
+def test_a_directory_is_access_denied(tmp_path):
+    with pytest.raises(PermissionError):
+        open_shared(tmp_path)
+
+
+@windows_only
 def test_delete_succeeds_while_the_ui_holds_the_file_open(tmp_path):
     f = tmp_path / "heartbeat.json"
     write(f, "x")

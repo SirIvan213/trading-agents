@@ -2,6 +2,8 @@
 write, and the same fail-closed view of a cut-off or corrupt journal."""
 from __future__ import annotations
 
+import os
+import threading
 from datetime import timedelta
 
 import pytest
@@ -145,6 +147,59 @@ def test_a_bad_line_stays_reported_on_later_reads(paths, journal):
     assert reader.read().error  # never silently skipped on the next poll
 
 
+def test_crlf_lines_are_read_on_every_platform(tmp_path):
+    """Journal.append writes text mode, so CRLF on Windows; the reader splits on LF."""
+    path = tmp_path / "decisions.jsonl"
+    path.write_bytes(b'{"status": "pass", "symbol": "A"}\r\n\r\n{"status": "pass"}\r\n')
+    snap = JournalReader(path).read()
+    assert snap.trusted and [e["status"] for e in snap.entries] == ["pass", "pass"]
+    with path.open("ab") as fh:
+        fh.write(b"bad\r\n")
+    assert "line 4 " in JournalReader(path).read().error
+
+
+def test_a_replaced_journal_is_read_again_from_the_start(paths, journal):
+    reader = JournalReader(paths.journal)
+    reader.read()
+    new = paths.journal.with_name("new.jsonl")
+    big = b"".join(b'{"status": "pass", "symbol": "S%d"}\n' % i for i in range(200))
+    new.write_bytes(big)  # longer than the old file: only the identity tells them apart
+    os.replace(new, paths.journal)
+    snap = reader.read()
+    assert snap.trusted and len(snap.entries) == 200 and snap.entries[0]["symbol"] == "S0"
+
+
+def test_a_fixed_bad_line_is_read_again(paths, journal):
+    reader = JournalReader(paths.journal)
+    n = len(reader.read().entries)
+    data = paths.journal.read_bytes()
+    paths.journal.write_bytes(data + b"oops\n")
+    assert reader.read().error
+    paths.journal.write_bytes(data + b'{"status": "pass", "symbol": "FIX"}\n')
+    snap = reader.read()
+    assert snap.trusted and len(snap.entries) == n + 1 and snap.entries[-1]["symbol"] == "FIX"
+
+
+def test_concurrent_reads_agree(paths, journal):
+    reader = JournalReader(paths.journal)
+    results, errors = [], []
+
+    def worker():
+        try:
+            for _ in range(20):
+                results.append(len(reader.read().entries))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    expected = len(journal.entries())
+    assert errors == [] and set(results) == {expected} and len(results) == 160
+
+
 def test_blank_lines_count_like_the_journal_counts_them(paths, journal):
     n = sum(1 for _ in paths.journal.open("rb"))
     with paths.journal.open("ab") as fh:
@@ -192,6 +247,9 @@ def test_the_snapshot_journal_never_locks_or_writes(tmp_path):
         sj.record_order_event("ta-x", "submitting", MONDAY)
     with pytest.raises(JournalError):
         sj.expire_unsent(MONDAY)
+    for internal in (sj._missing, sj._ends_cut_off, sj._read_entries):
+        with pytest.raises(JournalError):
+            internal()
     assert sj.day_state(MONDAY).open_positions == 1
 
 
