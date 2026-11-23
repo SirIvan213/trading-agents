@@ -67,6 +67,11 @@ class Sim:
         self.ids = itertools.count(100)
         self.close_reply_broken = False  # the close works, its reply is unreadable (#196)
         self.close_fills = True
+        self.minutes = itertools.count(1)
+
+    def _stamp(self):
+        """A cancel time: each cancel call a minute after the last (a group shares one)."""
+        return f"2026-11-24T16:{next(self.minutes):02d}:00Z"
 
     # ---- building ----
     def add_entry(self, cid, *, symbol="SPY", qty=1, status="new"):
@@ -128,11 +133,12 @@ class Sim:
                 if o["id"] == oid:
                     if o["status"] in ("filled", "canceled", "expired"):
                         return 422, {"code": 42210000}
-                    o["status"] = "canceled"
+                    stamp = self._stamp()
+                    o.update(status="canceled", canceled_at=stamp)
                     # cancelling one order of a bracket cancels the rest of the group
                     for other in group:
                         if other["status"] not in ("filled", "canceled", "expired"):
-                            other["status"] = "canceled"
+                            other.update(status="canceled", canceled_at=stamp)
                     return 204, None
         return 404, {"code": 40410000}
 

@@ -29,9 +29,9 @@ def test_a_pass_runs_before_each_decision_and_lands_in_the_heartbeat(tmp_path, m
     passes = []
     real = rd.Reconciler.pass_once
 
-    def counted(self):
+    def counted(self, **kw):
         passes.append(self.clock())
-        return real(self)
+        return real(self, **kw)
 
     monkeypatch.setattr(rd.Reconciler, "pass_once", counted)
     day, clock, dec, out = make_day(tmp_path, monkeypatch, universe=["SA", "SB"],
@@ -44,7 +44,7 @@ def test_a_pass_runs_before_each_decision_and_lands_in_the_heartbeat(tmp_path, m
 
 
 def test_a_failing_reconciler_stops_new_decisions_and_alerts(tmp_path, monkeypatch, ready):
-    def broken(self):
+    def broken(self, **kw):
         raise RuntimeError("the broker is unreachable")
 
     monkeypatch.setattr(rd.Reconciler, "pass_once", broken)

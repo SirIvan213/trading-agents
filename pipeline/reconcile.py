@@ -47,7 +47,13 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from journal.log import RECONCILE_ALERT, Journal, JournalError, JournalLockTimeout
+from journal.log import (
+    RECONCILE_ALERT,
+    Journal,
+    JournalError,
+    JournalLockTimeout,
+    unresolved_blocks,
+)
 from journal.orders import (
     APPROVED,
     CANCELLED,
@@ -87,6 +93,7 @@ from tools.realized import RealizedError, realized_pnl
 # (PR 5, the flat-by job, #135) declares RUN_DAY_READY too (pipeline.run_day.broker_allowed).
 RUN_DAY_READY = True
 FINAL = FINAL_STATUSES
+DONE_THIS_PASS = "done this pass"  # _flatten: the symbol was already flattened this pass
 
 NY = ZoneInfo("America/New_York")
 POLL_S = 15
@@ -95,6 +102,7 @@ UNFILLED_CANCEL_S = 60
 PARTIAL_GRACE_S = 15
 EXECUTING_WAIT_S = 60
 LOUD_S = 60  # a flatten not done this long: MANUAL ACTION NEEDED
+LEGS_WITH_REMAINDER_S = 5  # legs ended this close to the entry: cancelled with it (#251)
 LOST_SEND_GRACE_S = 120
 RETRY_ALERT_S = 120
 EARLIER_DAY = ("an order from an earlier day: not closed automatically (decision 8); "
@@ -175,19 +183,31 @@ class Reconciler:
     def _would(self, what: str) -> None:
         self.report["would"].append(what)
 
-    def _block(self, kind: str, key: str, reason: str, **fields: object) -> None:
+    def _block(self, kind: str, key: str, reason: str, **fields: object) -> bool:
+        """Open a block (once per key). True when it is open: written now, or already open.
+        False when it could not be written (the caller retries next pass)."""
         if self.check_only:
             self._would(f"block new entries ({kind}): {reason}")
-            return
+            return False
         try:
             block_id = self.journal.add_block(kind, key, reason, self._now(), **fields)
         except JournalError as exc:
             self._alert(f"could not journal a block ({kind}: {reason}): {exc}")
-            return
+            return False
         if block_id is not None:
             self.report["blocks"].append(block_id)
             self._alert(f"new entries blocked ({block_id} {kind}): {reason}. Resolve with "
                         f"python -m journal.resolve {block_id}", symbol=fields.get("symbol"))
+        return True
+
+    def _block_open(self, key: str) -> bool:
+        """An unresolved block with this key is in the journal."""
+        try:
+            entries = (self.journal._read_entries() if self.check_only  # noqa: SLF001
+                       else self.journal.entries())
+        except JournalError:
+            return False
+        return any(b.get("key") == key for b in unresolved_blocks(entries))
 
     def _event(self, o: OrderState, status: str, **fields: object) -> bool:
         """Journal one order event at local receipt time. False when it was not written."""
@@ -254,7 +274,13 @@ class Reconciler:
             self._persisting(f"cancel:{order_id}", f"cancel {what} ({order_id}) failed: {exc}")
 
     # ---- one pass ---------------------------------------------------------------------
-    def pass_once(self) -> dict:
+    def pass_once(self, *, final: bool = False) -> dict:
+        """One pass. `final`: no later pass will confirm anything (a --once pass, run_day's
+        last pass): a partial-fill flatten still unconfirmed at its end blocks."""
+        self.final = final
+        return self._pass()
+
+    def _pass(self) -> dict:
         now = self._now()
         self.report = {"at": now.isoformat(), "mode": "check" if self.check_only else "act",
                        "complete": False, "orders": [], "positions": [], "unreadable": [],
@@ -381,7 +407,7 @@ class Reconciler:
                         self._close(o, looked.get(o.client_order_id), now)
 
         if not self.check_only:
-            self._confirm_partial_flattens(now)
+            self._confirm_partial_flattens(now, final=getattr(self, "final", False))
 
         # orphan orders: open, readable, and not ours (skipped when a lookup failed: an
         # order we could not look up would read as an orphan)
@@ -611,40 +637,60 @@ class Reconciler:
             return
         why = (f"{sym} has no working stop for its {pos.get('qty')} shares: "
                f"{verdict['reason']}")
-        if _legs_cancelled_with_remainder(found, o):
+        if (_legs_cancelled_with_remainder(found, o)
+                and not self._block_open(f"unprotected:{cid}")):
             # Ivan's decision on #251: alert and flatten; block only if not confirmed
+            if self.check_only:
+                self._would(f"flatten {sym} ({why}): a partial fill whose legs were cancelled "
+                            "with the remainder; it blocks only if the close is not "
+                            "confirmed")
+                return
             if cid not in self.partial_flatten:
                 self._alert(f"{why}. A partial fill whose legs were cancelled with the "
                             "remainder: flattening it; no block if the close is confirmed",
                             symbol=sym)
                 self.partial_flatten[cid] = (now, sym, why)
             result = self._flatten(sym, cids, verdict["reason"], now)
-            if result.state not in (FLAT, CLOSING, "done this pass"):
-                self._unconfirmed(cid, f"the flatten did not complete ({result.state}: "
-                                  f"{result.detail})")
+            if result.state == FLAT:
+                # confirm in this same pass: the close is recorded with matching quantities
+                # and check_close says closed (else the timeout or the final pass blocks)
+                try:
+                    again = self.broker.get_order_by_client_id(cid)
+                except BrokerError as exc:
+                    self.report["read_errors"].append(f"re-read {cid}: {exc}")
+                    return
+                self._close(o, again, now)
+            elif result.state not in (CLOSING, DONE_THIS_PASS):
+                self._unconfirmed(cid, sym, why, f"the flatten did not complete "
+                                  f"({result.state}: {result.detail})")
             return
         self._block("unprotected", f"unprotected:{cid}", why, symbol=sym,
                     client_order_id=cid)
         self._flatten(sym, cids, verdict["reason"], now)
 
-    def _unconfirmed(self, cid: str, what: str) -> None:
+    def _unconfirmed(self, cid: str, sym: str, why: str, what: str) -> None:
         """The partial fill's flatten was not confirmed: block, as for any unprotected
-        position (Ivan's decision on #251)."""
-        since, sym, why = self.partial_flatten.pop(cid)
-        self._block("unprotected", f"unprotected:{cid}",
-                    f"{why}; its flatten was not confirmed: {what}", symbol=sym,
-                    client_order_id=cid)
+        position (Ivan's decision on #251). Forgotten only once the block is open, so a
+        block that could not be written is retried next pass."""
+        if self._block("unprotected", f"unprotected:{cid}",
+                       f"{why}; its flatten was not confirmed: {what}", symbol=sym,
+                       client_order_id=cid):
+            self.partial_flatten.pop(cid, None)
 
-    def _confirm_partial_flattens(self, now: datetime) -> None:
-        """A pending partial-fill flatten still unconfirmed after LOUD_S blocks."""
-        for cid, (since, _sym, _why) in list(self.partial_flatten.items()):
-            if now - since >= timedelta(seconds=LOUD_S):
-                self._unconfirmed(cid, f"no confirmed close within {LOUD_S} s (the close "
-                                  "did not complete, or its quantities do not match)")
+    def _confirm_partial_flattens(self, now: datetime, *, final: bool = False) -> None:
+        """A pending partial-fill flatten still unconfirmed after LOUD_S, or at the end of a
+        final pass (nothing later will confirm it), blocks."""
+        for cid, (since, sym, why) in list(self.partial_flatten.items()):
+            if final or now - since >= timedelta(seconds=LOUD_S):
+                self._unconfirmed(cid, sym, why, "no confirmed close "
+                                  + ("before the last pass ended" if final else
+                                     f"within {LOUD_S} s")
+                                  + " (the close did not complete, or its quantities do "
+                                  "not match)")
 
     def _flatten(self, sym: str, cids: list[str], why: str, now: datetime) -> FlattenResult:
         if sym in self.flattened:  # once per symbol per pass, whatever asked for it
-            return FlattenResult("done this pass", "already flattened in this pass")
+            return FlattenResult(DONE_THIS_PASS, "already flattened in this pass")
         self.flattened.add(sym)
         if sym in self.earlier_day:
             # decision 8 and the PR 5 morning rule: nothing an earlier day's order may hold
@@ -706,6 +752,7 @@ class Reconciler:
         from the broker's exit fills (the take-profit and stop legs, our flatten's close)."""
         if o.status == PARTIALLY_FILLED or found is None:
             return  # the entry may still fill, or it was not looked up this pass
+        partial_case = _legs_cancelled_with_remainder(found, o)
         exits = []
         for leg in found.get("legs") or []:
             if _dec(leg["filled_qty"]) and _dec(leg["filled_qty"]) > 0:
@@ -739,7 +786,13 @@ class Reconciler:
                                [(x["qty"], x["avg"]) for x in exits])
         except RealizedError as exc:
             first = self.retry_since.setdefault(f"close:{o.client_order_id}", now)
-            if now - first >= timedelta(seconds=RETRY_ALERT_S):
+            if partial_case and (now - first >= timedelta(seconds=LOUD_S)
+                                 or getattr(self, "final", False)):
+                # the decided case (#251): quantities that do not match block
+                self._unconfirmed(o.client_order_id, o.symbol,
+                                  f"{o.symbol}: a partial fill's flatten",
+                                  f"its exit fills do not add up ({exc})")
+            elif now - first >= timedelta(seconds=RETRY_ALERT_S):
                 self._alert(f"{o.symbol}: the position is gone but its exit fills do not add "
                             f"up ({exc}) since {first:%H:%M:%S}", symbol=o.symbol)
             return
@@ -748,21 +801,25 @@ class Reconciler:
         last = max(exits, key=lambda x: _when(x["at"]) or earliest)
         recorded = self._event(o, CLOSED, closed_by=last["by"], realized_pnl=str(pnl),
                                exits=exits, history_unreadable=bool(history["unreadable"]))
-        if o.client_order_id in self.partial_flatten and recorded:
+        if partial_case and recorded:
             # confirmed only when the journal recorded the close (its exits match the filled
-            # quantity exactly: realized_pnl) AND check_close says closed
+            # quantity exactly: realized_pnl) AND check_close says closed. Decided from the
+            # broker and the journal, so a restart or a --once pass cannot lose it.
+            cid, why = o.client_order_id, f"{o.symbol}: a partial fill's flatten"
             try:
                 state = self.broker.check_close(o.symbol)["state"]
             except BrokerError as exc:
-                self._unconfirmed(o.client_order_id, f"check_close failed ({exc})")
+                self._unconfirmed(cid, o.symbol, why, f"check_close failed ({exc})")
                 return
             if state != "closed":
-                self._unconfirmed(o.client_order_id, f"check_close says {state}")
+                self._unconfirmed(cid, o.symbol, why, f"check_close says {state}")
                 return
-            self.partial_flatten.pop(o.client_order_id)
+            self.partial_flatten.pop(cid, None)
+            standing = self._block_open(f"unprotected:{cid}")
             self._alert(f"{o.symbol}: the partial fill's flatten is confirmed (check_close: "
-                        f"closed; {o.filled_qty} shares closed, realized {pnl}); no block",
-                        symbol=o.symbol)
+                        f"closed; {o.filled_qty} shares closed, realized {pnl}); "
+                        + ("its earlier block stays until resolved" if standing
+                           else "no block"), symbol=o.symbol)
 
 
 # ---- helpers --------------------------------------------------------------------------
@@ -784,7 +841,18 @@ def _legs_cancelled_with_remainder(entry: dict, o: OrderState) -> bool:
     if entry.get("status") not in ("canceled", "expired") or not 0 < filled < o.qty:
         return False
     legs = entry.get("legs") or []
-    return bool(legs) and all(g.get("status") in ("canceled", "expired") for g in legs)
+    if not legs or not all(g.get("status") in ("canceled", "expired") for g in legs):
+        return False
+    # together WITH the remainder: each leg ended within a few seconds of the entry. Legs
+    # cancelled later (by a flatten, or by hand) are not this case: those block at once.
+    ended = _when(entry.get("canceled_at") or entry.get("expired_at"))
+    if ended is None:
+        return False
+    for g in legs:
+        at = _when(g.get("canceled_at") or g.get("expired_at"))
+        if at is None or abs((at - ended).total_seconds()) > LEGS_WITH_REMAINDER_S:
+            return False
+    return True
 
 
 def _approved_orders(entries: list[dict]) -> dict[str, dict]:
@@ -882,7 +950,7 @@ def main(argv: list[str] | None = None, *, broker: Any = None, journal: Journal 
         try:
             with exclusive_file_lock((state_dir or STATE_DIR) / "run_day.lock", timeout_s=0):
                 with ACTION_LOCK:
-                    report = rec.pass_once()
+                    report = rec.pass_once(final=True)  # nothing later confirms
         except LockTimeout:
             print("refused: run_day is running (its reconciler is already acting); use "
                   "--check to look", file=sys.stderr)

@@ -129,11 +129,13 @@ def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
         if position is None:
             return FlattenResult(FLAT, f"no position in {symbol}", actions)
         if closing:
-            return FlattenResult(CLOSING, f"a close of {symbol} is already working", actions)
+            return _await_flat(broker, symbol, f"a close of {symbol} is already working",
+                               actions, sleep, monotonic)
         try:
             order = broker.close_position(symbol)
             actions.append(f"close {symbol} ({order['id']})")
-            return FlattenResult(CLOSING, f"close of {symbol} placed", actions)
+            return _await_flat(broker, symbol, f"close of {symbol} placed", actions, sleep,
+                               monotonic)
         except BrokerError as exc:
             actions.append(f"close {symbol} failed: {exc}")
             if exc.may_have_acted:  # never close again blindly: find out
@@ -150,3 +152,20 @@ def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
                 return FlattenResult(WAITING, "something still holds the shares (403): the "
                                      "next pass cancels again", actions)
             return FlattenResult(FAILED, f"the close was refused ({exc})", actions)
+
+
+def _await_flat(broker: Any, symbol: str, detail: str, actions: list[str],
+                sleep: Callable[[float], None], monotonic: Callable[[], float]
+                ) -> FlattenResult:
+    """A market close usually fills in seconds: wait up to CONFIRM_WAIT_S for the position
+    to go (FLAT), else CLOSING (the next pass looks again). Reads only."""
+    deadline = monotonic() + CONFIRM_WAIT_S
+    while True:
+        try:
+            if not any(p["symbol"] == symbol for p in broker.list_positions()):
+                return FlattenResult(FLAT, f"{detail}; {symbol} is flat", actions)
+        except BrokerError:
+            return FlattenResult(CLOSING, detail, actions)  # the next pass reads again
+        if monotonic() >= deadline:
+            return FlattenResult(CLOSING, detail, actions)
+        sleep(POLL_S)

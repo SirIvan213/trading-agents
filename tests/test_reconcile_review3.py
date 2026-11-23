@@ -124,9 +124,9 @@ def test_run_day_sends_the_reconcilers_alerts_to_its_console(tmp_path, monkeypat
         monkeypatch.setitem(sys.modules, name, mod)
     real = rd.Reconciler.pass_once
 
-    def alerting(self):
+    def alerting(self, **kw):
         self._print_alert("a test alert")
-        return real(self)
+        return real(self, **kw)
 
     monkeypatch.setattr(rd.Reconciler, "pass_once", alerting)
     rd.run_day(day, limits=LIMITS)

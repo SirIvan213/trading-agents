@@ -318,14 +318,14 @@ def decide_one(day: Day, symbol: str, limits: Any) -> str | None:
 # The reconciler (#155): a thread, its health, and the guard on sends
 # ------------------------------------------------------------------------------------------
 
-def reconcile_pass(day: Day) -> bool:
+def reconcile_pass(day: Day, *, final: bool = False) -> bool:
     """One reconcile pass under the broker's action lock; records its end time. False when it
     failed (the reconciler's own alerts say why; an unexpected error is alerted here)."""
     if day.reconciler is None:
         return True
     try:
         with ACTION_LOCK:
-            report = day.reconciler.pass_once()
+            report = day.reconciler.pass_once(final=final)
     except Exception as exc:  # noqa: BLE001 - never kill the thread; staleness tells run_day
         day.alert(f"the reconcile pass failed ({type(exc).__name__}): {exc}")
         return False
@@ -505,7 +505,7 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
     finally:
         if day.reconcile_thread is not None:  # never on a held day: it never started
             day.reconcile_thread.stop()
-            reconcile_pass(day)  # one last pass at the end of the day
+            reconcile_pass(day, final=True)  # one last pass at the end of the day
         pulse.stop()
 
 
