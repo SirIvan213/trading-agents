@@ -34,6 +34,13 @@ from journal.orders import (
 from tools.risk_check import DayState
 
 NY = ZoneInfo("America/New_York")
+# The reconciler's notes (Phase 5 PR 4, #155). A block stops every new entry (DayState.
+# reconcile_blocks) until a human appends its resolution (python -m journal.resolve).
+RECONCILE_BLOCK = "reconcile_block"
+RECONCILE_BLOCK_RESOLVED = "reconcile_block_resolved"
+RECONCILE_ALERT = "reconcile_alert"
+BLOCK_KINDS = frozenset({"conflict", "unreadable_order", "orphan", "unprotected",
+                         "fill_above_limit"})
 DEFAULT_PATH = Path(__file__).resolve().parent / "decisions.jsonl"
 __all__ = ["APPROVED", "DEFAULT_PATH", "Journal", "JournalError", "JournalLockTimeout",
            "LOCK_TIMEOUT_S"]
@@ -276,6 +283,40 @@ class Journal:
             self._replayed = known
         return new
 
+    def add_block(self, kind: str, key: str, reason: str, at: datetime,
+                  **fields: object) -> str | None:
+        """Append a reconcile_block unless an unresolved one with the same `key` exists.
+        Returns the new block id, or None when the same block is already open. Under the
+        lock; raises JournalError if it cannot be read or written."""
+        if kind not in BLOCK_KINDS:
+            raise JournalError(f"unknown block kind {kind!r}")
+        if not isinstance(at, datetime) or at.tzinfo is None or at.utcoffset() is None:
+            raise JournalError("block time must be timezone-aware")
+        with self.exclusive():
+            open_ = unresolved_blocks(self.entries())
+            if any(b.get("key") == key for b in open_):
+                return None
+            block_id = f"rb-{len(self.entries()) + 1:06d}"
+            self.append({"status": RECONCILE_BLOCK, "block_id": block_id, "kind": kind,
+                         "key": str(key)[:200], "reason": str(reason)[:400],
+                         "at": at.astimezone(NY).isoformat(), **fields})
+            return block_id
+
+    def resolve_block(self, block_id: str, note: str, at: datetime) -> dict:
+        """Append the resolution of one open block (a human's decision). Returns the block.
+        Raises JournalError for an unknown or already resolved block, or an empty note."""
+        if not isinstance(note, str) or not note.strip():
+            raise JournalError("a resolution needs a note saying what was done")
+        if not isinstance(at, datetime) or at.tzinfo is None or at.utcoffset() is None:
+            raise JournalError("resolution time must be timezone-aware")
+        with self.exclusive():
+            open_ = {b["block_id"]: b for b in unresolved_blocks(self.entries())}
+            if block_id not in open_:
+                raise JournalError(f"no open block {block_id!r}")
+            self.append({"status": RECONCILE_BLOCK_RESOLVED, "block_id": block_id,
+                         "note": note.strip()[:400], "at": at.astimezone(NY).isoformat()})
+            return open_[block_id]
+
     def expire_unsent(self, now: datetime) -> list[str]:
         """Journal every approval that was never sent and whose plan has expired at `now`
         as "expired" (filled_qty 0), releasing its position slot and its risk (Ivan's
@@ -351,5 +392,25 @@ class Journal:
                     stopped.add(o.symbol)
             if day == today:
                 trades += 1 if o.sent else 0
+        blocks = tuple(f"{b.get('block_id')} {b.get('kind')}: {b.get('reason')}"
+                       for b in unresolved_blocks(self.entries()))
         return DayState(trades_today=trades, risk_used_today=risk, open_positions=opened,
+                        reconcile_blocks=blocks,
                         realized_loss_today=lost, stopped_out_symbols=frozenset(stopped))
+
+
+def unresolved_blocks(entries: list[dict]) -> list[dict]:
+    """The reconcile_block entries without a later resolution, oldest first. A block entry
+    without a usable block_id still counts (it can only be cleared by repairing the journal),
+    so a malformed block never reads as resolved."""
+    resolved = {e.get("block_id") for e in entries
+                if e.get("status") == RECONCILE_BLOCK_RESOLVED}
+    out = []
+    for e in entries:
+        if e.get("status") != RECONCILE_BLOCK:
+            continue
+        bid = e.get("block_id")
+        if isinstance(bid, str) and bid in resolved:
+            continue
+        out.append(e if isinstance(bid, str) else {**e, "block_id": "(no id)"})
+    return out

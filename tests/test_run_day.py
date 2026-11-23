@@ -333,15 +333,37 @@ def test_a_broker_is_accepted_once_both_modules_declare_ready(tmp_path, monkeypa
         mod = types.ModuleType(name)
         mod.RUN_DAY_READY = True
         monkeypatch.setitem(sys.modules, name, mod)
-    broker = object()
+    broker = QuietBroker()
     day, clock, dec, out = make_day(tmp_path, monkeypatch, universe=["SA"], broker=broker)
     assert rd.run_day(day, limits=LIMITS) == rd.OK
-    assert dec.brokers == [broker]
+    # the decision sends through the guard, which wraps this broker (#155)
+    assert len(dec.brokers) == 1 and isinstance(dec.brokers[0], rd.GuardedBroker)
+    assert dec.brokers[0]._day.broker is broker
 
 
-def test_today_the_prerequisites_are_not_merged():
+class QuietBroker:
+    """A paper broker with nothing in it: the reconciler's reads find no order, no position."""
+
+    def verify_paper_account(self):
+        return {"account_number": "PA-FAKE", "status": "ACTIVE"}
+
+    def list_open_orders_checked(self):
+        return {"orders": [], "unreadable": []}
+
+    def list_positions(self):
+        return []
+
+    def get_order_by_client_id(self, cid):
+        return None
+
+
+def test_today_the_flatten_job_is_not_merged():
+    """PR 4 (#155) merged the reconciler; run_day still refuses a broker until PR 5's flatten
+    job (#135) declares RUN_DAY_READY."""
+    import pipeline.reconcile as rc
+    assert rc.RUN_DAY_READY is True
     allowed, why = rd.broker_allowed()
-    assert allowed is False and "pipeline.reconcile is not merged" in why
+    assert allowed is False and "pipeline.flatten does not declare RUN_DAY_READY" in why
 
 
 def test_blocked_paper_false_is_refused(tmp_path, monkeypatch):

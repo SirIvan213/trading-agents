@@ -83,8 +83,57 @@ Only the task passes `--scheduled`. Never add `--send`: it is refused until the 
 - **Daily budget.** `journal\state\budget-YYYY-MM-DD.json` holds the day's counts (decisions,
   tokens, FMP requests, Alpha Vantage calls). Never edit or delete it: a budget file that is
   missing or unreadable after the day started closes the day (no more decisions).
-- **Alerts.** An `ALERT:` line in the console and a `run_day_alert` entry in the journal.
-  Desktop notifications are a follow-up.
+- **Alerts.** An `ALERT:` line in the console and a `run_day_alert` entry in the journal
+  (`reconcile_alert` for the reconciler's). Desktop notifications are a follow-up.
+
+## The paper account is dedicated to this project
+
+The Alpaca **paper** account belongs to this project alone. **Never place, change or cancel
+an order in it by hand** (except when an alert below asks you to). The reconciler relies on
+that: an order or position it cannot trace to the journal is an **orphan**, and an order it
+cannot read is **unreadable**. Both block new entries; an orphan is also flattened.
+
+## The reconciler and its blocks
+
+Once sending is enabled (#155, #135), the reconciler (`pipeline/reconcile.py`) runs inside
+run_day every 15 seconds and before each decision. It records fills and closes, cancels an
+entry still unfilled after 60 seconds, and makes sure every position has a working stop for
+all of its shares. A position without one is flattened at market and alerted. Its last pass
+time is in the heartbeat (`reconciled_at`). If that is more than 45 seconds old, or the
+reconciler stopped, run_day starts no decision and sends nothing until it recovers.
+
+**Check what it sees, without acting** (works with the market closed; it never sends,
+cancels or closes anything, and writes nothing):
+
+```
+.venv\Scripts\python.exe -m pipeline.reconcile --check
+```
+
+**Blocks.** When the reconciler finds something it cannot square, it writes a block and
+alerts, and **no new entry is allowed until you resolve every block**:
+
+| Kind | What it means |
+|---|---|
+| `conflict` | The broker reported something the journal refuses (a fill after a close, an order the journal calls rejected that the broker holds ...). |
+| `unreadable_order` | An open order the broker client cannot read (for example, one placed by hand). Nothing acts on it. |
+| `orphan` | A position or order that is not in the journal. It is flattened. |
+| `unprotected` | A position without a working stop for all its shares. It is flattened. |
+| `fill_above_limit` | An entry filled above its limit price. |
+
+List the open blocks, check the Alpaca paper dashboard, fix the cause, then resolve each one
+with a note saying what you did:
+
+```
+.venv\Scripts\python.exe -m journal.resolve
+.venv\Scripts\python.exe -m journal.resolve rb-000123 --note "cancelled the stray order by hand"
+```
+
+If the cause is still there, the next pass blocks again.
+
+**Manual action needed.** If an open order in a symbol cannot be read, it could be a close
+that is already working, so the reconciler skips closing that symbol and alerts on every pass.
+If that lasts 60 seconds, or reaches the flat-by time, the alert says **MANUAL ACTION NEEDED**:
+in the Alpaca paper dashboard, cancel that symbol's orders and close the position.
 
 ## Exit codes
 
