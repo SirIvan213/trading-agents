@@ -19,7 +19,7 @@
     "no_order:journal": "The plan already had an order, or the journal could not be read, so no order was made",
     "no_order:risk": "The risk check blocked the order",
     "no_order:events": "The earnings and halt check could not run, so no order was made",
-    "declined": "Declined by you: the answer was not yes, so nothing was approved",
+    "declined": "Declined by you: the answer was not yes (an empty answer or a closed console also counts), so nothing was approved",
     "declined:timeout": "Not answered in time: no answer before the plan expired, so nothing was approved",
     "refused_after_approval": "Approved, but the final re-check refused it",
     "changed_after_approval": "Approved, but the order changed at the re-check, so it was not approved",

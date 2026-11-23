@@ -277,8 +277,9 @@ def test_a_typed_decline_is_declined_by_you_not_blocked(paths):
     s = steps(body)
     step = s["approve_and_log"]
     assert step["state"] == "declined"
-    assert step["line"] == ("Declined by you: the answer was not yes, so nothing was "
-                            "approved.")
+    assert step["line"] == (
+        "Declined by you: the answer was not yes (an empty answer or a closed console "
+        "also counts), so nothing was approved.")
     assert step["details"]["timed_out"] is False
     assert body["numbers"]["shares"] == 13 and body["record_available"] is True
     assert body["in_short"].startswith("The ticket was for 13 shares of ABCD. Declined by you")
@@ -325,3 +326,19 @@ def test_history_and_the_detail_use_the_same_words(paths):
         paths.journal.unlink()
         for f in (paths.journal.parent / "records").rglob("*.json"):
             f.unlink()
+
+
+def test_a_timeout_note_for_another_run_does_not_change_a_decline(paths):
+    case_paths(paths, "declined")
+    Journal(paths.journal).append({"status": "run_day_approval_timeout",
+                                   "at": NOON.isoformat(), "symbol": "ABCD",
+                                   "run_id": "SOME_OTHER_RUN"})
+    step = steps(get(paths).json())["approve_and_log"]
+    assert step["state"] == "declined" and step["details"]["timed_out"] is False
+
+
+def test_the_decline_line_does_not_claim_a_typed_answer(paths):
+    """The journal's declined entry is the same for a typed no, an empty Enter and a closed
+    console, so the line says so (pipeline/order_flow.py approve; terminal.py)."""
+    step = steps(get(case_paths(paths, "declined")).json())["approve_and_log"]
+    assert "closed console" in step["line"] and "empty answer" in step["line"]

@@ -68,7 +68,8 @@ def write_case(case: str, journal_path: Path) -> None:
             "verdict": {"verdict": "PASS", "reasons": []}, "checked_at": at.isoformat(),
         })
         if case == "not_answered":  # run_day's note: the terminal's deadline passed
-            j.append({"status": "run_day_approval_timeout", "at": at.isoformat(),
+            j.append({"status": "run_day_approval_timeout",
+                      "at": (at + timedelta(seconds=1)).isoformat(),
                       "symbol": "ABCD", "run_id": RUN_ID})
     elif case == "pass_fatal_bear":
         j.append({"status": "pass", "run_id": RUN_ID, "symbol": "ABCD",

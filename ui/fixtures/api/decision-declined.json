@@ -6,11 +6,11 @@
   "outcome": "BUY",
   "why": {
     "code": "declined",
-    "text": "Declined by you: the answer was not yes, so nothing was approved",
+    "text": "Declined by you: the answer was not yes (an empty answer or a closed console also counts), so nothing was approved",
     "detail": "not approved"
   },
   "order_status": null,
-  "in_short": "The ticket was for 13 shares of ABCD. Declined by you: the answer was not yes, so nothing was approved.",
+  "in_short": "The ticket was for 13 shares of ABCD. Declined by you: the answer was not yes (an empty answer or a closed console also counts), so nothing was approved.",
   "numbers": {
     "shares": 13,
     "entry": "103.10",
@@ -204,7 +204,7 @@
       "title": "Approve and log",
       "actor": "you",
       "state": "declined",
-      "line": "Declined by you: the answer was not yes, so nothing was approved.",
+      "line": "Declined by you: the answer was not yes (an empty answer or a closed console also counts), so nothing was approved.",
       "details": {
         "status": "declined",
         "approved_at": null,

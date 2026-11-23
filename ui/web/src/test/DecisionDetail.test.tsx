@@ -153,6 +153,7 @@ describe("Decision detail", () => {
     expect(state).toHaveClass("state-declined");
     expect(state).not.toHaveClass("state-blocked");
     expect(step("approve_and_log")).toHaveTextContent("the answer was not yes");
+    expect(step("approve_and_log")).toHaveTextContent("closed console also counts");
     expect(within(step("approve_and_log")).queryByText("blocked")).not.toBeInTheDocument();
     expect(document.querySelector(".state-blocked")).toBeNull();
     expect(screen.getByText(declined.in_short)).toBeInTheDocument();

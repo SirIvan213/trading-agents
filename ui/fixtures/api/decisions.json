@@ -336,7 +336,7 @@
       "outcome": "BUY",
       "why": {
         "code": "declined",
-        "text": "Declined by you: the answer was not yes, so nothing was approved",
+        "text": "Declined by you: the answer was not yes (an empty answer or a closed console also counts), so nothing was approved",
         "detail": "not approved"
       },
       "forced_pass": null,
