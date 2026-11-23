@@ -144,6 +144,10 @@ class Reconciler:
         self.partial_since: dict[str, datetime] = {}
         self.executing_since: dict[str, datetime] = {}
         self.activating_since: dict[str, datetime] = {}
+        # Ivan's decision on #251: a partial fill whose legs Alpaca cancelled with the
+        # remainder is flattened with an alert, and blocked only if that flatten is not
+        # CONFIRMED (cid -> when the flatten started, its symbol, the reason)
+        self.partial_flatten: dict[str, tuple[datetime, str, str]] = {}
         self.stuck_since: dict[str, datetime] = {}  # symbol -> a flatten not done since
         self.retry_since: dict[str, datetime] = {}
         self.latest: dict[str, dict | None] = {}  # a lookup made after acting (a cancel)
@@ -376,6 +380,9 @@ class Reconciler:
                     for o in trades:
                         self._close(o, looked.get(o.client_order_id), now)
 
+        if not self.check_only:
+            self._confirm_partial_flattens(now)
+
         # orphan orders: open, readable, and not ours (skipped when a lookup failed: an
         # order we could not look up would read as an orphan)
         if listing is not None and not lookup_failed:
@@ -602,10 +609,38 @@ class Reconciler:
                         symbol=sym)
             self._flatten(sym, cids, "a triggered stop that did not finish", now)
             return
-        self._block("unprotected", f"unprotected:{cid}",
-                    f"{sym} has no working stop for its {pos.get('qty')} shares: "
-                    f"{verdict['reason']}", symbol=sym, client_order_id=cid)
+        why = (f"{sym} has no working stop for its {pos.get('qty')} shares: "
+               f"{verdict['reason']}")
+        if _legs_cancelled_with_remainder(found, o):
+            # Ivan's decision on #251: alert and flatten; block only if not confirmed
+            if cid not in self.partial_flatten:
+                self._alert(f"{why}. A partial fill whose legs were cancelled with the "
+                            "remainder: flattening it; no block if the close is confirmed",
+                            symbol=sym)
+                self.partial_flatten[cid] = (now, sym, why)
+            result = self._flatten(sym, cids, verdict["reason"], now)
+            if result.state not in (FLAT, CLOSING, "done this pass"):
+                self._unconfirmed(cid, f"the flatten did not complete ({result.state}: "
+                                  f"{result.detail})")
+            return
+        self._block("unprotected", f"unprotected:{cid}", why, symbol=sym,
+                    client_order_id=cid)
         self._flatten(sym, cids, verdict["reason"], now)
+
+    def _unconfirmed(self, cid: str, what: str) -> None:
+        """The partial fill's flatten was not confirmed: block, as for any unprotected
+        position (Ivan's decision on #251)."""
+        since, sym, why = self.partial_flatten.pop(cid)
+        self._block("unprotected", f"unprotected:{cid}",
+                    f"{why}; its flatten was not confirmed: {what}", symbol=sym,
+                    client_order_id=cid)
+
+    def _confirm_partial_flattens(self, now: datetime) -> None:
+        """A pending partial-fill flatten still unconfirmed after LOUD_S blocks."""
+        for cid, (since, _sym, _why) in list(self.partial_flatten.items()):
+            if now - since >= timedelta(seconds=LOUD_S):
+                self._unconfirmed(cid, f"no confirmed close within {LOUD_S} s (the close "
+                                  "did not complete, or its quantities do not match)")
 
     def _flatten(self, sym: str, cids: list[str], why: str, now: datetime) -> FlattenResult:
         if sym in self.flattened:  # once per symbol per pass, whatever asked for it
@@ -711,8 +746,23 @@ class Reconciler:
         self.retry_since.pop(f"close:{o.client_order_id}", None)
         earliest = datetime.min.replace(tzinfo=NY)
         last = max(exits, key=lambda x: _when(x["at"]) or earliest)
-        self._event(o, CLOSED, closed_by=last["by"], realized_pnl=str(pnl), exits=exits,
-                    history_unreadable=bool(history["unreadable"]))
+        recorded = self._event(o, CLOSED, closed_by=last["by"], realized_pnl=str(pnl),
+                               exits=exits, history_unreadable=bool(history["unreadable"]))
+        if o.client_order_id in self.partial_flatten and recorded:
+            # confirmed only when the journal recorded the close (its exits match the filled
+            # quantity exactly: realized_pnl) AND check_close says closed
+            try:
+                state = self.broker.check_close(o.symbol)["state"]
+            except BrokerError as exc:
+                self._unconfirmed(o.client_order_id, f"check_close failed ({exc})")
+                return
+            if state != "closed":
+                self._unconfirmed(o.client_order_id, f"check_close says {state}")
+                return
+            self.partial_flatten.pop(o.client_order_id)
+            self._alert(f"{o.symbol}: the partial fill's flatten is confirmed (check_close: "
+                        f"closed; {o.filled_qty} shares closed, realized {pnl}); no block",
+                        symbol=o.symbol)
 
 
 # ---- helpers --------------------------------------------------------------------------
@@ -725,6 +775,16 @@ def _followed(o: OrderState, now: datetime) -> bool:
     if o.status in (CANCELLED, EXPIRED) and o.filled_qty > 0:
         return True
     return o.status == REJECTED and o.approved_at.astimezone(NY).date() == now.date()
+
+
+def _legs_cancelled_with_remainder(entry: dict, o: OrderState) -> bool:
+    """A partial fill whose stop and take-profit Alpaca cancelled (or expired) together with
+    the entry's unfilled remainder: the case Ivan decided on #251."""
+    filled = _dec(entry.get("filled_qty")) or 0
+    if entry.get("status") not in ("canceled", "expired") or not 0 < filled < o.qty:
+        return False
+    legs = entry.get("legs") or []
+    return bool(legs) and all(g.get("status") in ("canceled", "expired") for g in legs)
 
 
 def _approved_orders(entries: list[dict]) -> dict[str, dict]:

@@ -339,13 +339,15 @@ def test_after_a_partial_fill_legs_the_broker_cancelled_mean_flatten(tmp_path):
     r.pass_once()
     clock.step(16)
     r.pass_once()  # cancels the remainder (the group goes with it), then flattens
-    assert [b["kind"] for b in blocks(j)] == ["unprotected"]
     assert ("DELETE", "/v2/positions/SPY") in sim.writes and sim.positions == {}
     clock.step(15)
     r.pass_once()  # the close is recorded
     closed = events(j, cid)[-1]
     assert closed["status"] == "closed" and closed["closed_by"] == "flatten"
     assert closed["realized_pnl"] == "1.88"  # 4 x (718.79 - 718.32)
+    # Ivan's decision on #251: a CONFIRMED flatten of this case alerts, never blocks
+    assert blocks(j) == []
+    assert any("flatten is confirmed" in a for a in alerts)
 
 
 def test_a_missing_stop_is_blocked_alerted_and_flattened(tmp_path):
