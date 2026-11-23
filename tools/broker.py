@@ -63,7 +63,8 @@ Replies are parsed strictly: an order reply must carry a known status and side a
 the request (client_order_id, symbol and, for a submit, side, qty, the bracket class and both
 legs at the plan's target and stop: bracket_legs_problem), so a surprise never reads as a fill
 or as a protected entry. A simple order (order_class missing, "" or "simple") is accepted
-only as a market or limit order: the closing order of close_position and what listings show.
+only as a market or limit order (what listings show); our close is a simple MARKET sell
+(is_close_order).
 Position fields that only describe the position (market_value, unrealized_pl, current_price,
 qty_available) are optional, so the exit path (listing positions to flatten them) never fails
 on them.
@@ -231,7 +232,8 @@ def _order_class(reply: dict) -> str:
     class is passed through as written; the callers that need a bracket check for one."""
     cls = reply.get("order_class")
     if cls in SIMPLE_CLASSES:
-        if reply.get("type") not in SIMPLE_TYPES:
+        kind = reply.get("type")
+        if not isinstance(kind, str) or kind not in SIMPLE_TYPES:
             raise BrokerError("broker reply is a simple order of an unexpected type")
         return "simple"
     if not isinstance(cls, str):
@@ -246,7 +248,7 @@ def parse_order(reply: object) -> dict:
     if not isinstance(reply, dict):
         raise BrokerError("broker reply is not an order")
     status = reply.get("status")
-    if status not in ORDER_STATUSES:
+    if not isinstance(status, str) or status not in ORDER_STATUSES:
         raise BrokerError("broker reply has an unknown order status")
     legs = reply.get("legs")
     if legs is not None and not isinstance(legs, list):
@@ -311,6 +313,55 @@ def bracket_legs_problem(order: dict, body: dict) -> str | None:
     except (InvalidOperation, ValueError, TypeError, KeyError):
         return "a bracket leg has an unreadable price or quantity"
     return None
+
+
+ORDER_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
+
+
+def parse_order_list(reply: object) -> dict:
+    """A listing of orders, parsed one order at a time (#246): {"orders": [the readable
+    orders], "unreadable": [{"id", "symbol", "why"}]}. One order this parser does not
+    recognize (a hand-placed simple stop, an unknown status) never hides the others. In an
+    unreadable entry, "id" and "symbol" are given only when they are plain, valid values
+    (else None: the order could be in any symbol), and "why" never echoes the reply. Raises
+    BrokerError only when the reply is not a list at all."""
+    if not isinstance(reply, list):
+        raise BrokerError("broker reply is not a list of orders")
+    orders, unreadable = [], []
+    for item in reply:
+        try:
+            orders.append(parse_order(item))
+        except (BrokerError, RecursionError, TypeError, ValueError) as exc:
+            # a BrokerError's text is fixed (never the reply's contents); Python's own
+            # messages can describe the value, so they get a fixed reason instead
+            raw = item if isinstance(item, dict) else {}
+            oid, sym = raw.get("id"), raw.get("symbol")
+            unreadable.append({
+                "id": oid if isinstance(oid, str) and ORDER_ID.fullmatch(oid) else None,
+                "symbol": (normalize_symbol(sym) if isinstance(sym, str)
+                           and normalize_symbol(sym) == sym else None),
+                "why": (str(exc)[:120] if isinstance(exc, BrokerError)
+                        else "too deeply nested" if isinstance(exc, RecursionError)
+                        else "broker reply is malformed"),
+            })
+    return {"orders": orders, "unreadable": unreadable}
+
+
+def is_close_order(order: dict) -> bool:
+    """A closing order, as DELETE /v2/positions/{symbol} places it (#196): a simple MARKET
+    sell. One test for close_position, check_close and the probe, so a stray simple limit
+    sell is never taken for our close."""
+    return (order.get("side") == "sell" and order.get("order_class") == "simple"
+            and order.get("type") == "market")
+
+
+def _strict(listing: dict) -> list[dict]:
+    """The readable orders, or BrokerError when any order could not be read (fail closed)."""
+    if listing["unreadable"]:
+        n = len(listing["unreadable"])
+        raise BrokerError(f"{n} order(s) in the broker reply could not be read: "
+                          f"{listing['unreadable'][0]['why']}")
+    return listing["orders"]
 
 
 def parse_position(reply: object) -> dict:
@@ -473,6 +524,9 @@ class AlpacaPaperBroker:
             out = parse_order(reply)
         except BrokerError as exc:
             raise BrokerError(str(exc), status=200, may_have_acted=True) from None
+        except RecursionError:
+            raise BrokerError("broker reply is too deeply nested", status=200,
+                              may_have_acted=True) from None
         expected = {"client_order_id": client_order_id, "symbol": body["symbol"], "side": "buy",
                     "qty": body["qty"], "order_class": "bracket"}
         got = {k: out[k] for k in expected}
@@ -507,16 +561,23 @@ class AlpacaPaperBroker:
         return out
 
     def list_open_orders(self) -> list[dict]:
+        """Every open order in the account, legs nested. Strict: BrokerError when any order
+        cannot be read. A bracket's held stop is NOT listed here (#196): find stops by looking
+        up the entry with its legs."""
+        return _strict(self.list_open_orders_checked())
+
+    def list_open_orders_checked(self) -> dict:
+        """Every open order in the account, parsed one by one (parse_order_list): the
+        readable orders, and the unreadable ones reported, never hiding the rest (#246). The
+        caller decides what an unreadable order means (the reconciler blocks new entries and
+        alerts; it never acts on an order it cannot read)."""
         self._require_verified()
-        reply = self._call("GET", "/v2/orders",
-                           query={"status": "open", "nested": "true", "limit": "500"})
-        if not isinstance(reply, list):
-            raise BrokerError("broker reply is not a list of orders")
-        return [parse_order(o) for o in reply]
+        return parse_order_list(self._call(
+            "GET", "/v2/orders", query={"status": "open", "nested": "true", "limit": "500"}))
 
     def cancel_order(self, order_id: str) -> None:
         self._require_verified()
-        if not isinstance(order_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", order_id):
+        if not isinstance(order_id, str) or not ORDER_ID.fullmatch(order_id):
             raise BrokerError("order id must be letters, digits or '-'")
         self._call("DELETE", f"/v2/orders/{order_id}", ok=(200, 204))
 
@@ -533,7 +594,7 @@ class AlpacaPaperBroker:
         paper, #196: a market sell with order_class ""). Alpaca refuses (403, 40310000,
         qty_available 0) while the position's bracket legs are open: cancel them first.
 
-        A reply that cannot be read, or is not a simple sell in the symbol, raises BrokerError
+        A reply that cannot be read, or is not a market sell in the symbol, raises BrokerError
         with may_have_acted=True: Alpaca answered 200, so the close may well be working (on
         paper it FILLED while its reply was refused here). Then call check_close; never send
         the close again without it."""
@@ -545,40 +606,46 @@ class AlpacaPaperBroker:
         reply = self._call("DELETE", path)
         try:
             out = parse_order(reply)
-        except BrokerError as exc:
-            raise BrokerError(f"DELETE {path}: {exc}; the close may have been placed",
+        except (BrokerError, RecursionError) as exc:
+            why = str(exc) if isinstance(exc, BrokerError) else "too deeply nested"
+            raise BrokerError(f"DELETE {path}: {why}; the close may have been placed",
                               status=200, may_have_acted=True) from None
-        if out["symbol"] != sym or out["side"] != "sell" or out["order_class"] != "simple":
-            raise BrokerError(f"DELETE {path}: the reply is not a simple sell in {sym}; the "
+        if out["symbol"] != sym or not is_close_order(out):
+            raise BrokerError(f"DELETE {path}: the reply is not a market sell in {sym}; the "
                               "close may have been placed", status=200, may_have_acted=True)
         return out
 
     def list_orders(self, symbol: str, *, limit: int = 50) -> list[dict]:
         """The symbol's most recent orders in any status, newest first, legs nested
-        (GET /v2/orders?status=all&symbols=...). Read only."""
+        (GET /v2/orders?status=all&symbols=...). Read only. Strict: BrokerError when any
+        order in the reply cannot be read, so a doubt in this symbol is never skipped."""
+        return _strict(self.list_orders_checked(symbol, limit=limit))
+
+    def list_orders_checked(self, symbol: str, *, limit: int = 50) -> dict:
+        """list_orders, parsed one by one (parse_order_list). Readable orders in another
+        symbol are dropped; an unreadable one is always reported (its symbol may be wrong)."""
         self._require_verified()
         sym = normalize_symbol(symbol)
         if sym is None:
             raise BrokerError("symbol is not a valid ticker")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise BrokerError("limit must be a whole number from 1 to 500")
-        reply = self._call("GET", "/v2/orders",
-                           query={"status": "all", "symbols": sym, "nested": "true",
-                                  "direction": "desc", "limit": str(limit)})
-        if not isinstance(reply, list):
-            raise BrokerError("broker reply is not a list of orders")
-        return [o for o in (parse_order(x) for x in reply) if o["symbol"] == sym]
+        out = parse_order_list(self._call(
+            "GET", "/v2/orders", query={"status": "all", "symbols": sym, "nested": "true",
+                                        "direction": "desc", "limit": str(limit)}))
+        return {"orders": [o for o in out["orders"] if o["symbol"] == sym],
+                "unreadable": out["unreadable"]}
 
     def check_close(self, symbol: str) -> dict:
         """What became of a close whose outcome is unclear (a BrokerError with
         may_have_acted), from the broker's own state. Read only: it never sends anything.
 
           {"state": "closed" | "closing" | "open", "position": <parsed> | None,
-           "close_orders": [the symbol's recent simple sell orders, newest first]}
+           "close_orders": [the symbol's recent simple market sells, newest first]}
 
         "closed": no position in the symbol. "closing": the position is still there and a
-        simple sell is working (wait for it; do not close again). "open": the position is
-        there and no simple sell is working, so the close did not take: a new close is an
+        market sell is working (wait for it; do not close again). "open": the position is
+        there and no market sell is working, so the close did not take: a new close is an
         informed decision for the caller, never automatic here."""
         self._require_verified()
         sym = normalize_symbol(symbol)
@@ -586,8 +653,9 @@ class AlpacaPaperBroker:
             raise BrokerError("symbol is not a valid ticker")
         # orders first, then the position: a close that fills between the two reads then
         # shows as "closed" (position gone), never as "open" (a filled close, position seen)
-        closes = [o for o in self.list_orders(sym)
-                  if o["side"] == "sell" and o["order_class"] == "simple"]
+        # strict: an unreadable order in this symbol raises (a doubt is never skipped);
+        # a close is a simple MARKET sell (close_position's order), never a stray limit
+        closes = [o for o in self.list_orders(sym) if is_close_order(o)]
         position = next((p for p in self.list_positions() if p["symbol"] == sym), None)
         working = [o for o in closes if o["status"] not in FINAL_STATUSES]
         state = "closed" if position is None else "closing" if working else "open"

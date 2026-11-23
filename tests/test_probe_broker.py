@@ -35,6 +35,7 @@ class FakePaper:
         self.calls: list[tuple] = []
         self.n = 0
         self.minutes_left = minutes_left
+        self.unreadable: list[dict] = []  # orders the parser could not read (#246)
 
     def verify_paper_account(self):
         self.calls.append(("verify",))
@@ -51,6 +52,9 @@ class FakePaper:
 
     def list_open_orders(self):
         return [o for o in self.orders.values() if o["status"] in ("new", "held", "accepted")]
+
+    def list_open_orders_checked(self):
+        return {"orders": self.list_open_orders(), "unreadable": list(self.unreadable)}
 
     def _leg(self, parent, kind):
         self.n += 1
@@ -742,3 +746,62 @@ def test_step_6_leaves_an_unchecked_unclear_close_to_the_cleanup(capsys):
     assert r["5_close_with_legs_open"]["check"]["state"] == "unknown"
     assert r["6_close_after_legs"] == "step 5's close could not be checked: left to the cleanup"
     assert r["cleanup"]["flat"] is True and fake.positions == {}
+
+
+# ======================= #246: unreadable orders =======================
+
+def test_an_unreadable_order_in_another_symbol_does_not_stop_the_probe(capsys):
+    fake = FakePaper()
+    fake.unreadable = [{"id": "x-1", "symbol": "AAPL", "why": "simple order of an unexpected "
+                                                            "type"}]
+    assert run(fake) == pb.OK
+    assert report(capsys)["cleanup"]["flat"] is True
+
+
+@pytest.mark.parametrize("symbol", ["SPY", None])
+def test_an_unreadable_order_that_may_be_in_the_symbol_refuses_the_probe(capsys, symbol):
+    fake = FakePaper()
+    fake.unreadable = [{"id": None, "symbol": symbol, "why": "unknown order status"}]
+    assert run(fake) == pb.REFUSED
+    assert "cannot be read" in capsys.readouterr().err
+    assert not [c for c in fake.calls if c[0] in ("submit", "close", "cancel")]
+
+
+def test_an_unreadable_order_in_the_symbol_after_the_entry_fails_the_cleanup_closed(capsys):
+    """It appears mid-run: the cleanup notes it and reports NOT flat; nothing crashes."""
+    fake = FakePaper()
+    real_run = pb.Probe.run
+
+    def run_then_odd_order(self):
+        real_run(self)
+        fake.unreadable = [{"id": None, "symbol": "SPY", "why": "unknown order status"}]
+
+    pb.Probe.run = run_then_odd_order
+    try:
+        assert run(fake) == pb.NOT_FLAT
+    finally:
+        pb.Probe.run = real_run
+    captured = capsys.readouterr()
+    assert "NOT flat" in captured.err
+    r = json.loads(captured.out[captured.out.index("{"):])
+    assert any("cannot be read" in n for n in r["cleanup"]["notes"])
+
+
+def test_the_cleanup_cancels_a_simple_limit_sell_in_the_symbol(capsys):
+    """Only a market sell is our close: a stray limit sell is cancelled, not waited on."""
+    fake = FakePaper()
+    real_run = pb.Probe.run
+
+    def run_then_limit_sell(self):
+        real_run(self)
+        fake.orders["lim-1"] = {"id": "lim-1", "symbol": "SPY", "status": "new",
+                                "side": "sell", "order_class": "simple", "type": "limit",
+                                "legs": []}
+
+    pb.Probe.run = run_then_limit_sell
+    try:
+        run(fake)
+    finally:
+        pb.Probe.run = real_run
+    assert ("cancel", "lim-1") in fake.calls
+    assert report(capsys)["cleanup"]["flat"] is True
