@@ -144,6 +144,9 @@ class Day:
     reporting: dict[str, dict] = field(default_factory=dict)
     skipped: set[str] = field(default_factory=set)  # SymbolSkipped today (#170): not retried
     reconciler: Any | None = None  # with a broker: pipeline.reconcile.Reconciler (#155)
+    # the reconciler's own client (verified every pass), so a decision's verify never blinds
+    # it; None: it shares `broker` (tests)
+    reconcile_broker: Any | None = None
     reconciled_at: datetime | None = None  # the end of its last completed pass
     reconcile_thread: Any | None = None
 
@@ -322,10 +325,12 @@ def reconcile_pass(day: Day) -> bool:
         return True
     try:
         with ACTION_LOCK:
-            day.reconciler.pass_once()
+            report = day.reconciler.pass_once()
     except Exception as exc:  # noqa: BLE001 - never kill the thread; staleness tells run_day
         day.alert(f"the reconcile pass failed ({type(exc).__name__}): {exc}")
         return False
+    if not report.get("complete"):
+        return False  # it could not see everything (it alerted): not a pass for health
     day.reconciled_at = day.clock()
     day.beat()
     return True
@@ -485,7 +490,8 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
     pulse = _Pulse(day)
     pulse.start()
     if day.broker is not None:
-        day.reconciler = Reconciler(day.journal, day.broker, clock=day.clock, limits=limits)
+        day.reconciler = Reconciler(day.journal, day.reconcile_broker or day.broker,
+                                    clock=day.clock, limits=limits)
         day.reconcile_thread = _Reconcile(day)
         day.reconcile_thread.start()
     try:
@@ -650,14 +656,16 @@ def _build_live(config: RunDayConfig, *, clock: Callable[[], datetime], send: bo
     budget = DailyBudget(config.caps, today, STATE_DIR)
     from agents.llm import make_client
     client = MeteredClient(make_client(max_retries=0), budget)
-    broker = None
+    broker = reconcile_broker = None
     if send:  # unreachable today: main refuses --send until broker_allowed()
         from tools.broker import AlpacaPaperBroker
         broker = AlpacaPaperBroker(load_checked_limits())
+        reconcile_broker = AlpacaPaperBroker(load_checked_limits())  # its own client
     # ONE budget (S5): the metered client, the metered data and the day's loop share it
     return Day(config=config, data=metered_live_data(budget), clients=client,
                journal=Journal(), clock=clock, sleep=time.sleep, terminal=WatchedTerminal(),
-               state_dir=STATE_DIR, broker=broker, budget=budget)
+               state_dir=STATE_DIR, broker=broker, budget=budget,
+               reconcile_broker=reconcile_broker)
 
 
 if __name__ == "__main__":

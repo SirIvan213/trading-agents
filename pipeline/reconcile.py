@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from journal.log import RECONCILE_ALERT, Journal, JournalError
+from journal.log import RECONCILE_ALERT, Journal, JournalError, JournalLockTimeout
 from journal.orders import (
     APPROVED,
     CANCELLED,
@@ -59,18 +59,28 @@ from journal.orders import (
     SEND_UNKNOWN,
     SUBMITTED,
     SUBMITTING,
+    OrderError,
     OrderState,
     client_order_id,
+    replay,
 )
 from pipeline.flatten import FLAT, SKIPPED_UNREADABLE, FlattenResult, flatten_symbol
-from tools.broker import ACTION_LOCK, BrokerError, is_close_order
+from tools.broker import ACTION_LOCK, FINAL_STATUSES, BrokerError, is_close_order
 from tools.market_calendar import CalendarError, day_times
-from tools.protection import EXECUTING, PENDING, PROTECTED, entry_can_fill, stop_status
+from tools.protection import (
+    EXECUTING,
+    PENDING,
+    PROTECTED,
+    UNPROTECTED,
+    entry_can_fill,
+    stop_status,
+)
 from tools.realized import RealizedError, realized_pnl
 
 # The reconciler is ready for run_day. run_day still refuses a broker until pipeline.flatten
 # (PR 5, the flat-by job, #135) declares RUN_DAY_READY too (pipeline.run_day.broker_allowed).
 RUN_DAY_READY = True
+FINAL = FINAL_STATUSES
 
 NY = ZoneInfo("America/New_York")
 POLL_S = 15
@@ -78,9 +88,11 @@ STALE_S = 45
 UNFILLED_CANCEL_S = 60
 PARTIAL_GRACE_S = 15
 EXECUTING_WAIT_S = 60
-SKIP_LOUD_S = 60
+LOUD_S = 60  # a flatten not done this long: MANUAL ACTION NEEDED
 LOST_SEND_GRACE_S = 120
 RETRY_ALERT_S = 120
+EARLIER_DAY = ("an order from an earlier day: not closed automatically (decision 8); "
+               "check it in the Alpaca paper dashboard")
 FOLLOW = frozenset({SUBMITTING, SUBMITTED, SEND_UNKNOWN, PARTIALLY_FILLED, FILLED})
 BEFORE_PREVIOUS = "before the order's previous event"  # journal/orders.py (#194): retryable
 MANUAL = ("MANUAL ACTION NEEDED in the Alpaca paper dashboard: cancel {symbol}'s orders and "
@@ -125,9 +137,10 @@ class Reconciler:
         self.not_found: dict[str, int] = {}  # cid -> consecutive 404 lookups
         self.partial_since: dict[str, datetime] = {}
         self.executing_since: dict[str, datetime] = {}
-        self.skip_since: dict[str, datetime] = {}
+        self.stuck_since: dict[str, datetime] = {}  # symbol -> a flatten not done since
         self.retry_since: dict[str, datetime] = {}
         self.latest: dict[str, dict | None] = {}  # a lookup made after acting (a cancel)
+        self.limits_by_cid: dict[str, Decimal] = {}
         self.report: dict[str, Any] = {}
 
     # ---- outputs ----------------------------------------------------------------------
@@ -170,6 +183,12 @@ class Reconciler:
             return False
         try:
             self.journal.record_order_event(o.client_order_id, status, self._now(), **fields)
+        except JournalLockTimeout:  # busy (an approval, the sender): the next pass retries
+            first = self.retry_since.setdefault(f"lock:{o.client_order_id}", self._now())
+            if self._now() - first >= timedelta(seconds=RETRY_ALERT_S):
+                self._alert(f"{what}: the journal has been busy since {first:%H:%M:%S}",
+                            symbol=o.symbol)
+            return False
         except JournalError as exc:
             if BEFORE_PREVIOUS in str(exc):  # a clock step (#202): retry; alert if it lasts
                 first = self.retry_since.setdefault(o.client_order_id, self._now())
@@ -178,14 +197,28 @@ class Reconciler:
                                 f"event since {first:%H:%M:%S}: check the PC's clock",
                                 symbol=o.symbol)
                 return False
+            if self._moved_on(o):
+                # the journal changed since this pass read it (the sender recorded the
+                # same broker fact first): not a conflict; the next pass reads it fresh
+                self.report["recorded"].append(f"{what}: already recorded elsewhere")
+                return False
             self._block("conflict", f"conflict:{o.client_order_id}:{status}",
                         f"the journal refused the broker's {status} for {o.client_order_id} "
                         f"({o.symbol}): {exc}", symbol=o.symbol,
                         client_order_id=o.client_order_id, broker_fields=_safe(fields))
             return False
         self.retry_since.pop(o.client_order_id, None)
+        self.retry_since.pop(f"lock:{o.client_order_id}", None)
         self.report["recorded"].append(what)
         return True
+
+    def _moved_on(self, o: OrderState) -> bool:
+        """The order's journal state differs from this pass's snapshot of it."""
+        try:
+            now_state = self.journal.orders().get(o.client_order_id)
+        except JournalError:
+            return True  # cannot tell: retry next pass rather than block on a guess
+        return now_state != o
 
     def _cancel(self, order_id: str, what: str) -> None:
         if self.check_only:
@@ -201,28 +234,55 @@ class Reconciler:
     def pass_once(self) -> dict:
         now = self._now()
         self.report = {"at": now.isoformat(), "mode": "check" if self.check_only else "act",
-                       "orders": [], "positions": [], "unreadable": [], "recorded": [],
-                       "actions": [], "would": [], "blocks": [], "alerts": [], "errors": []}
+                       "complete": False, "orders": [], "positions": [], "unreadable": [],
+                       "recorded": [], "actions": [], "would": [], "blocks": [],
+                       "alerts": [], "errors": [], "read_errors": []}
+        self._run(now)
+        reads = self.report["read_errors"]
+        self.report["complete"] = not reads
+        if reads:  # a pass that could not see everything is not a pass (run_day's health)
+            self._alert(f"the reconcile pass could not read everything ({len(reads)}: "
+                        f"{reads[0]}); positions may be unwatched")
+        return self.report
+
+    def _read_journal(self) -> tuple[dict[str, OrderState], list[dict]]:
+        """The journal's entries and orders. --check reads without the journal's lock, so it
+        never contends with run_day (a cut-off last line still raises)."""
+        if self.check_only:
+            entries = self.journal._read_entries()  # noqa: SLF001 - read only, lock-free
+            try:
+                return replay(entries), entries
+            except OrderError as exc:
+                raise JournalError(f"journal order history is invalid: {exc}") from None
+        return self.journal.orders(), self.journal.entries()
+
+    def _run(self, now: datetime) -> None:
+        reads = self.report["read_errors"]
+        try:  # the reconciler's own client, verified every pass (#155 review)
+            self.broker.verify_paper_account()
+        except BrokerError as exc:
+            reads.append(f"the paper account check failed: {exc}")
+            return
         try:
-            orders = self.journal.orders()
-            entries = self.journal.entries()
+            orders, entries = self._read_journal()
         except JournalError as exc:
-            self._alert(f"the journal cannot be read, nothing reconciled: {exc}")
-            return self.report
+            reads.append(f"the journal cannot be read: {exc}")
+            return
+        today = now.date()
         approved = _approved_orders(entries)
-        limits_by_cid = _limit_prices(entries)
+        self.limits_by_cid = _limit_prices(entries)
         listing = positions = None
         try:
             listing = self.broker.list_open_orders_checked()
         except BrokerError as exc:
-            self.report["errors"].append(f"open orders: {exc}")
+            reads.append(f"open orders: {exc}")
         try:
             positions = {p["symbol"]: p for p in self.broker.list_positions()}
             self.report["positions"] = [{k: p.get(k) for k in ("symbol", "side", "qty",
                                                                "qty_available")}
                                         for p in positions.values()]
         except BrokerError as exc:
-            self.report["errors"].append(f"positions: {exc}")
+            reads.append(f"positions: {exc}")
 
         # unreadable orders: block and alert; never act on them (#246)
         for u in (listing or {}).get("unreadable", []):
@@ -243,14 +303,14 @@ class Reconciler:
                 found = self.broker.get_order_by_client_id(o.client_order_id)
             except BrokerError as exc:
                 lookup_failed = True
-                self.report["errors"].append(f"lookup {o.client_order_id}: {exc}")
+                reads.append(f"lookup {o.client_order_id}: {exc}")
                 continue
             looked[o.client_order_id] = found
             self.report["orders"].append({"client_order_id": o.client_order_id,
                                           "symbol": o.symbol, "journal": o.status,
                                           "broker": found["status"] if found else None,
                                           "filled_qty": found["filled_qty"] if found else None})
-            self._settle(o, found, now, limits_by_cid.get(o.client_order_id))
+            self._settle(o, found, now, self.limits_by_cid.get(o.client_order_id))
             # after a cancel, judge by what the broker shows now, not before it
             looked[o.client_order_id] = self.latest.pop(o.client_order_id, found)
 
@@ -258,8 +318,8 @@ class Reconciler:
             try:
                 orders = self.journal.orders()  # after this pass's events
             except JournalError as exc:
-                self._alert(f"the journal cannot be read after recording: {exc}")
-                return self.report
+                reads.append(f"the journal cannot be read after recording: {exc}")
+                return
         holding: dict[str, list[OrderState]] = {}  # recorded fills, not closed
         owners: dict[str, list[OrderState]] = {}  # every sent order that may hold shares
         for o in orders.values():
@@ -273,7 +333,7 @@ class Reconciler:
 
         if positions is not None:
             for sym, pos in positions.items():
-                self._protect(sym, pos, owners.get(sym, []), looked, approved, now)
+                self._protect(sym, pos, owners.get(sym, []), looked, approved, now, today)
             for sym, trades in holding.items():
                 if sym not in positions:
                     for o in trades:
@@ -288,15 +348,15 @@ class Reconciler:
                     known.add(found["id"])
                     known.update(leg["id"] for leg in found.get("legs") or [])
             for o in listing["orders"]:
-                if o["id"] in known or (is_close_order(o) and o["symbol"] in holding):
+                # our own close, also for a fill the journal has not recorded yet
+                if o["id"] in known or (is_close_order(o) and o["symbol"] in owners):
                     continue
                 self._block("orphan", f"orphan-order:{o['id']}",
                             f"an open {o['type']} {o['side']} order in {o['symbol']} is not "
                             "in the journal", symbol=o["symbol"])
                 self._flatten(o["symbol"], [x.client_order_id
-                                            for x in holding.get(o["symbol"], [])],
+                                            for x in owners.get(o["symbol"], [])],
                               "an orphan order", now)
-        return self.report
 
     # ---- lifecycle --------------------------------------------------------------------
     def _settle(self, o: OrderState, found: dict | None, now: datetime,
@@ -319,6 +379,8 @@ class Reconciler:
         b_fill = _dec(found["filled_qty"]) or Decimal(0)
         avg = found.get("filled_avg_price")
         if o.status == REJECTED:
+            if b_status == "rejected" and b_fill == 0:
+                return  # the broker rejected it too: nothing to do
             self._block("conflict", f"rejected-held:{cid}",
                         f"the journal says {cid} ({o.symbol}) was rejected, but the broker "
                         f"holds it ({b_status})", symbol=o.symbol, client_order_id=cid)
@@ -378,7 +440,12 @@ class Reconciler:
             except BrokerError as exc:
                 self.report["errors"].append(f"confirm cancel {o.client_order_id}: {exc}")
                 return
-            if again is None or not entry_can_fill(again):
+            legs_done = all(g["status"] in FINAL for g in (again or {}).get("legs") or [])
+            nothing_filled = again is None or not (_dec(again["filled_qty"]) or 0) > 0
+            # nothing filled: the entry and both legs must be gone; a partial fill: the entry
+            # is done, and its legs are judged by what the broker shows (tools.protection)
+            if again is None or (not entry_can_fill(again)
+                                 and (legs_done or not nothing_filled)):
                 break
             if self.monotonic() >= deadline:
                 self.report["errors"].append(f"cancel of {o.client_order_id} not confirmed "
@@ -391,13 +458,16 @@ class Reconciler:
                 current = self.journal.orders()[o.client_order_id]
             except (JournalError, KeyError):
                 return
-            self._settle(current, again, self._now(), None)
+            self._settle(current, again, self._now(),
+                         self.limits_by_cid.get(o.client_order_id))
 
     # ---- protection -------------------------------------------------------------------
     def _protect(self, sym: str, pos: dict, trades: list[OrderState],
                  looked: dict[str, dict | None], approved: dict[str, dict],
-                 now: datetime) -> None:
+                 now: datetime, today) -> None:
         cids = [o.client_order_id for o in trades]
+        for o in trades:  # the position is (still) there: no close is due
+            self.retry_since.pop(f"close:{o.client_order_id}", None)
         if pos.get("side") != "long":
             self._block("orphan", f"short:{sym}", f"a short position in {sym}: this system "
                         "is long only", symbol=sym)
@@ -418,14 +488,38 @@ class Reconciler:
         cid = o.client_order_id
         found = looked.get(cid)
         if found is None:
-            if cid in looked:  # looked up, and the broker has no such order
+            if cid in looked and o.status not in (SUBMITTING, SEND_UNKNOWN):
+                # the journal holds a sent order the broker does not know (already a
+                # conflict block, _settle); a lost send waits out its grace instead
                 self._flatten(sym, cids, "its entry is unknown to the broker", now)
-            return  # a failed lookup: the next pass judges it
+            return  # a failed lookup, or a lost send in its grace: the next pass judges it
         stop = ((approved.get(cid) or {}).get("order") or {}).get("stop_loss")
         verdict = stop_status(found, pos.get("qty"), stop_price=stop)
         state = verdict["state"]
+        if state == UNPROTECTED:
+            # read again before acting: a normal exit between this pass's reads must never
+            # read as "no stop" (the position read came before the lookup)
+            try:
+                fresh = next((p for p in self.broker.list_positions() if p["symbol"] == sym),
+                             None)
+                found = self.broker.get_order_by_client_id(cid) if fresh else found
+            except BrokerError as exc:
+                self.report["read_errors"].append(f"re-read {sym}: {exc}")
+                return
+            if fresh is None or found is None:
+                return  # gone meanwhile: the next pass records the close
+            verdict = stop_status(found, fresh.get("qty"), stop_price=stop)
+            state = verdict["state"]
         if state in (PROTECTED, PENDING):
             self.executing_since.pop(cid, None)
+            return
+        if o.approved_at.astimezone(NY).date() < today:
+            # decision 8 and the PR 5 morning rule: an earlier day's position is never closed
+            # automatically. Block and alert; Ivan checks it.
+            self._block("unprotected", f"earlier-day:{cid}",
+                        f"{sym} ({pos.get('qty')} shares) is from an earlier day and has no "
+                        f"working stop ({verdict['reason']}): {EARLIER_DAY}", symbol=sym,
+                        client_order_id=cid)
             return
         if state == EXECUTING:
             first = self.executing_since.setdefault(cid, now)
@@ -448,20 +542,21 @@ class Reconciler:
         result = flatten_symbol(self.broker, sym, cids, sleep=self.sleep,
                                 monotonic=self.monotonic)
         self.report["actions"].extend(result.actions)
-        if result.state == SKIPPED_UNREADABLE:
-            first = self.skip_since.setdefault(sym, now)
-            flat_by = self._flat_by(now)
-            if now - first >= timedelta(seconds=SKIP_LOUD_S) or (
-                    flat_by is not None and now >= flat_by):
-                self._alert(MANUAL.format(symbol=sym) + f" ({result.detail}; unresolved "
-                            f"since {first:%H:%M:%S})", symbol=sym)
-            else:
-                self._alert(f"{sym}: the close was skipped this pass ({result.detail}); "
-                            "the next pass tries again", symbol=sym)
+        if result.state == FLAT:
+            self.stuck_since.pop(sym, None)
+            return result
+        # not flat yet: alert every pass, never quiet; loud after LOUD_S or at the flat-by
+        first = self.stuck_since.setdefault(sym, now)
+        flat_by = self._flat_by(now)
+        what = ("the close was skipped this pass" if result.state == SKIPPED_UNREADABLE
+                else f"flatten not done ({result.state})")
+        if now - first >= timedelta(seconds=LOUD_S) or (flat_by is not None
+                                                         and now >= flat_by):
+            self._alert(MANUAL.format(symbol=sym) + f" ({what}: {result.detail}; unresolved "
+                        f"since {first:%H:%M:%S})", symbol=sym)
         else:
-            self.skip_since.pop(sym, None)
-            if result.state != FLAT:
-                self.report["errors"].append(f"flatten {sym}: {result.state}: {result.detail}")
+            self._alert(f"{sym}: {what} ({result.detail}); the next pass tries again",
+                        symbol=sym)
         return result
 
     def _flat_by(self, now: datetime) -> datetime | None:
@@ -572,7 +667,7 @@ class ReadOnlyBroker:
 
 
 def main(argv: list[str] | None = None, *, broker: Any = None, journal: Journal | None = None,
-         clock: Callable[[], datetime] | None = None) -> int:
+         clock: Callable[[], datetime] | None = None, state_dir: Path | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m pipeline.reconcile", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = p.add_mutually_exclusive_group(required=True)
@@ -612,10 +707,20 @@ def main(argv: list[str] | None = None, *, broker: Any = None, journal: Journal 
     if args.check:
         report = rec.pass_once()
     else:
-        with ACTION_LOCK:
-            report = rec.pass_once()
+        # run_day's own lock: an acting pass never runs beside run_day's reconciler
+        # (ACTION_LOCK is per process), and run_day cannot start during it
+        from pipeline.budget import STATE_DIR
+        from pipeline.filelock import LockTimeout, exclusive_file_lock
+        try:
+            with exclusive_file_lock((state_dir or STATE_DIR) / "run_day.lock", timeout_s=0):
+                with ACTION_LOCK:
+                    report = rec.pass_once()
+        except LockTimeout:
+            print("refused: run_day is running (its reconciler is already acting); use "
+                  "--check to look", file=sys.stderr)
+            return 4
     print(json.dumps(report, indent=1, default=str))
-    return 0
+    return 0 if report.get("complete") else 1
 
 
 if __name__ == "__main__":

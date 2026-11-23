@@ -1,7 +1,7 @@
 """Resolve the reconciler's blocks (Phase 5 PR 4, #155, #189).
 
     python -m journal.resolve                                  # list the open blocks
-    python -m journal.resolve rb-000123 --note "what I did"    # resolve one
+    python -m journal.resolve rb-1a2b3c4d --note "what I did"    # resolve one
 
 A block ("reconcile_block" in the journal) stops every new entry until it is resolved here.
 Resolve one only after checking the Alpaca PAPER dashboard and fixing the cause: the block

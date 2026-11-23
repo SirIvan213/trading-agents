@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import threading
 import time
 from collections.abc import Iterator
@@ -296,7 +297,10 @@ class Journal:
             open_ = unresolved_blocks(self.entries())
             if any(b.get("key") == key for b in open_):
                 return None
-            block_id = f"rb-{len(self.entries()) + 1:06d}"
+            used = {e.get("block_id") for e in self.entries()}
+            block_id = f"rb-{secrets.token_hex(4)}"
+            while block_id in used:  # never reuse an id, even from a rotated journal
+                block_id = f"rb-{secrets.token_hex(4)}"
             self.append({"status": RECONCILE_BLOCK, "block_id": block_id, "kind": kind,
                          "key": str(key)[:200], "reason": str(reason)[:400],
                          "at": at.astimezone(NY).isoformat(), **fields})

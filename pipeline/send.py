@@ -172,6 +172,14 @@ def _record(journal: Journal, cid: str, status: str, clock: Clock, result: SendR
             return result
         except JournalError as exc:
             last = exc
+            # the reconciler (#155) follows the order too and may have recorded the
+            # broker's answer first: then the journal no longer reads "submitting"
+            try:
+                current = journal.orders().get(cid)
+            except JournalError:
+                current = None
+            if current is not None and current.status not in (SUBMITTING, APPROVED):
+                return result
     reason = (f"{result.reason or status}; the {status} event could NOT be journaled "
               f"({last}), the journal still reads submitting")
     _alert(f"order {cid}: {reason}")

@@ -91,7 +91,9 @@ Only the task passes `--scheduled`. Never add `--send`: it is refused until the 
 The Alpaca **paper** account belongs to this project alone. **Never place, change or cancel
 an order in it by hand** (except when an alert below asks you to). The reconciler relies on
 that: an order or position it cannot trace to the journal is an **orphan**, and an order it
-cannot read is **unreadable**. Both block new entries; an orphan is also flattened.
+cannot read is **unreadable**. Both block new entries; an orphan is also flattened. For the
+same reason, never run the paper probe (`python -m pipeline.probe_broker --live`) while run_day
+is running: its orders would be flattened as orphans.
 
 ## The reconciler and its blocks
 
@@ -125,7 +127,7 @@ with a note saying what you did:
 
 ```
 .venv\Scripts\python.exe -m journal.resolve
-.venv\Scripts\python.exe -m journal.resolve rb-000123 --note "cancelled the stray order by hand"
+.venv\Scripts\python.exe -m journal.resolve rb-1a2b3c4d --note "cancelled the stray order by hand"
 ```
 
 If the cause is still there, the next pass blocks again.

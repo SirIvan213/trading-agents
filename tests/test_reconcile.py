@@ -457,7 +457,7 @@ def test_a_close_refused_while_the_legs_hold_the_shares_waits_for_the_next_pass(
     sim._cancel = lambda oid: (204, None)  # the cancel is accepted but not done yet
     r.pass_once()
     assert ("DELETE", "/v2/positions/SPY") not in sim.writes  # not gone yet: no close
-    assert any("not gone yet" in e for e in r.report["errors"])
+    assert any("not gone yet" in a for a in alerts)  # never quiet
     sim._cancel = real
     clock.step(15)
     r.pass_once()
@@ -645,7 +645,7 @@ def test_check_makes_no_write_calls_and_writes_nothing(tmp_path, capsys):
     sim.leg(cid, "stop")["status"] = "canceled"  # it would flatten
     sim.extra_open.append(stray())  # it would block
     before = j.path.read_bytes()
-    clock.t = datetime(2026, 11, 28, 12, 0, tzinfo=NY)  # a Saturday: the market is closed
+    clock.t = T0.replace(hour=20)  # the same day, after the close: the market is closed
     code = rc.main(["--check"], broker=r.broker, journal=j, clock=clock)
     assert code == 0
     assert sim.writes == []  # never sends, cancels or closes

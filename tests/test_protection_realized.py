@@ -59,7 +59,8 @@ def test_the_entry_can_still_fill_so_never_flatten():
 @pytest.mark.parametrize("tp_status, want", [
     ("new", PROTECTED), ("accepted", PROTECTED), ("pending_new", PROTECTED),
     ("partially_filled", PROTECTED),
-    ("held", UNPROTECTED), ("canceled", UNPROTECTED), ("filled", UNPROTECTED),
+    ("held", UNPROTECTED), ("canceled", UNPROTECTED),
+    ("filled", EXECUTING),  # the take-profit filled: the bracket is closing it
     ("expired", UNPROTECTED),
 ])
 def test_a_held_stop_works_only_with_a_live_take_profit(tp_status, want):
@@ -72,7 +73,8 @@ def test_a_held_stop_works_only_with_a_live_take_profit(tp_status, want):
     ("partially_filled", EXECUTING),
     ("canceled", UNPROTECTED), ("expired", UNPROTECTED), ("rejected", UNPROTECTED),
     ("replaced", UNPROTECTED), ("done_for_day", UNPROTECTED), ("suspended", UNPROTECTED),
-    ("pending_cancel", UNPROTECTED), ("filled", UNPROTECTED), ("stopped", UNPROTECTED),
+    ("pending_cancel", UNPROTECTED), ("stopped", UNPROTECTED),
+    ("filled", EXECUTING),  # the stop filled: the bracket is closing it
 ])
 def test_every_stop_status(stop_status_, want):
     assert state(entry(stop={"status": stop_status_})) == want

@@ -13,8 +13,10 @@ and all of these hold:
   - the entry can no longer fill: "filled", or cancelled / expired / done for the day with
     a fill (a partial fill whose remainder is gone);
   - the sibling take-profit leg is live (new, accepted, pending_new, partially_filled);
-  - the stop is a sell at the plan's stop price, for at least the position's quantity
-    (its quantity less what it has already filled).
+  - the stop is a sell at the plan's stop price, and both legs are sized to the entry's
+    fill, with exactly the position's quantity left (never fewer shares, never more).
+A filled leg, or a stop that triggered and is selling, is EXECUTING: the bracket is closing
+the position.
 """
 from __future__ import annotations
 
@@ -70,20 +72,34 @@ def stop_status(entry: dict, position_qty: object, *,
         return {"state": UNPROTECTED, "reason": "more than one stop leg"}
     stop = stops[0]
     status = stop.get("status")
-    if status in LIVE:
-        # a bracket stop sits "held" until it triggers; live means it is selling now
-        return {"state": EXECUTING, "reason": f"the stop has triggered ({status})"}
+    target = targets[0] if len(targets) == 1 else None
+    if status in LIVE or status == "filled" or (
+            target is not None and target.get("status") == "filled"):
+        # a bracket stop sits "held" until it triggers: live means it is selling now, and
+        # a filled leg means the bracket is closing the position (the broker's position
+        # may lag): give it time, never read it as "no stop"
+        return {"state": EXECUTING, "reason": f"the bracket is closing it (stop {status}, "
+                f"take-profit {target.get('status') if target else None})"}
     if status != "held":
         return {"state": UNPROTECTED, "reason": f"the stop is {status}"}
-    qty, done = _dec(stop.get("qty")), _dec(stop.get("filled_qty") or "0")
-    if qty is None or done is None or qty - done < held:
-        return {"state": UNPROTECTED,
-                "reason": f"the stop covers {qty if qty is None else qty - done} of "
-                          f"{held} shares"}
     if stop_price is not None and _dec(stop.get("stop_price")) != _dec(stop_price):
         return {"state": UNPROTECTED, "reason": "the stop is not at the plan's stop price"}
-    if len(targets) != 1 or targets[0].get("status") not in LIVE:
+    if target is None or target.get("status") not in LIVE:
         why = ("no take-profit leg" if not targets else "more than one take-profit leg"
-               if len(targets) > 1 else f"the take-profit leg is {targets[0].get('status')}")
+               if len(targets) > 1 else f"the take-profit leg is {target.get('status')}")
         return {"state": UNPROTECTED, "reason": f"the held stop is not working: {why}"}
+    # Both legs sized to the entry's fill, and what is left equals the position exactly: a
+    # stop for fewer shares leaves some unprotected, one for more could oversell (legs not
+    # resized after a partial fill's remainder was cancelled).
+    sq, tq = _dec(stop.get("qty")), _dec(target.get("qty"))
+    sf, tf = _dec(stop.get("filled_qty") or "0"), _dec(target.get("filled_qty") or "0")
+    if None in (sq, tq, sf, tf):
+        return {"state": UNPROTECTED, "reason": "a leg's quantity is not readable"}
+    if sq != filled or tq != filled:
+        return {"state": UNPROTECTED, "reason": f"the legs are for {sq} and {tq} shares, "
+                f"the entry filled {filled}"}
+    left = filled - sf - tf
+    if left != held:
+        return {"state": UNPROTECTED,
+                "reason": f"the stop covers {left} of {held} shares held"}
     return {"state": PROTECTED, "reason": "a held stop covers the position"}
