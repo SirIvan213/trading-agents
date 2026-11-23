@@ -484,3 +484,28 @@ def test_one_close_test_everywhere():
     limit = {**close, "type": "limit"}
     assert is_close_order(close) and pb.Probe._is_close(close)
     assert not is_close_order(limit) and not pb.Probe._is_close(limit)
+
+
+def _deep_close(levels=3000):
+    top = {**rec("close_position_simple.json")["body"]}
+    node = top
+    for _ in range(levels):
+        child = {**rec("close_position_simple.json")["body"]}
+        node["legs"] = [child]
+        node = child
+    return top
+
+
+@pytest.mark.parametrize("method", ["submit", "close"])
+def test_a_too_deep_200_reply_may_have_acted(monkeypatch, method):
+    """The parser's RecursionError on a 200 reply is a fixed-text BrokerError that may have
+    acted (the reply is handed to the parser directly, past the JSON transport)."""
+    b, _ = client()
+    monkeypatch.setattr(b, "_call", lambda *a, **k: _deep_close())
+    with pytest.raises(BrokerError) as e:
+        if method == "submit":
+            b.submit_bracket(probe_order(), CID)
+        else:
+            b.close_position("SPY")
+    assert e.value.may_have_acted is True and e.value.status == 200
+    assert "too deeply nested" in str(e.value)
