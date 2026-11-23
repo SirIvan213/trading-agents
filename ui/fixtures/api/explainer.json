@@ -84,7 +84,7 @@
       "key": "live",
       "title": "Live run",
       "route": "#/live",
-      "built": false,
+      "built": true,
       "text": "What's happening right now: today's limits, the stocks found, the one being decided and any open position."
     },
     {

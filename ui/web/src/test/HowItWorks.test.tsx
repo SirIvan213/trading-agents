@@ -136,18 +136,7 @@ describe("How it works", () => {
   });
 });
 
-describe("pages not built yet", () => {
-  it.each([
-    ["#/live", "Live run", "UI-5"],
-  ])("%s says it is coming", (hash, title, pr) => {
-    const fetchMock = serve(golden);
-    window.location.hash = hash;
-    render(<App />);
-    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(title);
-    expect(screen.getByText(new RegExp(`coming in ${pr}`))).toBeInTheDocument();
-    expect(urls(fetchMock)).toEqual(["/api/health"]); // only the header's mode
-  });
-
+describe("routing", () => {
   it("an unknown page is not found", () => {
     serve(golden);
     window.location.hash = "#/nope";
@@ -159,7 +148,7 @@ describe("pages not built yet", () => {
 describe("the header's mode badges", () => {
   async function header(healthBody: unknown) {
     serve(golden, 200, healthBody);
-    window.location.hash = "#/live";
+    window.location.hash = "#/nope"; // a page that fetches nothing else
     render(<App />);
   }
 
@@ -191,7 +180,7 @@ describe("the header's mode badges", () => {
 
   it("warns when the server does not answer", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
-    window.location.hash = "#/live";
+    window.location.hash = "#/nope"; // a page that fetches nothing else
     render(<App />);
     expect(await screen.findByText(/Mode unknown: the server/)).toBeInTheDocument();
   });

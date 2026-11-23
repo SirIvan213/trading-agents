@@ -137,3 +137,67 @@ export interface DecisionDetail {
   record_available: boolean;
   problems: Problem[];
 }
+
+// GET /api/live (ui/api/live.py). Golden copies: ui/fixtures/api/live-*.json.
+export type LiveKind = "normal" | "order_waiting" | "blocked" | "idle" | "not_running";
+export type LiveOutcome = Outcome | "DECIDING" | "NO_OUTCOME";
+
+export interface LiveLimit {
+  key: string;
+  label: string;
+  unit: "usd" | "count" | "tokens";
+  used: string | null; // as recorded; null when not known
+  limit: string | null;
+  reached: boolean;
+  pct: number | null; // the bar's width, from the recorded numbers (display only)
+  note: string | null;
+}
+
+export interface LiveRow {
+  symbol: string | null;
+  outcome: LiveOutcome;
+  why: string;
+  order_status: { code: string; text: string } | null;
+  run_id: string | null;
+  at: string | null;
+}
+
+export interface LivePosition {
+  symbol: string;
+  run_id: string;
+  client_order_id: string;
+  approved_at: string;
+  qty: number;
+  filled_qty: number;
+  avg_price: string | null;
+  stop: string | null;
+  target: string | null;
+  max_loss: string;
+  status: { code: string; text: string };
+  unrealized: null; // no live quotes in the UI
+}
+
+export interface Live {
+  as_of: string;
+  et_date: string;
+  market: { state: "open" | "closed" | "unknown"; text: string };
+  status: { kind: LiveKind; sentence: string; reasons: { code: string; text: string }[] };
+  key_limits: LiveLimit[];
+  caps: LiveLimit[];
+  ticket: null; // the approval card needs #212
+  today: LiveRow[];
+  current: null | {
+    symbol: string | null; step: null; line: string; analysts: null; live: boolean;
+  };
+  positions: LivePosition[] | null; // null: the order history does not replay
+  sources: {
+    ok: boolean; summary: string; expanded: boolean;
+    items: { name: string; ok: boolean | null; detail: string }[];
+  };
+  run_day: {
+    heartbeat_at: string | null; age_s: number | null; stale: boolean; future: boolean;
+    phase: string | null; pid: number | null; started_at: string | null;
+    last_scan_at: string | null; last_end: { reason: string | null; at: string | null } | null;
+  };
+  problems: Problem[];
+}

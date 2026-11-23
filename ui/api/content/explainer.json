@@ -20,7 +20,7 @@
     {"n": 8, "key": "approve_and_log", "title": "Approve and log", "actor": "you", "text": "A person approves the ticket in the terminal. Every decision, including passes and skips, is written to the journal."}
   ],
   "screens": [
-    {"key": "live", "title": "Live run", "route": "#/live", "built": false, "text": "What's happening right now: today's limits, the stocks found, the one being decided and any open position."},
+    {"key": "live", "title": "Live run", "route": "#/live", "built": true, "text": "What's happening right now: today's limits, the stocks found, the one being decided and any open position."},
     {"key": "decision", "title": "Decision detail", "route": "#/history", "built": true, "text": "One decision from start to finish: what each agent said and why, the plans, and the order ticket. Open any decision from History."},
     {"key": "history", "title": "History", "route": "#/history", "built": true, "text": "Every past decision, with filters, and later the results compared with simple strategies."}
   ],
