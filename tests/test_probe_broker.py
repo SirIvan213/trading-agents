@@ -765,3 +765,43 @@ def test_an_unreadable_order_that_may_be_in_the_symbol_refuses_the_probe(capsys,
     assert run(fake) == pb.REFUSED
     assert "cannot be read" in capsys.readouterr().err
     assert not [c for c in fake.calls if c[0] in ("submit", "close", "cancel")]
+
+
+def test_an_unreadable_order_in_the_symbol_after_the_entry_fails_the_cleanup_closed(capsys):
+    """It appears mid-run: the cleanup notes it and reports NOT flat; nothing crashes."""
+    fake = FakePaper()
+    real_run = pb.Probe.run
+
+    def run_then_odd_order(self):
+        real_run(self)
+        fake.unreadable = [{"id": None, "symbol": "SPY", "why": "unknown order status"}]
+
+    pb.Probe.run = run_then_odd_order
+    try:
+        assert run(fake) == pb.NOT_FLAT
+    finally:
+        pb.Probe.run = real_run
+    captured = capsys.readouterr()
+    assert "NOT flat" in captured.err
+    r = json.loads(captured.out[captured.out.index("{"):])
+    assert any("cannot be read" in n for n in r["cleanup"]["notes"])
+
+
+def test_the_cleanup_cancels_a_simple_limit_sell_in_the_symbol(capsys):
+    """Only a market sell is our close: a stray limit sell is cancelled, not waited on."""
+    fake = FakePaper()
+    real_run = pb.Probe.run
+
+    def run_then_limit_sell(self):
+        real_run(self)
+        fake.orders["lim-1"] = {"id": "lim-1", "symbol": "SPY", "status": "new",
+                                "side": "sell", "order_class": "simple", "type": "limit",
+                                "legs": []}
+
+    pb.Probe.run = run_then_limit_sell
+    try:
+        run(fake)
+    finally:
+        pb.Probe.run = real_run
+    assert ("cancel", "lim-1") in fake.calls
+    assert report(capsys)["cleanup"]["flat"] is True

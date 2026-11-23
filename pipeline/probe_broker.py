@@ -63,7 +63,13 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.smoke_common import load_env
-from tools.broker import FINAL_STATUSES, AlpacaPaperBroker, BrokerError, bracket_request
+from tools.broker import (
+    FINAL_STATUSES,
+    AlpacaPaperBroker,
+    BrokerError,
+    bracket_request,
+    is_close_order,
+)
 from tools.config import load_limits
 from tools.http import _default_open
 from tools.scan import fetch_snapshots, validate_symbols
@@ -214,8 +220,7 @@ class Probe:
     @staticmethod
     def _is_close(o: dict) -> bool:
         """A closing order (DELETE /v2/positions: a simple market sell)."""
-        return (o.get("side") == "sell" and o.get("order_class") == "simple"
-                and o.get("type") == "market")
+        return is_close_order(o)
 
     def _open_mine(self) -> list[dict]:
         """The symbol's open orders. An order the parser cannot read is ignored only when it

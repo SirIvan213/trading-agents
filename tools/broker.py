@@ -231,7 +231,8 @@ def _order_class(reply: dict) -> str:
     class is passed through as written; the callers that need a bracket check for one."""
     cls = reply.get("order_class")
     if cls in SIMPLE_CLASSES:
-        if reply.get("type") not in SIMPLE_TYPES:
+        kind = reply.get("type")
+        if not isinstance(kind, str) or kind not in SIMPLE_TYPES:
             raise BrokerError("broker reply is a simple order of an unexpected type")
         return "simple"
     if not isinstance(cls, str):
@@ -246,7 +247,7 @@ def parse_order(reply: object) -> dict:
     if not isinstance(reply, dict):
         raise BrokerError("broker reply is not an order")
     status = reply.get("status")
-    if status not in ORDER_STATUSES:
+    if not isinstance(status, str) or status not in ORDER_STATUSES:
         raise BrokerError("broker reply has an unknown order status")
     legs = reply.get("legs")
     if legs is not None and not isinstance(legs, list):
@@ -329,16 +330,28 @@ def parse_order_list(reply: object) -> dict:
     for item in reply:
         try:
             orders.append(parse_order(item))
-        except (BrokerError, RecursionError) as exc:
+        except (BrokerError, RecursionError, TypeError, ValueError) as exc:
+            # a BrokerError's text is fixed (never the reply's contents); Python's own
+            # messages can describe the value, so they get a fixed reason instead
             raw = item if isinstance(item, dict) else {}
             oid, sym = raw.get("id"), raw.get("symbol")
             unreadable.append({
                 "id": oid if isinstance(oid, str) and ORDER_ID.fullmatch(oid) else None,
                 "symbol": (normalize_symbol(sym) if isinstance(sym, str)
                            and normalize_symbol(sym) == sym else None),
-                "why": str(exc)[:120] if isinstance(exc, BrokerError) else "too deeply nested",
+                "why": (str(exc)[:120] if isinstance(exc, BrokerError)
+                        else "too deeply nested" if isinstance(exc, RecursionError)
+                        else "broker reply is malformed"),
             })
     return {"orders": orders, "unreadable": unreadable}
+
+
+def is_close_order(order: dict) -> bool:
+    """A closing order, as DELETE /v2/positions/{symbol} places it (#196): a simple MARKET
+    sell. One test for close_position, check_close and the probe, so a stray simple limit
+    sell is never taken for our close."""
+    return (order.get("side") == "sell" and order.get("order_class") == "simple"
+            and order.get("type") == "market")
 
 
 def _strict(listing: dict) -> list[dict]:
@@ -560,7 +573,7 @@ class AlpacaPaperBroker:
 
     def cancel_order(self, order_id: str) -> None:
         self._require_verified()
-        if not isinstance(order_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", order_id):
+        if not isinstance(order_id, str) or not ORDER_ID.fullmatch(order_id):
             raise BrokerError("order id must be letters, digits or '-'")
         self._call("DELETE", f"/v2/orders/{order_id}", ok=(200, 204))
 
@@ -592,8 +605,8 @@ class AlpacaPaperBroker:
         except BrokerError as exc:
             raise BrokerError(f"DELETE {path}: {exc}; the close may have been placed",
                               status=200, may_have_acted=True) from None
-        if out["symbol"] != sym or out["side"] != "sell" or out["order_class"] != "simple":
-            raise BrokerError(f"DELETE {path}: the reply is not a simple sell in {sym}; the "
+        if out["symbol"] != sym or not is_close_order(out):
+            raise BrokerError(f"DELETE {path}: the reply is not a market sell in {sym}; the "
                               "close may have been placed", status=200, may_have_acted=True)
         return out
 
@@ -637,9 +650,7 @@ class AlpacaPaperBroker:
         # shows as "closed" (position gone), never as "open" (a filled close, position seen)
         # strict: an unreadable order in this symbol raises (a doubt is never skipped);
         # a close is a simple MARKET sell (close_position's order), never a stray limit
-        closes = [o for o in self.list_orders(sym)
-                  if o["side"] == "sell" and o["order_class"] == "simple"
-                  and o["type"] == "market"]
+        closes = [o for o in self.list_orders(sym) if is_close_order(o)]
         position = next((p for p in self.list_positions() if p["symbol"] == sym), None)
         working = [o for o in closes if o["status"] not in FINAL_STATUSES]
         state = "closed" if position is None else "closing" if working else "open"
