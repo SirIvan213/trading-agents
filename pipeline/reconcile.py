@@ -143,6 +143,7 @@ class Reconciler:
         self.not_found: dict[str, int] = {}  # cid -> consecutive 404 lookups
         self.partial_since: dict[str, datetime] = {}
         self.executing_since: dict[str, datetime] = {}
+        self.activating_since: dict[str, datetime] = {}
         self.stuck_since: dict[str, datetime] = {}  # symbol -> a flatten not done since
         self.retry_since: dict[str, datetime] = {}
         self.latest: dict[str, dict | None] = {}  # a lookup made after acting (a cancel)
@@ -287,8 +288,10 @@ class Reconciler:
             return
         today = now.date()
         # before anything can act: the symbols an earlier day's order may hold (decision 8)
+        # sent and still open, as run_day's held check (held_from_earlier_days): an order the
+        # journal released (cancelled or expired with no fill) holds nothing (#155 review)
         self.earlier_day = {o.symbol for o in orders.values()
-                            if o.sent and o.status not in (CLOSED, REJECTED)
+                            if o.sent and o.open
                             and o.approved_at.astimezone(NY).date() < today}
         approved = _approved_orders(entries)
         self.limits_by_cid = _limit_prices(entries)
@@ -374,6 +377,7 @@ class Reconciler:
                 if found:
                     known.add(found["id"])
                     known.update(leg["id"] for leg in found.get("legs") or [])
+            flattened: set[str] = set()
             for o in listing["orders"]:
                 # our own close, also for a fill the journal has not recorded yet
                 if (o["id"] in known or o.get("client_order_id") in self.known_cids
@@ -382,6 +386,9 @@ class Reconciler:
                 self._block("orphan", f"orphan-order:{o['id']}",
                             f"an open {o['type']} {o['side']} order in {o['symbol']} is not "
                             "in the journal", symbol=o["symbol"])
+                if o["symbol"] in flattened:
+                    continue
+                flattened.add(o["symbol"])
                 self._flatten(o["symbol"], [x.client_order_id
                                             for x in owners.get(o["symbol"], [])],
                               "an orphan order", now)
@@ -432,11 +439,19 @@ class Reconciler:
             if self._event(o, kind, filled_qty=int(b_fill), avg_price=avg,
                            broker_filled_at=found.get("filled_at")):
                 status = kind
-        if b_status in ("canceled", "expired") and status in (SUBMITTED, PARTIALLY_FILLED):
+        if b_status in ("canceled", "expired", "done_for_day") and status in (
+                SUBMITTED, PARTIALLY_FILLED):
+            # done for the day: no more fills today (a day order), recorded as expired
             self._event(o, CANCELLED if b_status == "canceled" else EXPIRED,
                         filled_qty=int(b_fill), broker_status=b_status,
                         broker_at=found.get("canceled_at") or found.get("expired_at"))
             self.partial_since.pop(cid, None)
+            return
+        if b_status in FINAL and b_status not in ("filled", "rejected") and status in (
+                SUBMITTED, PARTIALLY_FILLED):
+            self._persisting(f"final:{cid}", f"{cid} ({o.symbol}) is {b_status} at the broker, "
+                             f"which the journal cannot follow from {status}: check it",
+                             o.symbol)
             return
         if b_status == "rejected" and status == SUBMITTED:
             if b_fill == 0:
@@ -458,6 +473,11 @@ class Reconciler:
 
     def _cancel_entry(self, o: OrderState, found: dict, why: str) -> None:
         """Cancel the entry (Alpaca cancels the group), then confirm by lookup and record."""
+        if o.symbol in self.earlier_day:
+            self._block("unprotected", f"earlier-day-symbol:{o.symbol}",
+                        f"{o.symbol}: would cancel an entry ({why}), but an order from an "
+                        f"earlier day may hold it: {EARLIER_DAY}", symbol=o.symbol)
+            return
         self._cancel(found["id"], f"entry {o.client_order_id} ({o.symbol}): {why}")
         if self.check_only:
             return
@@ -542,6 +562,14 @@ class Reconciler:
                 return  # gone meanwhile: the next pass records the close
             verdict = stop_status(found, fresh.get("qty"), stop_price=stop)
             state = verdict["state"]
+        if verdict.get("activating"):
+            first = self.activating_since.setdefault(cid, now)
+            if now - first < timedelta(seconds=PARTIAL_GRACE_S):
+                return  # Alpaca may show filled/held/held for a moment: one poll of grace
+            verdict = {"state": UNPROTECTED, "reason": verdict["reason"] + " after one poll"}
+            state = UNPROTECTED
+        else:
+            self.activating_since.pop(cid, None)
         if state in (PROTECTED, PENDING):
             self.executing_since.pop(cid, None)
             return
@@ -666,8 +694,10 @@ class Reconciler:
                             f"up ({exc}) since {first:%H:%M:%S}", symbol=o.symbol)
             return
         self.retry_since.pop(f"close:{o.client_order_id}", None)
-        last = max(exits, key=lambda x: _when(x["at"]) or now)
-        self._event(o, CLOSED, closed_by=last["by"], realized_pnl=str(pnl), exits=exits)
+        earliest = datetime.min.replace(tzinfo=NY)
+        last = max(exits, key=lambda x: _when(x["at"]) or earliest)
+        self._event(o, CLOSED, closed_by=last["by"], realized_pnl=str(pnl), exits=exits,
+                    history_unreadable=bool(history["unreadable"]))
 
 
 # ---- helpers --------------------------------------------------------------------------

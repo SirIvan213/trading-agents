@@ -490,8 +490,11 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
     pulse = _Pulse(day)
     pulse.start()
     if day.broker is not None:  # the thread starts after the held check (_the_day)
+        # its alerts through run_day's console, with the bell (the reconciler journals
+        # them itself as reconcile_alert)
         day.reconciler = Reconciler(day.journal, day.reconcile_broker or day.broker,
-                                    clock=day.clock, limits=limits)
+                                    clock=day.clock, limits=limits,
+                                    alert=lambda m: day.write(f"\aALERT: {m}"))
     try:
         return _the_day(day, limits, now, today, budget)
     except CapReached as exc:  # S9: a budget doubt anywhere ends the day cleanly

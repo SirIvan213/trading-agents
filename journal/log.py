@@ -301,9 +301,9 @@ class Journal:
             block_id = f"rb-{secrets.token_hex(4)}"
             while block_id in used:  # never reuse an id, even from a rotated journal
                 block_id = f"rb-{secrets.token_hex(4)}"
-            self.append({"status": RECONCILE_BLOCK, "block_id": block_id, "kind": kind,
-                         "key": str(key)[:200], "reason": str(reason)[:400],
-                         "at": at.astimezone(NY).isoformat(), **fields})
+            self.append({**fields, "status": RECONCILE_BLOCK, "block_id": block_id,
+                         "kind": kind, "key": str(key)[:200], "reason": str(reason)[:400],
+                         "at": at.astimezone(NY).isoformat()})
             return block_id
 
     def resolve_block(self, block_id: str, note: str, at: datetime) -> dict:

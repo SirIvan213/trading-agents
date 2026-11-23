@@ -84,6 +84,11 @@ def stop_status(entry: dict, position_qty: object, *,
         return {"state": UNPROTECTED, "reason": f"the stop is {status}"}
     if stop_price is not None and _dec(stop.get("stop_price")) != _dec(stop_price):
         return {"state": UNPROTECTED, "reason": "the stop is not at the plan's stop price"}
+    if target is not None and target.get("status") == "held":
+        # both legs still held after the fill: Alpaca may be activating them. UNPROTECTED,
+        # flagged so the reconciler gives it one poll before acting
+        return {"state": UNPROTECTED, "activating": True,
+                "reason": "the held stop is not working: the take-profit leg is held"}
     if target is None or target.get("status") not in LIVE:
         why = ("no take-profit leg" if not targets else "more than one take-profit leg"
                if len(targets) > 1 else f"the take-profit leg is {target.get('status')}")
