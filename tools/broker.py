@@ -63,7 +63,8 @@ Replies are parsed strictly: an order reply must carry a known status and side a
 the request (client_order_id, symbol and, for a submit, side, qty, the bracket class and both
 legs at the plan's target and stop: bracket_legs_problem), so a surprise never reads as a fill
 or as a protected entry. A simple order (order_class missing, "" or "simple") is accepted
-only as a market or limit order: the closing order of close_position and what listings show.
+only as a market or limit order (what listings show); our close is a simple MARKET sell
+(is_close_order).
 Position fields that only describe the position (market_value, unrealized_pl, current_price,
 qty_available) are optional, so the exit path (listing positions to flatten them) never fails
 on them.
@@ -523,6 +524,9 @@ class AlpacaPaperBroker:
             out = parse_order(reply)
         except BrokerError as exc:
             raise BrokerError(str(exc), status=200, may_have_acted=True) from None
+        except RecursionError:
+            raise BrokerError("broker reply is too deeply nested", status=200,
+                              may_have_acted=True) from None
         expected = {"client_order_id": client_order_id, "symbol": body["symbol"], "side": "buy",
                     "qty": body["qty"], "order_class": "bracket"}
         got = {k: out[k] for k in expected}
@@ -590,7 +594,7 @@ class AlpacaPaperBroker:
         paper, #196: a market sell with order_class ""). Alpaca refuses (403, 40310000,
         qty_available 0) while the position's bracket legs are open: cancel them first.
 
-        A reply that cannot be read, or is not a simple sell in the symbol, raises BrokerError
+        A reply that cannot be read, or is not a market sell in the symbol, raises BrokerError
         with may_have_acted=True: Alpaca answered 200, so the close may well be working (on
         paper it FILLED while its reply was refused here). Then call check_close; never send
         the close again without it."""
@@ -602,8 +606,9 @@ class AlpacaPaperBroker:
         reply = self._call("DELETE", path)
         try:
             out = parse_order(reply)
-        except BrokerError as exc:
-            raise BrokerError(f"DELETE {path}: {exc}; the close may have been placed",
+        except (BrokerError, RecursionError) as exc:
+            why = str(exc) if isinstance(exc, BrokerError) else "too deeply nested"
+            raise BrokerError(f"DELETE {path}: {why}; the close may have been placed",
                               status=200, may_have_acted=True) from None
         if out["symbol"] != sym or not is_close_order(out):
             raise BrokerError(f"DELETE {path}: the reply is not a market sell in {sym}; the "
@@ -639,8 +644,8 @@ class AlpacaPaperBroker:
            "close_orders": [the symbol's recent simple market sells, newest first]}
 
         "closed": no position in the symbol. "closing": the position is still there and a
-        simple sell is working (wait for it; do not close again). "open": the position is
-        there and no simple sell is working, so the close did not take: a new close is an
+        market sell is working (wait for it; do not close again). "open": the position is
+        there and no market sell is working, so the close did not take: a new close is an
         informed decision for the caller, never automatic here."""
         self._require_verified()
         sym = normalize_symbol(symbol)

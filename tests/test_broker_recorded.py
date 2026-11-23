@@ -456,12 +456,9 @@ def test_a_deeply_nested_order_is_unreadable():
         child = {**rec("close_position_simple.json")["body"]}
         node["legs"] = [child]
         node = child
-    b, _ = client({("GET", "/v2/orders"): (200, [deep])})
-    try:
-        (u,) = b.list_open_orders_checked()["unreadable"]
-    except BrokerError:
-        return  # the JSON transport itself refused the depth: also fail closed
-    assert u["why"] in ("too deeply nested", "broker reply is malformed")
+    from tools.broker import parse_order_list
+    (u,) = parse_order_list([deep])["unreadable"]  # the parser itself, not the transport
+    assert u == {"id": "deep-1", "symbol": "SPY", "why": "too deeply nested"}
 
 
 def test_strict_list_orders_raises_on_an_unreadable_order_claiming_another_symbol():
