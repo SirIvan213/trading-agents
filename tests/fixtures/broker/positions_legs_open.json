@@ -1,0 +1,28 @@
+{
+ "what": "the position while its legs are open: qty_available 0",
+ "method": "GET",
+ "path": "/v2/positions",
+ "status": 200,
+ "body": [
+  {
+   "asset_id": "00000000-0000-4000-8000-000000000004",
+   "symbol": "SPY",
+   "exchange": "ARCA",
+   "asset_class": "us_equity",
+   "asset_marginable": true,
+   "qty": "1",
+   "qty_available": "0",
+   "avg_entry_price": "718.32",
+   "side": "long",
+   "market_value": "718.53",
+   "cost_basis": "718.32",
+   "unrealized_pl": "0.21",
+   "unrealized_plpc": "0.00029",
+   "unrealized_intraday_pl": "0.21",
+   "unrealized_intraday_plpc": "0.00029",
+   "current_price": "718.53",
+   "lastday_price": "689.81",
+   "change_today": "0.04163"
+  }
+ ]
+}

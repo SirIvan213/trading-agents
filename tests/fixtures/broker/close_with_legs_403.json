@@ -1,0 +1,14 @@
+{
+ "what": "closing the position while its legs are open",
+ "method": "DELETE",
+ "path": "/v2/positions/SPY",
+ "status": 403,
+ "body": {
+  "available": "0",
+  "code": 40310000,
+  "existing_qty": "1",
+  "held_for_orders": "1",
+  "message": "insufficient qty available for order (requested: 1, available: 0)",
+  "symbol": "SPY"
+ }
+}

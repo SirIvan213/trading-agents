@@ -25,3 +25,8 @@ journal/records/
 # UI track frontend (ui/web): installed and built locally, never committed
 ui/web/node_modules/
 ui/web/dist/
+
+# probe_broker output (--out / --raw-out): paper account replies, never committed as is
+# (tests/fixtures/broker/ holds the anonymized ones)
+probe.json
+raw.json

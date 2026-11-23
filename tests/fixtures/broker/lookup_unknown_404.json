@@ -1,0 +1,10 @@
+{
+ "what": "unknown client_order_id lookup",
+ "method": "GET",
+ "path": "/v2/orders:by_client_order_id",
+ "status": 404,
+ "body": {
+  "code": 40410000,
+  "message": "order not found for probe-unknown-0000000000000000"
+ }
+}

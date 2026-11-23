@@ -669,6 +669,12 @@ def alpaca_reply(body):
     raw = json.loads((BROKER_FIXTURES / "order_bracket_new.json").read_text(encoding="utf-8"))
     raw.update({"client_order_id": body["client_order_id"], "symbol": body["symbol"],
                 "qty": body["qty"], "limit_price": body["limit_price"]})
+    for leg in raw["legs"]:
+        leg.update({"symbol": body["symbol"], "qty": body["qty"]})
+        if leg["type"] == "limit":
+            leg["limit_price"] = body["take_profit"]["limit_price"]
+        else:
+            leg["stop_price"] = body["stop_loss"]["stop_price"]
     return json.dumps(raw).encode()
 
 
@@ -697,8 +703,13 @@ def test_b1_a_round_quantity_through_the_real_client_is_submitted(
 
 def test_a_quantity_written_with_a_decimal_point_still_matches():
     from pipeline.send import _matches
-    body = {"client_order_id": "ta-x", "symbol": "TSLA", "qty": "10", "limit_price": "364.55"}
-    reply = {**body, "side": "buy", "order_class": "bracket", "type": "limit"}
+    body = {"client_order_id": "ta-x", "symbol": "TSLA", "qty": "10", "limit_price": "364.55",
+            "take_profit": {"limit_price": "370.04"}, "stop_loss": {"stop_price": "358.32"}}
+    legs = [{"type": "limit", "side": "sell", "symbol": "TSLA", "qty": "10",
+             "order_class": "bracket", "limit_price": "370.04"},
+            {"type": "stop", "side": "sell", "symbol": "TSLA", "qty": "10.0",
+             "order_class": "bracket", "stop_price": "358.32"}]
+    reply = {**body, "side": "buy", "order_class": "bracket", "type": "limit", "legs": legs}
     assert _matches(dict(reply, qty="10.0"), body) and _matches(dict(reply, qty="10"), body)
     assert not _matches(dict(reply, qty="1E+2"), body)  # 100 is not 10
     assert not _matches(dict(reply, qty="9"), body)
@@ -833,3 +844,58 @@ def test_the_cancel_of_a_mismatch_does_not_hold_the_lock(ledger, journal):
     broker.during_call = hook
     send(out, journal, broker)
     assert ("cancel", True) in seen and all(ok for _, ok in seen)
+
+
+# ======================= the entry's legs (#196 review) =======================
+
+def _with_bad_legs(body, how):
+    from tests.order_helpers import broker_reply
+    reply = broker_reply(body)
+    if how == "none":
+        reply["legs"] = []
+    elif how == "one":
+        reply["legs"] = reply["legs"][:1]
+    elif how == "stop":
+        next(leg for leg in reply["legs"] if leg["type"] == "stop")["stop_price"] = "300.00"
+    elif how == "target":
+        next(leg for leg in reply["legs"] if leg["type"] == "limit")["limit_price"] = "999.00"
+    return reply
+
+
+@pytest.mark.parametrize("how", ["none", "one", "stop", "target"])
+def test_an_order_found_without_its_correct_legs_is_cancelled_never_submitted(
+        ledger, journal, capsys, how):
+    """The lookup finds an order whose header matches but whose legs are missing or at
+    another price: never "submitted" (an entry without its stop), cancelled and alerted."""
+    out = approved(ledger, journal)
+    broker = FakePaperBroker()
+    body = bracket_request(out.recheck.order, cid_of(out))
+    wrong = _with_bad_legs(body, how)
+    broker.submit, broker.lookup = wrong, wrong
+    r = send(out, journal, broker)
+    assert r.status == "send_unknown" and r.alert and "cancel requested" in r.reason
+    assert ("cancel", "ord-1") in broker.calls
+    assert broker.names().count("submit") == 1
+    assert statuses(journal)[-1] == "send_unknown"
+
+
+def test_a_post_reply_without_legs_but_a_lookup_with_them_is_submitted(ledger, journal):
+    """The POST reply lacks the legs, the lookup (nested) shows them as asked: submitted."""
+    from tests.order_helpers import broker_reply
+    out = approved(ledger, journal)
+    broker = FakePaperBroker()
+    body = bracket_request(out.recheck.order, cid_of(out))
+    broker.submit, broker.lookup = _with_bad_legs(body, "none"), broker_reply(body)
+    r = send(out, journal, broker)
+    assert r.status == "submitted" and "broker holds the order" in r.reason
+    assert not any(c[0] == "cancel" for c in broker.calls)
+
+
+@pytest.mark.parametrize("how", ["none", "one", "stop", "target"])
+def test_matches_needs_both_legs_at_the_plans_prices(ledger, journal, how):
+    from pipeline.send import _matches
+    from tests.order_helpers import broker_reply
+    out = approved(ledger, journal)
+    body = bracket_request(out.recheck.order, cid_of(out))
+    assert _matches(broker_reply(body), body)
+    assert not _matches(_with_bad_legs(body, how), body)

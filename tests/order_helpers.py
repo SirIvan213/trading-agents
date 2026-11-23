@@ -425,6 +425,11 @@ def broker_reply(body: dict, *, order_id: str = "ord-1", **over) -> dict:
                 "limit_price": body["limit_price"]})
     for leg in raw.get("legs") or []:
         leg.update({"symbol": body["symbol"], "qty": body["qty"]})
+        # the legs Alpaca makes from the request: target and stop (tools.broker checks them)
+        if leg.get("type") == "limit":
+            leg["limit_price"] = body["take_profit"]["limit_price"]
+        elif leg.get("type") == "stop":
+            leg["stop_price"] = body["stop_loss"]["stop_price"]
     raw.update(over)
     return parse_order(raw)
 
