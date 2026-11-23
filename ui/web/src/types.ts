@@ -96,7 +96,8 @@ export interface Step {
 }
 
 export interface AnalystView {
-  agent: string; name: string; ok: boolean; reason_code: string | null;
+  agent: string; name: string; ok: boolean | null; // null: not in the record
+  reason_code: string | null;
   stance: string | null; confidence: number | null;
   evidence: { point: string | null; source: string | null }[];
 }
@@ -107,7 +108,7 @@ export interface PlanView {
 }
 
 export interface TurnView {
-  round: number | null; side: "bull" | "bear" | null; argument: string | null;
+  round: number | null; side: "bull" | "bear" | null; ok: boolean; argument: string | null;
   points: (string | null)[]; fatal: boolean | null;
 }
 

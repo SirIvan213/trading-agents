@@ -31,6 +31,7 @@ outcome and numbers. Numbers are shown exactly as recorded; the limit price is n
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -100,6 +101,8 @@ def _typed(obj: dict, key: str, types: tuple[type, ...], where: str) -> str | No
         return f"field {where}{key!r} has the wrong type"
     if not isinstance(v, types):
         return f"field {where}{key!r} has the wrong type"
+    if isinstance(v, float) and not math.isfinite(v):
+        return f"field {where}{key!r} is not a finite number"
     return None
 
 
@@ -125,6 +128,8 @@ def _check_nested(r: dict) -> str | None:
         if isinstance(rep, dict):
             checks += [(rep, "stance", STR, where), (rep, "confidence", NUM, where),
                        (rep, "evidence", (list, type(None)), where)]
+            if not isinstance(rep.get("evidence"), list | None):
+                return f"field {where}'evidence' has the wrong type"
             for e in rep.get("evidence") or []:
                 if not isinstance(e, dict):
                     return f"{where}evidence has an item that is not an object"
@@ -145,6 +150,8 @@ def _check_nested(r: dict) -> str | None:
                    (d, "all_ok", BOOL, "debate."), (d, "turns", (list, type(None)), "debate."),
                    (d, "final_bull", (dict, type(None)), "debate."),
                    (d, "final_bear", (dict, type(None)), "debate.")]
+        if not isinstance(d.get("turns"), list | None):
+            return "field debate.'turns' has the wrong type"
         for t in d.get("turns") or []:
             if not isinstance(t, dict):
                 return "debate.turns has an item that is not an object"
@@ -244,7 +251,10 @@ def read_record(directory: Path, run_id: str, day_hint: str | None
         obj = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return None, {"level": "error", "text": "the decision record is not valid JSON"}
-    why = validate_record(obj, run_id)
+    try:
+        why = validate_record(obj, run_id)
+    except (TypeError, AttributeError, KeyError, ValueError, IndexError):
+        why = "a field has an unexpected shape"
     if why:
         return None, {"level": "error", "text": f"the decision record is unusable: {why}"}
     return obj, None
@@ -297,11 +307,12 @@ def _build(snap: JournalSnapshot, run_id: str, row: dict | None, record: dict | 
     extra: list[dict] = []
     status = ((record or {}).get("outcome") or {}).get("status")
     err = (record or {}).get("error")
-    if status in ("error", "stopped") and isinstance(err, dict):
+    if status in ("error", "stopped"):
         what = "stopped on an error" if status == "error" else "was stopped by a daily cap"
+        why = (f"{err.get('type')}, {err.get('reason_code')}" if isinstance(err, dict)
+               else "type not recorded")
         extra.append({"level": "error" if status == "error" else "warn",
-                      "text": f"the decision {what} ({err.get('type')}, "
-                              f"{err.get('reason_code')})"})
+                      "text": f"the decision {what} ({why})"})
     entry, timeout, events = _journal_parts(snap, run_id, row)
     symbol = (row or {}).get("symbol") or (record or {}).get("symbol")
     order = entry.get("order") if isinstance(entry.get("order"), dict) else None
@@ -595,7 +606,7 @@ def _debate_step(record: dict | None, row: dict | None) -> dict:
 
 def _forced(code: str, reasons: dict) -> tuple[str, str]:
     """(state, line) for a forced pass, from the fixed texts in reasons.json."""
-    text = reasons["why"].get(f"pass:{code}", code)
+    text = reasons["why"].get(f"pass:{code}") or cap(code, 40)
     if code in PRE_CALL:
         return "blocked", f"Forced PASS without a Trader call. {text}."
     return "failed", f"The Trader's call failed, so the decision passed. {text}."

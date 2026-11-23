@@ -106,6 +106,11 @@ MALFORMED = {
     "plan entry is a number": lambda r: r["exit_plans"][0].update(entry=103.1),
     "limit_price is a number": lambda r: r["proposal"].update(limit_price=103.21),
     "error type is a dict": lambda r: r.update(error={"type": {}, "reason_code": "x"}),
+    "evidence is an int": lambda r: r["analysts"]["technical"]["report"].update(evidence=5),
+    "evidence is a bool": lambda r: r["analysts"]["technical"]["report"].update(
+        evidence=True),
+    "turns is an int": lambda r: r["debate"].update(turns=5),
+    "confidence is not finite": lambda r: r["trader"].update(confidence=float("nan")),
 }
 
 
@@ -260,3 +265,35 @@ def test_an_approved_entry_without_a_gate_does_not_claim_a_recheck(paths):
     paths.journal.write_text(lines[0] + "\n" + json.dumps(approved) + "\n", encoding="utf-8")
     s = steps(get(paths, now=NOON + timedelta(minutes=1)))
     assert "earnings and halt rechecked" not in s["approve_and_log"]["line"]
+
+
+def test_the_validator_never_raises_out_of_the_endpoint(paths, monkeypatch):
+    write_case("buy_approved", paths.journal)
+
+    def boom(obj, run_id):
+        raise TypeError("unexpected")
+
+    monkeypatch.setattr(dt, "validate_record", boom)
+    body = get(paths)
+    assert body["record_available"] is False
+    assert any("unexpected shape" in p["text"] for p in body["problems"])
+
+
+def test_an_error_status_without_its_error_is_still_a_problem(paths):
+    write_case("pass_fatal_bear", paths.journal)
+
+    def no_error(r):
+        r["outcome"]["status"] = "error"
+        r["error"] = None
+
+    rewrite_record(paths, no_error)
+    body = get(paths)
+    assert any("stopped on an error (type not recorded)" in p["text"]
+               for p in body["problems"])
+
+
+def test_an_unknown_forced_pass_code_is_capped_and_made_visible(paths):
+    write_case("pass_fatal_bear", paths.journal)
+    rewrite_record(paths, lambda r: r["trader"].update(forced_pass="\u202e" + "z" * 500))
+    line = steps(get(paths))["trader"]["line"]
+    assert "\u202e" not in line and "⟨U+202E⟩" in line and len(line) < 200

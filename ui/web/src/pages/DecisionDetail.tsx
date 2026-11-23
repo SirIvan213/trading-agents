@@ -176,10 +176,14 @@ function Analysts({ list }: { list: AnalystView[] }) {
           <div key={a.agent} className="card analyst">
             <div className="analyst-head">
               <span className="strong">{a.name}</span>
-              <span className={a.ok ? `stance stance-${a.stance}` : "state state-failed"}>
-                {a.ok ? a.stance : `failed (${a.reason_code ?? "unknown"})`}
-              </span>
-              {a.ok && <span className="mono tiny muted">{a.confidence}</span>}
+              {a.ok === true && (
+                <span className={`stance stance-${a.stance}`}>{a.stance}</span>
+              )}
+              {a.ok === false && (
+                <span className="state state-failed">failed ({a.reason_code ?? "unknown"})</span>
+              )}
+              {a.ok === null && <span className="state state-not_recorded">not recorded</span>}
+              {a.ok === true && <span className="mono tiny muted">{a.confidence}</span>}
             </div>
           </div>
         ))}
@@ -256,6 +260,7 @@ function Debate({ x }: { x: Record<string, unknown> }) {
                 <article key={i} className="card side">
                   <span className={t.side === "bull" ? "side-bull" : "side-bear"}>
                     {t.side?.toUpperCase()} · round {r}{t.fatal ? " · fatal" : ""}
+                    {t.ok === false ? " · call failed" : ""}
                   </span>
                   {t.argument && <p className="plain text2">{t.argument}</p>}
                   <ul className="evidence">{t.points.map((p, j) => <li key={j} className="plain">{p}</li>)}</ul>

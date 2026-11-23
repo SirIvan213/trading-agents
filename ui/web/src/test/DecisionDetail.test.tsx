@@ -123,6 +123,27 @@ describe("Decision detail", () => {
     expect(within(step("debate")).getByText("skipped")).toBeInTheDocument();
   });
 
+  it("a missing analyst shows not recorded, never failed", async () => {
+    const body = structuredClone(buy) as DecisionDetail;
+    const list = body.steps[2].details!.analysts as { ok: boolean | null; stance: string | null }[];
+    list[1].ok = null;
+    list[1].stance = null;
+    await open(body);
+    await screen.findByText("In short");
+    expect(within(step("analysts")).getByText("not recorded")).toBeInTheDocument();
+    expect(within(step("analysts")).queryByText(/failed/)).not.toBeInTheDocument();
+  });
+
+  it("a failed debate turn is marked in the rounds", async () => {
+    const body = structuredClone(buy) as DecisionDetail;
+    const turns = body.steps[4].details!.turns as { side: string; ok: boolean }[];
+    turns.find((t) => t.side === "bear")!.ok = false;
+    await open(body);
+    await screen.findByText("In short");
+    fireEvent.click(screen.getByRole("button", { name: /Read the full debate/ }));
+    expect(within(step("debate")).getByText(/BEAR · round 1/)).toHaveTextContent("call failed");
+  });
+
   it("a skip stops at the event check", async () => {
     await open(skipped);
     await screen.findByText("In short");
