@@ -101,6 +101,14 @@ class FakePaper:
         self.positions.pop(symbol, None)
         return {"id": "close-1", "symbol": symbol, "status": "accepted"}
 
+    def check_close(self, symbol):
+        self.calls.append(("check_close", symbol))
+        working = [o for o in self.list_open_orders()
+                   if o["symbol"] == symbol and o.get("order_class") == "simple"]
+        state = ("closed" if symbol not in self.positions
+                 else "closing" if working else "open")
+        return {"state": state, "position": None, "close_orders": working}
+
 
 def run(fake, *args):
     return pb.main(["--live", "--no-dotenv", *args], broker=fake, quote=lambda s: D("600.00"),
@@ -436,3 +444,205 @@ def test_the_recording_opener_keeps_raw_replies_and_redacts_the_account_number()
 def test_the_report_never_shows_the_account_number(capsys):
     run(FakePaper())
     assert report(capsys)["account"]["account_number"] == "REDACTED"
+
+
+# ======================= the paper probe's findings (#196, 2026-11-23) =======================
+
+def unclear(symbol):
+    """The close was placed (and fills) but its reply could not be read (#196 finding 7)."""
+    return BrokerError(f"DELETE /v2/positions/{symbol}: broker reply has no order_class; "
+                       "the close may have been placed", status=200, may_have_acted=True)
+
+
+def test_a_step_error_makes_the_run_incomplete_even_when_flat(capsys):
+    """#196 finding 8: step 6 errored and the probe still exited 0."""
+    fake = FakePaper()
+    real_close = fake.close_position
+    n = {"close": 0}
+
+    def close(symbol):
+        n["close"] += 1
+        if n["close"] == 2:  # step 6: the close is placed, its reply unreadable
+            real_close(symbol)
+            raise unclear(symbol)
+        return real_close(symbol)
+
+    fake.close_position = close
+    assert run(fake) == pb.INCOMPLETE
+    captured = capsys.readouterr()
+    r = json.loads(captured.out[captured.out.index("{"):])
+    assert r["cleanup"]["flat"] is True and fake.positions == {}
+    assert any(e.startswith("6_close_after_legs:") for e in r["errors"])
+    assert "incomplete" in captured.err
+
+
+def test_an_unclear_close_is_checked_and_never_sent_again_in_that_step(capsys):
+    fake = FakePaper()
+    real_close = fake.close_position
+    n = {"close": 0}
+
+    def close(symbol):
+        n["close"] += 1
+        if n["close"] == 2:
+            real_close(symbol)  # it worked at the broker
+            raise unclear(symbol)
+        return real_close(symbol)
+
+    fake.close_position = close
+    run(fake)
+    r = report(capsys)
+    assert r["6_close_after_legs"]["check"]["state"] == "closed"
+    closes = [c for c in fake.calls if c[0] == "close"]
+    assert len(closes) == 2  # step 5 (refused, legs open) and step 6: never a blind third
+    assert ("check_close", "SPY") in fake.calls
+
+
+def test_an_unclear_close_that_did_not_take_is_left_to_the_cleanup_after_a_check(capsys):
+    fake = FakePaper()
+    real_close = fake.close_position
+    n = {"close": 0}
+
+    def close(symbol):
+        n["close"] += 1
+        if n["close"] == 2:
+            raise unclear(symbol)  # nothing happened at the broker
+        return real_close(symbol)
+
+    fake.close_position = close
+    assert run(fake) == pb.INCOMPLETE
+    r = report(capsys)
+    assert r["6_close_after_legs"]["check"]["state"] == "open"
+    assert r["cleanup"]["flat"] is True and fake.positions == {}  # the cleanup closed it
+
+
+def test_a_definite_refusal_is_a_finding_not_an_error(capsys):
+    """The 403 on closing with the legs open and the 422 on the resend are what the probe
+    exists to record: a clean run with both still exits 0."""
+    assert run(FakePaper()) == pb.OK
+    r = report(capsys)
+    assert r["errors"] == []
+    assert r["4_resend"]["status"] == 422 and r["5_close_with_legs_open"]["status"] == 403
+
+
+def test_a_failed_unknown_lookup_or_leg_cancel_is_an_error(capsys):
+    fake = FakePaper()
+    real_lookup = fake.get_order_by_client_id
+
+    def lookup(cid):
+        if cid.startswith("probe-unknown-"):
+            raise BrokerError("GET /v2/orders:by_client_order_id failed: HTTP 500", status=500,
+                              may_have_acted=True)
+        return real_lookup(cid)
+
+    fake.get_order_by_client_id = lookup
+    assert run(fake) == pb.INCOMPLETE
+    assert report(capsys)["errors"][0].startswith("1_unknown_lookup:")
+
+
+def test_a_resend_that_may_have_acted_is_unknown_and_an_error(capsys):
+    fake = FakePaper()
+    real = fake.submit_bracket
+    sent = {"n": 0}
+
+    def submit(order, cid):
+        sent["n"] += 1
+        if sent["n"] == 2:
+            raise BrokerError("POST /v2/orders failed: HTTP 503", status=503,
+                              may_have_acted=True)
+        return real(order, cid)
+
+    fake.submit_bracket = submit
+    assert run(fake) == pb.INCOMPLETE
+    r = report(capsys)
+    assert r["4_resend"]["accepted"] == "unknown"
+    assert any(e.startswith("4_resend:") for e in r["errors"])
+
+
+def test_a_cleanup_error_makes_the_run_incomplete(capsys):
+    fake = FakePaper()
+    real_run = pb.Probe.run
+    real_list = fake.list_open_orders
+    fail = {"n": 0}
+
+    def flaky_list():
+        if fail["n"]:
+            fail["n"] -= 1
+            raise BrokerError("GET /v2/orders failed: HTTP 503", status=503,
+                              may_have_acted=True)
+        return real_list()
+
+    def run_then_arm(self):
+        real_run(self)
+        fail["n"] = 1  # the cleanup's first listing fails (#196: it did, on the parser)
+
+    fake.list_open_orders = flaky_list
+    pb.Probe.run = run_then_arm
+    try:
+        assert run(fake) == pb.INCOMPLETE
+    finally:
+        pb.Probe.run = real_run
+    r = report(capsys)
+    assert r["errors"] == [] and r["cleanup"]["flat"] is True
+    assert any("HTTP 503" in x for x in r["cleanup"]["notes"])
+
+
+def test_the_cleanup_finds_a_held_stop_the_listing_does_not_show(capsys):
+    """#196 finding 5: the open-orders listing shows the take-profit but not the held stop.
+    The cleanup cancels the entry's legs found by lookup."""
+    fake = FakePaper()
+    real_list = fake.list_open_orders
+
+    def listing_without_held():
+        return [o for o in real_list() if o["status"] != "held"]
+
+    def stop_after_fill(self):
+        self.report["stopped"] = "simulated stop"
+        self.b.submit_bracket(pb.probe_order("SPY", D("600.00")), self.cid)
+        entry = self.b.get_order_by_client_id(self.cid)
+        entry_legs = fake.orders[entry["id"]]["legs"]
+        next(leg for leg in entry_legs if leg["type"] == "stop")["status"] = "held"
+
+    fake.list_open_orders = listing_without_held
+    real_run = pb.Probe.run
+    pb.Probe.run = stop_after_fill
+    try:
+        run(fake)
+    finally:
+        pb.Probe.run = real_run
+    stop = next(o for o in fake.orders.values() if o.get("type") == "stop")
+    assert stop["status"] == "canceled"
+    assert ("cancel", stop["id"]) in fake.calls
+    assert report(capsys)["cleanup"]["flat"] is True
+
+
+def test_the_cleanup_leaves_a_working_close_alone_and_waits(capsys):
+    fake = FakePaper()
+    real_run = pb.Probe.run
+
+    def run_with_a_close_working(self):
+        real_run(self)
+        fake.positions["SPY"] = 1  # a close is working: it fills on the next position read
+        fake.orders["close-9"] = {"id": "close-9", "symbol": "SPY", "status": "new",
+                                  "side": "sell", "order_class": "simple", "type": "market",
+                                  "legs": []}
+
+    real_positions = fake.list_positions
+    reads = {"n": 0}
+
+    def positions():
+        reads["n"] += 1
+        if "close-9" in fake.orders and reads["n"] > 1:
+            fake.orders["close-9"]["status"] = "filled"
+            fake.positions.pop("SPY", None)
+        return real_positions()
+
+    fake.list_positions = positions
+    pb.Probe.run = run_with_a_close_working
+    try:
+        run(fake)
+    finally:
+        pb.Probe.run = real_run
+    assert ("cancel", "close-9") not in fake.calls
+    # step 5 (refused, legs open) and step 6 only: no close while one is working
+    assert [c for c in fake.calls if c[0] == "close"] == [("close", "SPY")] * 2
+    assert report(capsys)["cleanup"]["flat"] is True

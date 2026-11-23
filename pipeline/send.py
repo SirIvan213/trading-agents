@@ -50,7 +50,7 @@ from journal.orders import (
     client_order_id,
 )
 from pipeline.order_flow import Clock, Outcome, check_before_send, wall_clock
-from tools.broker import BrokerError, bracket_request
+from tools.broker import BrokerError, bracket_legs_problem, bracket_request
 
 # HTTP statuses after which Alpaca has definitely not accepted the order. Anything else
 # (no status, 408, 429, 5xx) may have created it, so it is looked up, never resent.
@@ -92,7 +92,8 @@ class SendResult:
 
 def _matches(reply: dict, body: dict) -> bool:
     """The broker's order is the one in the request: id, symbol, side, quantity, bracket,
-    limit entry and limit price."""
+    limit entry and limit price, and both legs at the plan's target and stop
+    (tools.broker.bracket_legs_problem): an entry without its stop never reads as sent."""
     try:
         qty = Decimal(str(reply.get("qty")))  # as a number: "10" may come back as "10.0"
         limit = Decimal(str(reply.get("limit_price")))
@@ -101,7 +102,8 @@ def _matches(reply: dict, body: dict) -> bool:
     return (reply.get("client_order_id") == body["client_order_id"]
             and reply.get("symbol") == body["symbol"] and reply.get("side") == "buy"
             and qty == Decimal(body["qty"]) and reply.get("order_class") == "bracket"
-            and reply.get("type") == "limit" and limit == Decimal(body["limit_price"]))
+            and reply.get("type") == "limit" and limit == Decimal(body["limit_price"])
+            and bracket_legs_problem(reply, body) is None)
 
 
 def _alert(message: str) -> None:

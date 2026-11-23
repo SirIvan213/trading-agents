@@ -669,6 +669,12 @@ def alpaca_reply(body):
     raw = json.loads((BROKER_FIXTURES / "order_bracket_new.json").read_text(encoding="utf-8"))
     raw.update({"client_order_id": body["client_order_id"], "symbol": body["symbol"],
                 "qty": body["qty"], "limit_price": body["limit_price"]})
+    for leg in raw["legs"]:
+        leg.update({"symbol": body["symbol"], "qty": body["qty"]})
+        if leg["type"] == "limit":
+            leg["limit_price"] = body["take_profit"]["limit_price"]
+        else:
+            leg["stop_price"] = body["stop_loss"]["stop_price"]
     return json.dumps(raw).encode()
 
 
@@ -697,8 +703,13 @@ def test_b1_a_round_quantity_through_the_real_client_is_submitted(
 
 def test_a_quantity_written_with_a_decimal_point_still_matches():
     from pipeline.send import _matches
-    body = {"client_order_id": "ta-x", "symbol": "TSLA", "qty": "10", "limit_price": "364.55"}
-    reply = {**body, "side": "buy", "order_class": "bracket", "type": "limit"}
+    body = {"client_order_id": "ta-x", "symbol": "TSLA", "qty": "10", "limit_price": "364.55",
+            "take_profit": {"limit_price": "370.04"}, "stop_loss": {"stop_price": "358.32"}}
+    legs = [{"type": "limit", "side": "sell", "symbol": "TSLA", "qty": "10",
+             "order_class": "bracket", "limit_price": "370.04"},
+            {"type": "stop", "side": "sell", "symbol": "TSLA", "qty": "10.0",
+             "order_class": "bracket", "stop_price": "358.32"}]
+    reply = {**body, "side": "buy", "order_class": "bracket", "type": "limit", "legs": legs}
     assert _matches(dict(reply, qty="10.0"), body) and _matches(dict(reply, qty="10"), body)
     assert not _matches(dict(reply, qty="1E+2"), body)  # 100 is not 10
     assert not _matches(dict(reply, qty="9"), body)

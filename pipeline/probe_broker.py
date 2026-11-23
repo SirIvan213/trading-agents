@@ -33,9 +33,18 @@ This is a manual test tool, not the decision path: its 1-share probe order is no
 agent's plan and does not go through risk_check. Paper only; Alpaca paper calls and the IEX
 quote are free.
 
-Exit codes: 0 every step ran and the account is flat; 4 flat, but the run stopped early or
-the entry never filled (incomplete); 1 NOT flat (check the paper account now); 2 refused
-before any order; 3 dry run (nothing requested).
+Exit codes: 0 every step ran without an error and the account is flat; 4 flat, but the run
+stopped early, the entry never filled, or any step or cleanup call errored (incomplete: the
+report's "errors" and cleanup notes say which); 1 NOT flat (check the paper account now);
+2 refused before any order; 3 dry run (nothing requested). An answer the probe exists to
+record (the 422 on the resend, the 403 on closing with the legs open) is a finding, not an
+error.
+
+After a close whose outcome is unclear (a BrokerError with may_have_acted: a timeout, a 5xx,
+an unreadable reply), the probe never closes again blindly: it records check_close (the
+position and the symbol's recent orders). The cleanup leaves a working close order alone and
+waits for it, and finds the bracket's held stop through the entry lookup: the open-orders
+listing does not show it (#196).
 """
 from __future__ import annotations
 
@@ -54,7 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.smoke_common import load_env
-from tools.broker import AlpacaPaperBroker, BrokerError, bracket_request
+from tools.broker import FINAL_STATUSES, AlpacaPaperBroker, BrokerError, bracket_request
 from tools.config import load_limits
 from tools.http import _default_open
 from tools.scan import fetch_snapshots, validate_symbols
@@ -171,6 +180,8 @@ class Probe:
         self.report: dict[str, Any] = {"symbol": symbol}
         self.cid = f"probe-{secrets.token_hex(12)}"
         self.complete = False
+        self.errors: list[str] = []  # step errors: any makes the run incomplete (exit 4)
+        self.cleanup_errors: list[str] = []
 
     def _wait(self, check: Callable[[], bool], seconds: float) -> bool:
         deadline = self.monotonic() + seconds
@@ -183,6 +194,21 @@ class Probe:
 
     def _mine(self, orders: list[dict]) -> list[dict]:
         return [o for o in orders if o.get("symbol") == self.symbol]
+
+    def _error(self, step: str, exc: BaseException) -> None:
+        self.errors.append(f"{step}: {_why(exc)}")
+
+    def _check_close(self) -> dict:
+        """After an unclear close: what the broker shows, never a second close."""
+        try:
+            return self.b.check_close(self.symbol)
+        except BrokerError as exc:
+            return {"state": "unknown", **_err(exc)}
+
+    @staticmethod
+    def _is_close(o: dict) -> bool:
+        """A closing order (DELETE /v2/positions: a simple sell)."""
+        return o.get("side") == "sell" and o.get("order_class") == "simple"
 
     def _position(self) -> dict | None:
         return next((p for p in self.b.list_positions() if p["symbol"] == self.symbol), None)
@@ -221,6 +247,7 @@ class Probe:
                            "not found)" if found is None else "an order came back"}
         except BrokerError as exc:
             r["1_unknown_lookup"] = _err(exc)
+            self._error("1_unknown_lookup", exc)
         # 2. send the probe bracket
         ask = self.quote(self.symbol)
         order = probe_order(self.symbol, ask)
@@ -237,10 +264,12 @@ class Probe:
             if dup.get("id") and dup["id"] != r["2_sent"]["id"]:
                 self._cancel(dup["id"], "4_resend_cancel")
         except BrokerError as exc:
-            # an HTTP status is Alpaca's answer; none (e.g. a reply that does not match the
-            # order sent) means the order may exist
-            r["4_resend"] = {"accepted": False if exc.status is not None else "unknown",
-                             **_err(exc)}
+            # a refusal (4xx) is Alpaca's answer, the finding; anything that may have acted
+            # (no status, a 5xx, an unreadable or mismatched reply) means the order may exist
+            refused = exc.status is not None and not exc.may_have_acted
+            r["4_resend"] = {"accepted": False if refused else "unknown", **_err(exc)}
+            if not refused:
+                self._error("4_resend", exc)
         # 5. wait for the fill; record what holds the shares; close with the legs open
         state: dict[str, Any] = {}
 
@@ -263,12 +292,17 @@ class Probe:
             r["5_close_with_legs_open"] = {"closed": True, "order": closed}
         except BrokerError as exc:
             r["5_close_with_legs_open"] = {"closed": False, **_err(exc)}
+            if exc.may_have_acted:  # not a refusal: find out, never assume it failed
+                r["5_close_with_legs_open"]["check"] = self._check_close()
+                self._error("5_close_with_legs_open", exc)
         # 6. cancel the legs (at once, also if the close above succeeded), then close
         for leg in legs:
             if leg.get("status") not in FINAL:
                 self._cancel(leg["id"], f"6_cancel_leg_{leg.get('type')}")
         r["6_legs_gone"] = self._wait(lambda: not self._mine(self.b.list_open_orders()),
                                       LEGS_WAIT_S)
+        if not r["6_legs_gone"]:
+            self.errors.append("6_legs_gone: the legs were still listed")
         if self._position() is None:
             r["6_close_after_legs"] = "no position left"
         else:
@@ -277,6 +311,9 @@ class Probe:
                                            "order": self.b.close_position(self.symbol)}
             except BrokerError as exc:
                 r["6_close_after_legs"] = {"closed": False, **_err(exc)}
+                if exc.may_have_acted:  # find out what happened; the cleanup acts on it
+                    r["6_close_after_legs"]["check"] = self._check_close()
+                self._error("6_close_after_legs", exc)
         self.complete = True
 
     def _cancel(self, order_id: str, key: str) -> None:
@@ -285,30 +322,49 @@ class Probe:
             self.report[key] = {"canceled": True}
         except BrokerError as exc:
             self.report[key] = {"canceled": False, **_err(exc)}
+            self._error(key, exc)
 
     def _cleanup_pass(self, notes: list[str]) -> bool:
-        """One pass: cancel the symbol's open orders and their legs, close its position (long
-        or short), wait until flat. Each step has its own try. True when flat."""
+        """One pass: cancel the probe entry's legs (found by lookup: the listing misses a held
+        stop) and the symbol's other open orders, leaving a working close alone; close the
+        position (long or short) unless a close is already working; wait until flat. Each
+        step has its own try. True when flat."""
+        cancel: list[str] = []
+        try:
+            entry = self.b.get_order_by_client_id(self.cid)
+            for leg in (entry or {}).get("legs") or []:
+                if leg.get("status") not in FINAL_STATUSES:
+                    cancel.append(leg["id"])
+        except BrokerError as exc:
+            notes.append(f"look up the entry's legs: {exc}")
+        closing = False
         try:
             orders = self._mine(self.b.list_open_orders())
         except BrokerError as exc:
             notes.append(f"list orders: {exc}")
             orders = []
         for o in orders:
-            for oid in [leg["id"] for leg in o.get("legs") or []] + [o["id"]]:
-                try:
-                    self.b.cancel_order(oid)
-                except BrokerError as exc:
-                    notes.append(f"cancel {oid}: {exc}")
+            if self._is_close(o):
+                closing = True  # a close already working: wait for it, never close again
+                continue
+            cancel += [leg["id"] for leg in o.get("legs") or []] + [o["id"]]
+        for oid in dict.fromkeys(cancel):
+            try:
+                self.b.cancel_order(oid)
+            except BrokerError as exc:
+                notes.append(f"cancel {oid}: {exc}")
         try:
-            self._wait(lambda: not self._mine(self.b.list_open_orders()), LEGS_WAIT_S)
+            self._wait(lambda: not [o for o in self._mine(self.b.list_open_orders())
+                                    if not self._is_close(o)], LEGS_WAIT_S)
         except BrokerError as exc:
             notes.append(f"wait for cancels: {exc}")
         try:
-            if self._position() is not None:
+            if not closing and self._position() is not None:
                 self.b.close_position(self.symbol)
         except BrokerError as exc:
             notes.append(f"close: {exc}")
+            if exc.may_have_acted:  # find out; the next pass acts on what is there
+                notes.append(f"close check: {self._check_close().get('state')}")
         try:
             return self._wait(lambda: self._position() is None
                               and not self._mine(self.b.list_open_orders()), FLAT_WAIT_S)
@@ -327,6 +383,8 @@ class Probe:
                 break
             notes.append(f"pass {n}: not flat yet")
         self.report["cleanup"] = {"flat": flat, "notes": notes}
+        self.cleanup_errors = [x for x in notes if not x.startswith("pass ")
+                               and not x.startswith("close check: ")]
         return flat
 
 
@@ -401,6 +459,7 @@ def main(argv: list[str] | None = None, *, broker: Any = None,
     except Exception as exc:  # noqa: BLE001 - report it, then always clean up
         probe.report["stopped"] = _why(exc)
     flat = probe.cleanup()
+    probe.report["errors"] = probe.errors
     if not flat:
         print(f"ALERT: the paper account is NOT flat in {symbol}: check it now",
               file=sys.stderr)
@@ -415,6 +474,10 @@ def main(argv: list[str] | None = None, *, broker: Any = None,
                 print(f"could not write {path}: {type(exc).__name__}", file=sys.stderr)
     if not flat:
         return NOT_FLAT
+    if probe.errors or probe.cleanup_errors:
+        print("the run is incomplete: a step or cleanup call errored (see \"errors\" and "
+              "the cleanup notes)", file=sys.stderr)
+        return INCOMPLETE
     return OK if probe.complete else INCOMPLETE
 
 

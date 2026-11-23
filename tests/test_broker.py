@@ -323,8 +323,8 @@ def test_list_positions():
 
 
 def test_close_position_deletes_that_symbol():
-    b, fake = client({("DELETE", "/v2/positions/BRK.B"): (200,
-                                                           fx("close_position_order.json"))})
+    reply = {**fx("close_position_order.json"), "symbol": "BRK.B"}
+    b, fake = client({("DELETE", "/v2/positions/BRK.B"): (200, reply)})
     out = b.close_position("brk.b")
     assert fake.requests[-1].full_url == PAPER_BASE_URL + "/v2/positions/BRK.B"
     assert out["side"] == "sell" and out["type"] == "market"

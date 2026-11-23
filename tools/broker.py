@@ -20,9 +20,24 @@ What Alpaca documents (read 2026-11-13, docs.alpaca.markets), and what it does n
   - Prices: limit and stop prices at or above $1.00 take at most 2 decimals (4 below $1).
     Prices and quantities are sent as strings. This client sends whole cents and refuses
     prices below $1.00.
-  - client_order_id: at most 128 characters; allowed characters and duplicate handling are
-    not documented. Looked up with GET /v2/orders:by_client_order_id; a 404 for an unknown
-    id is not documented (this client reads 404 as "not found": to confirm on paper, #154).
+  - client_order_id: at most 128 characters; allowed characters are not documented. Looked
+    up with GET /v2/orders:by_client_order_id.
+
+What the paper probe found (pipeline/probe_broker.py, 2026-11-23, #196; the recorded replies
+are tests/fixtures/broker/):
+  - An unknown client_order_id answers 404 (code 40410000): read as None.
+  - A lookup with nested=true shows the bracket's two legs, each with an Alpaca-made
+    client_order_id. Before the entry fills both legs are "held"; after it fills the
+    take-profit is "new" and the stop stays "held" (Alpaca monitors it and triggers it at its
+    price).
+  - The open-orders listing (status=open, nested) then shows ONLY the take-profit leg: the
+    held stop is missing. Find a position's stop by looking up its entry with the legs.
+  - A resend of the same client_order_id answers 422 with code 40010001, a general
+    validation code: confirm by lookup before calling it a duplicate.
+  - Closing a position while its legs are open answers 403, code 40310000 (qty_available
+    0); cancelling the legs first works.
+  - The closing order (DELETE /v2/positions/{symbol}) is a simple market sell with
+    order_class "": simple orders are read as order_class "simple".
   - Partial fills: the take-profit and stop-loss legs "won't be active until the first order
     is completely filled", and "if any one of the orders is canceled, any remaining open
     order in the group is canceled". How the legs are sized after a PARTIAL entry fill whose
@@ -45,10 +60,13 @@ come from ALPACA_API_KEY / ALPACA_SECRET_KEY. Like every data request, the defau
 honours HTTPS_PROXY (tools/http.py): a proxy set there sees the key headers.
 
 Replies are parsed strictly: an order reply must carry a known status and side and must match
-the request (client_order_id, symbol and, for a submit, side, qty and order class), so a
-surprise never reads as a fill. Position fields that only describe the position
-(market_value, unrealized_pl, current_price, qty_available) are optional, so the exit path
-(listing positions to flatten them) never fails on them.
+the request (client_order_id, symbol and, for a submit, side, qty, the bracket class and both
+legs at the plan's target and stop: bracket_legs_problem), so a surprise never reads as a fill
+or as a protected entry. A simple order (order_class missing, "" or "simple") is accepted
+only as a market or limit order: the closing order of close_position and what listings show.
+Position fields that only describe the position (market_value, unrealized_pl, current_price,
+qty_available) are optional, so the exit path (listing positions to flatten them) never fails
+on them.
 """
 from __future__ import annotations
 
@@ -75,17 +93,30 @@ ORDER_STATUSES = frozenset({
     "pending_cancel", "pending_replace", "accepted", "pending_new", "accepted_for_bidding",
     "stopped", "rejected", "suspended", "calculated", "held",
 })
+# Statuses after which an order does nothing more today. Anything else (stopped: a trade is
+# guaranteed; suspended; pending_*; held) counts as still working, so a doubt never reads as
+# "the close is done" and invites a second sell.
+FINAL_STATUSES = frozenset({"filled", "canceled", "expired", "replaced", "rejected",
+                            "done_for_day"})
 
 
 class BrokerError(RuntimeError):
     """A broker call failed or was refused. `status` is the HTTP status (None for a network
-    failure or a refusal before any call); `code` is Alpaca's numeric error code, if any."""
+    failure or a refusal before any call); `code` is Alpaca's numeric error code, if any.
+
+    `may_have_acted` is True when the request may have reached Alpaca and been carried out
+    although this call failed: a timeout, a network error, a 5xx or another unexpected
+    status, or a reply that could not be read (the probe, #196: a close that FILLED while its
+    reply was refused here). After such an error, check the broker's state before acting
+    again (check_close for a close); never repeat the request blindly. A 4xx refusal and a
+    refusal before any request are False."""
 
     def __init__(self, message: str, *, status: int | None = None,
-                 code: int | None = None) -> None:
+                 code: int | None = None, may_have_acted: bool = False) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
+        self.may_have_acted = may_have_acted
 
 
 # ----------------------------------------------------------------------------------------
@@ -184,6 +215,25 @@ def _text(value: object, what: str, *, optional: bool = False) -> str | None:
     return value[:128]
 
 
+SIMPLE_CLASSES = (None, "", "simple")  # how Alpaca writes a simple order's class
+SIMPLE_TYPES = frozenset({"market", "limit"})
+
+
+def _order_class(reply: dict) -> str:
+    """The order's class. A simple order is written with order_class missing, null, "" (the
+    closing order of DELETE /v2/positions/{symbol}, seen on paper, #196) or "simple"; it is
+    read as "simple" when it is a market or limit order, and refused otherwise. Any other
+    class is passed through as written; the callers that need a bracket check for one."""
+    cls = reply.get("order_class")
+    if cls in SIMPLE_CLASSES:
+        if reply.get("type") not in SIMPLE_TYPES:
+            raise BrokerError("broker reply is a simple order of an unexpected type")
+        return "simple"
+    if not isinstance(cls, str):
+        raise BrokerError("broker reply has an unknown order_class")
+    return cls[:32]
+
+
 def parse_order(reply: object) -> dict:
     """The fields of an Alpaca order this system uses, prices and quantities as Decimal
     strings. Raises BrokerError for a reply without an id, client_order_id, symbol, side,
@@ -198,6 +248,7 @@ def parse_order(reply: object) -> dict:
         raise BrokerError("broker reply legs is not a list")
     if reply.get("side") not in ("buy", "sell"):
         raise BrokerError("broker reply has an unknown order side")
+    order_class = _order_class(reply)
 
     def money(key: str) -> str | None:
         v = _dec(reply.get(key), key, optional=True)
@@ -210,7 +261,7 @@ def parse_order(reply: object) -> dict:
         "side": _text(reply.get("side"), "side"),
         "status": status,
         "type": _text(reply.get("type"), "type"),
-        "order_class": _text(reply.get("order_class"), "order_class", optional=True),
+        "order_class": order_class,
         "qty": str(_dec(reply.get("qty"), "qty")),
         "filled_qty": str(_dec(reply.get("filled_qty"), "filled_qty")),
         "filled_avg_price": money("filled_avg_price"),
@@ -225,6 +276,36 @@ def parse_order(reply: object) -> dict:
         "failed_at": _text(reply.get("failed_at"), "failed_at", optional=True),
         "legs": [parse_order(leg) for leg in legs] if legs else [],
     }
+
+
+def bracket_legs_problem(order: dict, body: dict) -> str | None:
+    """Why a parsed entry `order` is not the bracket `body` (bracket_request) asked for, by
+    its legs, or None. Exactly two legs, both bracket sells of the full quantity in the
+    symbol: one LIMIT at the take-profit price, one STOP at the stop price. Their status is
+    not checked here (they are "held" until the entry fills, #196)."""
+    if not isinstance(order, dict):
+        return "the entry reply is not an order"
+    legs = order.get("legs")
+    if order.get("order_class") != "bracket" or not isinstance(legs, list) or len(legs) != 2:
+        return "the entry is not a bracket with both legs"
+    by_type = {leg.get("type"): leg for leg in legs if isinstance(leg, dict)}
+    tp, sl = by_type.get("limit"), by_type.get("stop")
+    if tp is None or sl is None:
+        return "the bracket does not have a take-profit limit leg and a stop leg"
+    try:
+        qty = Decimal(body["qty"])
+        for leg in (tp, sl):
+            if (leg.get("side") != "sell" or leg.get("symbol") != body["symbol"]
+                    or leg.get("order_class") != "bracket"
+                    or Decimal(str(leg.get("qty"))) != qty):
+                return "a bracket leg is not a sell of the full quantity"
+        if Decimal(str(tp.get("limit_price"))) != Decimal(body["take_profit"]["limit_price"]):
+            return "the take-profit leg is not at the target price"
+        if Decimal(str(sl.get("stop_price"))) != Decimal(body["stop_loss"]["stop_price"]):
+            return "the stop leg is not at the stop price"
+    except (InvalidOperation, ValueError, TypeError, KeyError):
+        return "a bracket leg has an unreadable price or quantity"
+    return None
 
 
 def parse_position(reply: object) -> dict:
@@ -311,29 +392,36 @@ class AlpacaPaperBroker:
                 raw_err = exc.read(4096) if exc.fp is not None else b""
             except OSError:
                 raw_err = b""
+            # a 4xx is Alpaca refusing the request; a 5xx may come after it acted
             raise BrokerError(f"{where} failed: HTTP {exc.code}", status=exc.code,
-                              code=_error_code(raw_err)) from None
+                              code=_error_code(raw_err),
+                              may_have_acted=not 400 <= exc.code < 500) from None
         except TimeoutError:
-            raise BrokerError(f"{where} timed out") from None
+            raise BrokerError(f"{where} timed out", may_have_acted=True) from None
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                raise BrokerError(f"{where} timed out") from None
+                raise BrokerError(f"{where} timed out", may_have_acted=True) from None
             raise BrokerError(
-                f"{where} failed: network error ({type(exc.reason).__name__})") from None
+                f"{where} failed: network error ({type(exc.reason).__name__})",
+                may_have_acted=True) from None
         except http.client.HTTPException as exc:  # IncompleteRead, BadStatusLine: not OSError
-            raise BrokerError(f"{where}: incomplete response ({type(exc).__name__})") from None
+            raise BrokerError(f"{where}: incomplete response ({type(exc).__name__})",
+                              may_have_acted=True) from None
         except OSError as exc:
-            raise BrokerError(f"{where} failed: network error ({type(exc).__name__})") from None
+            raise BrokerError(f"{where} failed: network error ({type(exc).__name__})",
+                              may_have_acted=True) from None
         if status not in ok:
-            raise BrokerError(f"{where} failed: unexpected HTTP {status}", status=status)
+            raise BrokerError(f"{where} failed: unexpected HTTP {status}", status=status,
+                              may_have_acted=True)
         if len(raw) > MAX_BODY_BYTES:
-            raise BrokerError(f"{where}: reply too large")
+            raise BrokerError(f"{where}: reply too large", status=status, may_have_acted=True)
         if not raw.strip():
             return None
         try:
             return json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError, RecursionError):
-            raise BrokerError(f"{where}: reply is not JSON") from None
+            raise BrokerError(f"{where}: reply is not JSON", status=status,
+                              may_have_acted=True) from None
 
     def _require_verified(self) -> None:
         if not self._verified:
@@ -374,7 +462,12 @@ class AlpacaPaperBroker:
         """POST /v2/orders with bracket_request(order, client_order_id); the parsed order."""
         self._require_verified()
         body = bracket_request(order, client_order_id)
-        out = parse_order(self._call("POST", "/v2/orders", body=body))
+        reply = self._call("POST", "/v2/orders", body=body)
+        # Alpaca answered 200: from here on, any doubt means the order may exist
+        try:
+            out = parse_order(reply)
+        except BrokerError as exc:
+            raise BrokerError(str(exc), status=200, may_have_acted=True) from None
         expected = {"client_order_id": client_order_id, "symbol": body["symbol"], "side": "buy",
                     "qty": body["qty"], "order_class": "bracket"}
         got = {k: out[k] for k in expected}
@@ -382,12 +475,17 @@ class AlpacaPaperBroker:
         if got["qty"] and Decimal(got["qty"]) == Decimal(body["qty"]):
             got["qty"] = body["qty"]
         if got != expected:
-            raise BrokerError("broker reply does not match the order sent")
+            raise BrokerError("broker reply does not match the order sent", status=200,
+                              may_have_acted=True)
+        problem = bracket_legs_problem(out, body)  # strict: our entry always has both legs
+        if problem:
+            raise BrokerError(f"broker reply does not match the order sent: {problem}",
+                              status=200, may_have_acted=True)
         return out
 
     def get_order_by_client_id(self, client_order_id: str) -> dict | None:
-        """The order with this client_order_id, or None when Alpaca answers 404 (assumed to
-        mean "no such order": not documented, to confirm on paper)."""
+        """The order with this client_order_id, legs nested, or None when Alpaca answers 404
+        ("no such order": confirmed on paper, #196)."""
         self._require_verified()
         if not isinstance(client_order_id, str) or not CLIENT_ORDER_ID.fullmatch(client_order_id):
             raise BrokerError("client_order_id must be 1-128 letters, digits, '-' or '_'")
@@ -426,13 +524,67 @@ class AlpacaPaperBroker:
         return [parse_position(p) for p in reply]
 
     def close_position(self, symbol: str) -> dict:
-        """DELETE /v2/positions/{symbol}: a market order closing the whole position."""
+        """DELETE /v2/positions/{symbol}: the simple order closing the whole position (on
+        paper, #196: a market sell with order_class ""). Alpaca refuses (403, 40310000,
+        qty_available 0) while the position's bracket legs are open: cancel them first.
+
+        A reply that cannot be read, or is not a simple sell in the symbol, raises BrokerError
+        with may_have_acted=True: Alpaca answered 200, so the close may well be working (on
+        paper it FILLED while its reply was refused here). Then call check_close; never send
+        the close again without it."""
         self._require_verified()
         sym = normalize_symbol(symbol)
         if sym is None:
             raise BrokerError("symbol is not a valid ticker")
         path = f"/v2/positions/{urllib.parse.quote(sym, safe='.')}"
-        return parse_order(self._call("DELETE", path))
+        reply = self._call("DELETE", path)
+        try:
+            out = parse_order(reply)
+        except BrokerError as exc:
+            raise BrokerError(f"DELETE {path}: {exc}; the close may have been placed",
+                              status=200, may_have_acted=True) from None
+        if out["symbol"] != sym or out["side"] != "sell" or out["order_class"] != "simple":
+            raise BrokerError(f"DELETE {path}: the reply is not a simple sell in {sym}; the "
+                              "close may have been placed", status=200, may_have_acted=True)
+        return out
+
+    def list_orders(self, symbol: str, *, limit: int = 50) -> list[dict]:
+        """The symbol's most recent orders in any status, newest first, legs nested
+        (GET /v2/orders?status=all&symbols=...). Read only."""
+        self._require_verified()
+        sym = normalize_symbol(symbol)
+        if sym is None:
+            raise BrokerError("symbol is not a valid ticker")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise BrokerError("limit must be a whole number from 1 to 500")
+        reply = self._call("GET", "/v2/orders",
+                           query={"status": "all", "symbols": sym, "nested": "true",
+                                  "direction": "desc", "limit": str(limit)})
+        if not isinstance(reply, list):
+            raise BrokerError("broker reply is not a list of orders")
+        return [o for o in (parse_order(x) for x in reply) if o["symbol"] == sym]
+
+    def check_close(self, symbol: str) -> dict:
+        """What became of a close whose outcome is unclear (a BrokerError with
+        may_have_acted), from the broker's own state. Read only: it never sends anything.
+
+          {"state": "closed" | "closing" | "open", "position": <parsed> | None,
+           "close_orders": [the symbol's recent simple sell orders, newest first]}
+
+        "closed": no position in the symbol. "closing": the position is still there and a
+        simple sell is working (wait for it; do not close again). "open": the position is
+        there and no simple sell is working, so the close did not take: a new close is an
+        informed decision for the caller, never automatic here."""
+        self._require_verified()
+        sym = normalize_symbol(symbol)
+        if sym is None:
+            raise BrokerError("symbol is not a valid ticker")
+        position = next((p for p in self.list_positions() if p["symbol"] == sym), None)
+        closes = [o for o in self.list_orders(sym)
+                  if o["side"] == "sell" and o["order_class"] == "simple"]
+        working = [o for o in closes if o["status"] not in FINAL_STATUSES]
+        state = "closed" if position is None else "closing" if working else "open"
+        return {"state": state, "position": position, "close_orders": closes}
 
     def close_all(self) -> list[dict]:
         """DELETE /v2/positions?cancel_orders=true: cancel every open order, then close every

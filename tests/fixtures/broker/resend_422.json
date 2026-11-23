@@ -1,0 +1,10 @@
+{
+ "what": "the same client_order_id sent again",
+ "method": "POST",
+ "path": "/v2/orders",
+ "status": 422,
+ "body": {
+  "code": 40010001,
+  "message": "client_order_id must be unique"
+ }
+}
