@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import buy from "../../../fixtures/api/decision-buy-approved.json";
 import missing from "../../../fixtures/api/decision-missing-record.json";
+import declined from "../../../fixtures/api/decision-declined.json";
+import notAnswered from "../../../fixtures/api/decision-not-answered.json";
 import failed from "../../../fixtures/api/decision-pass-analyst-failed.json";
 import fatal from "../../../fixtures/api/decision-pass-fatal-bear.json";
 import skipped from "../../../fixtures/api/decision-skipped.json";
@@ -142,6 +144,36 @@ describe("Decision detail", () => {
     await screen.findByText("In short");
     fireEvent.click(screen.getByRole("button", { name: /Read the full debate/ }));
     expect(within(step("debate")).getByText(/BEAR · round 1/)).toHaveTextContent("call failed");
+  });
+
+  it("a typed decline shows Declined by you, in a neutral style, never blocked", async () => {
+    await open(declined);
+    await screen.findByText("In short");
+    const state = within(step("approve_and_log")).getByText("Declined by you");
+    expect(state).toHaveClass("state-declined");
+    expect(state).not.toHaveClass("state-blocked");
+    expect(step("approve_and_log")).toHaveTextContent("the answer was not yes");
+    expect(step("approve_and_log")).toHaveTextContent("closed console also counts");
+    expect(within(step("approve_and_log")).queryByText("blocked")).not.toBeInTheDocument();
+    expect(document.querySelector(".state-blocked")).toBeNull();
+    expect(screen.getByText(declined.in_short)).toBeInTheDocument();
+  });
+
+  it("no answer in time shows Not answered in time, not Declined by you", async () => {
+    await open(notAnswered);
+    await screen.findByText("In short");
+    const state = within(step("approve_and_log")).getByText("Not answered in time");
+    expect(state).toHaveClass("state-unanswered");
+    expect(state).not.toHaveClass("state-blocked");
+    expect(screen.queryByText("Declined by you")).not.toBeInTheDocument();
+    expect(step("approve_and_log")).toHaveTextContent("Not answered in time:");
+    expect(document.querySelector(".state-blocked")).toBeNull();
+  });
+
+  it("blocked is still the code refusing (a fatal-Bear forced pass keeps it)", async () => {
+    await open(fatal);
+    await screen.findByText("In short");
+    expect(document.querySelector(".state-blocked")).not.toBeNull();
   });
 
   it("a skip stops at the event check", async () => {

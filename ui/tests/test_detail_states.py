@@ -68,7 +68,8 @@ def test_failed_rows_show_no_ticket_and_no_risk_verdict(history_rows, kind):
     assert "PASS" not in s["order_ticket"]["line"]
     if kind == "r-lost":
         assert s["approve_and_log"]["state"] == "failed"
-        assert "decline could not be recorded" in s["approve_and_log"]["line"]
+        assert "Not answered in time" in s["approve_and_log"]["line"]
+        assert "could not be recorded" in s["approve_and_log"]["line"]
     else:
         assert s["approve_and_log"]["state"] == "not_recorded"
 

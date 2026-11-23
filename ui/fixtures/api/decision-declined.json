@@ -1,0 +1,222 @@
+{
+  "run_id": "RUN_ID",
+  "symbol": "ABCD",
+  "at": "2026-11-03T12:00:40-05:00",
+  "day": "2026-11-03",
+  "outcome": "BUY",
+  "why": {
+    "code": "declined",
+    "text": "Declined by you: the answer was not yes (an empty answer or a closed console also counts), so nothing was approved",
+    "detail": "not approved"
+  },
+  "order_status": null,
+  "in_short": "The ticket was for 13 shares of ABCD. Declined by you: the answer was not yes (an empty answer or a closed console also counts), so nothing was approved.",
+  "numbers": {
+    "shares": 13,
+    "entry": "103.10",
+    "limit_price": "103.21",
+    "stop": "99.61",
+    "target": "106.59",
+    "max_loss": "46.80"
+  },
+  "steps": [
+    {
+      "n": 1,
+      "key": "scan",
+      "title": "Scan",
+      "actor": "code",
+      "state": "done",
+      "line": "A run_day scan listed it at 11:59 ET.",
+      "details": {
+        "scan_at": "2026-11-03T11:59:40-05:00"
+      }
+    },
+    {
+      "n": 2,
+      "key": "event_check",
+      "title": "Event check",
+      "actor": "code",
+      "state": "done",
+      "line": "Proven to report earnings (last SEC 8-K item 2.02 filed 2026-10-04). The earnings and halt check itself is at step 7.",
+      "details": {
+        "coverage": {
+          "covered": true,
+          "last_item_202": "2026-10-04",
+          "reason": null,
+          "fetch_failed": false
+        }
+      }
+    },
+    {
+      "n": 3,
+      "key": "analysts",
+      "title": "Analysts",
+      "actor": "ai",
+      "state": "done",
+      "line": "Chart bullish, News bullish, Finances bullish.",
+      "details": {
+        "analysts": [
+          {
+            "agent": "technical",
+            "name": "Chart",
+            "ok": true,
+            "reason_code": null,
+            "stance": "bullish",
+            "confidence": 0.7,
+            "evidence": [
+              {
+                "point": "breakout above the opening range",
+                "source": "get_bars"
+              }
+            ]
+          },
+          {
+            "agent": "sentiment",
+            "name": "News",
+            "ok": true,
+            "reason_code": null,
+            "stance": "bullish",
+            "confidence": 0.7,
+            "evidence": [
+              {
+                "point": "two positive headlines",
+                "source": "get_news"
+              }
+            ]
+          },
+          {
+            "agent": "fundamentals",
+            "name": "Finances",
+            "ok": true,
+            "reason_code": null,
+            "stance": "bullish",
+            "confidence": 0.7,
+            "evidence": [
+              {
+                "point": "revenue grew",
+                "source": "get_fundamentals"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "n": 4,
+      "key": "plans",
+      "title": "Plans",
+      "actor": "code",
+      "state": "done",
+      "line": "1 plan worked out by code. The Trader picked plan-1.",
+      "details": {
+        "plans": [
+          {
+            "plan_id": "plan-1",
+            "setup": "orb",
+            "entry": "103.10",
+            "stop": "99.61",
+            "target": "106.59",
+            "reward_to_risk": "1.00",
+            "chosen": true
+          }
+        ]
+      }
+    },
+    {
+      "n": 5,
+      "key": "debate",
+      "title": "Debate",
+      "actor": "ai",
+      "state": "done",
+      "line": "1 round. The Bear found no deal-breaker.",
+      "details": {
+        "rounds_run": 1,
+        "rounds_planned": 1,
+        "fatal": false,
+        "stopped_early": false,
+        "all_ok": true,
+        "bull": "The breakout holds above the opening range.",
+        "bear": "thin volume",
+        "turns": [
+          {
+            "round": 1,
+            "side": "bull",
+            "ok": true,
+            "argument": "The breakout holds above the opening range.",
+            "points": [
+              "technical report is bullish"
+            ],
+            "fatal": null
+          },
+          {
+            "round": 1,
+            "side": "bear",
+            "ok": true,
+            "argument": null,
+            "points": [
+              "thin volume",
+              "late in the move",
+              "one analyst only"
+            ],
+            "fatal": false
+          }
+        ]
+      }
+    },
+    {
+      "n": 6,
+      "key": "trader",
+      "title": "Trader",
+      "actor": "ai",
+      "state": "done",
+      "line": "BUY plan-1, 0.7 sure.",
+      "details": {
+        "action": "BUY",
+        "plan_id": "plan-1",
+        "confidence": 0.7,
+        "forced_pass": null,
+        "reasoning": "technical is bullish; the bear's objections are met"
+      }
+    },
+    {
+      "n": 7,
+      "key": "order_ticket",
+      "title": "Order ticket",
+      "actor": "code",
+      "state": "done",
+      "line": "Buy 13 shares with a limit of 103.21, stop 99.61, target 106.59. Risk check: PASS; earnings and halt: CLEAR.",
+      "details": {
+        "gate": {
+          "status": "CLEAR",
+          "reason": "no earnings through 2026-11-10; no halt"
+        },
+        "risk": "PASS",
+        "risk_reasons": [],
+        "stage": null,
+        "limit_price": "103.21",
+        "decided_by": "max_loss_per_trade",
+        "from_recheck": false
+      }
+    },
+    {
+      "n": 8,
+      "key": "approve_and_log",
+      "title": "Approve and log",
+      "actor": "you",
+      "state": "declined",
+      "line": "Declined by you: the answer was not yes (an empty answer or a closed console also counts), so nothing was approved.",
+      "details": {
+        "status": "declined",
+        "approved_at": null,
+        "expires_at": null,
+        "recheck_at": null,
+        "plan_age_s": null,
+        "timed_out": false,
+        "events": []
+      }
+    }
+  ],
+  "order_events": [],
+  "record_available": true,
+  "problems": []
+}

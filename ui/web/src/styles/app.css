@@ -203,6 +203,8 @@ table.decisions a { text-decoration: none; }
 .state-blocked, .state-failed { background: rgba(255, 179, 107, 0.18); color: var(--orange); }
 .state-skipped, .state-not_reached { border: 1px dashed var(--border2); color: var(--muted); }
 .state-not_recorded { border: 1px dashed var(--border2); color: var(--faint); }
+/* a human answer, or none in time: neutral, never the blocked orange */
+.state-declined, .state-unanswered { background: var(--panel2); color: var(--text2); border: 1px solid var(--border2); }
 .analyst { flex: 1 1 260px; gap: 6px; }
 .analyst-head { display: flex; align-items: baseline; gap: 8px; }
 .analyst-head .stance, .analyst-head .state { margin-left: auto; }

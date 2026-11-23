@@ -14,6 +14,8 @@ import type {
 const STATE_LABEL: Record<StepState, string> = {
   done: "done", blocked: "blocked", skipped: "skipped", not_reached: "not reached",
   failed: "failed", not_recorded: "not recorded",
+  // the badge and the line both say it on purpose: History shows the line without a badge
+  declined: "Declined by you", unanswered: "Not answered in time",
 };
 const STANCES = ["bullish", "bearish", "neutral"];
 const OUTCOME_LABEL = { BUY: "BUY", PASS: "PASS", SKIPPED: "Skipped", FAILED: "Failed" } as const;
