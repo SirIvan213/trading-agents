@@ -24,3 +24,24 @@ export async function getJson<T>(path: `/api/${string}`): Promise<T> {
   }
   return (await response.json()) as T;
 }
+
+export type Polled<T> = { changed: true; data: T; etag: string | null } | { changed: false };
+
+/** A GET that sends If-None-Match: a 304 means nothing changed since `etag`. Sending the
+ * header makes the browser skip its own cache (Fetch standard), so a 304 reaches here. */
+export async function pollJson<T>(path: `/api/${string}`, etag: string | null): Promise<Polled<T>> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (etag) headers["If-None-Match"] = etag;
+  let response: Response;
+  try {
+    response = await fetch(path, { method: "GET", headers, cache: "no-store" });
+  } catch {
+    throw new ApiError("The local UI server did not answer. Is python -m ui.api running?");
+  }
+  if (response.status === 304) return { changed: false };
+  if (!response.ok) {
+    throw new ApiError(`The local UI server answered ${response.status} for ${path}.`,
+      response.status);
+  }
+  return { changed: true, data: (await response.json()) as T, etag: response.headers.get("ETag") };
+}

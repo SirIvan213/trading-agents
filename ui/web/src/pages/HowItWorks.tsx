@@ -154,10 +154,12 @@ function Page({ data }: { data: Explainer }) {
             </a>
           ))}
         </div>
-        <p className="faint small">
-          Anything with a <span className="planned-sample">dashed outline</span> is planned but
-          not built yet.
-        </p>
+        {data.screens.some((p) => !p.built) && (
+          <p className="faint small">
+            Anything with a <span className="planned-sample">dashed outline</span> is planned
+            but not built yet.
+          </p>
+        )}
       </section>
 
       <section aria-labelledby="gl-h" className="stack">

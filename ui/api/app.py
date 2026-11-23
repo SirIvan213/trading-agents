@@ -1,5 +1,5 @@
-"""The read-only API app: GET /api/health (UI-1), GET /api/explainer (UI-2), and the built
-frontend (ui/web/dist) on the same origin. The other pages' routes come in UI-3 to UI-7.
+"""The read-only API app: GET /api/health (UI-1), /api/explainer (UI-2), /api/decisions
+(UI-3, UI-4), /api/live (UI-5), and the built frontend (ui/web/dist) on the same origin.
 
 Rules (CLAUDE.md, UI track): GET only; served on 127.0.0.1 only (ui/api/__main__.py); Host
 must be 127.0.0.1 or localhost (blocks DNS rebinding from a web page); no docs or OpenAPI
@@ -11,6 +11,8 @@ its own origin: no CDN fonts, analytics or telemetry can load even if a dependen
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
@@ -19,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi import Path as PathParam
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
@@ -27,8 +29,9 @@ from journal.log import JournalError
 from ui.api.detail import RUN_ID_PATTERN, decision_detail, records_dir
 from ui.api.explainer import explainer
 from ui.api.history import FILTERS, decisions, load_reasons
+from ui.api.live import live
 from ui.api.paths import Paths
-from ui.api.readers.config import read_limits
+from ui.api.readers.config import read_limits, read_run_day_config
 from ui.api.readers.journal_snapshot import JournalReader, SnapshotJournal
 from ui.api.readers.state import (
     HEARTBEAT_FUTURE_S,
@@ -51,6 +54,16 @@ SECURITY_HEADERS = {"Content-Security-Policy": CSP, "X-Content-Type-Options": "n
 NOT_BUILT = ("The frontend is not built. Build it with:\n"
              "  cd ui/web && npm ci && npm run build\n"
              "The API is at /api/health and /api/explainer.\n")
+
+
+def etag(body: dict) -> str:
+    """A strong ETag over the body without its request time and the heartbeat's age (both
+    change every second; a change that matters, such as turning stale, changes the rest)."""
+    stable = {k: v for k, v in body.items() if k != "as_of"}
+    stable["run_day"] = {k: v for k, v in body["run_day"].items() if k != "age_s"}
+    digest = hashlib.sha256(json.dumps(stable, sort_keys=True, ensure_ascii=False)
+                            .encode("utf-8")).hexdigest()
+    return f'"{digest[:32]}"'
 
 
 def _now() -> datetime:
@@ -103,6 +116,19 @@ def create_app(paths: Paths | None = None, *,
         if body is None:
             raise HTTPException(status_code=404, detail="no such decision")
         return body
+
+    @app.get("/api/live")
+    def get_live(request: Request) -> Response:
+        """The Live run page (ui/api/live.py), polled every 2 s. The ETag covers everything
+        but the request time and the heartbeat's age, so an unchanged run answers 304."""
+        body = live(paths, reader.read(), clock().astimezone(NY),
+                    limits=read_limits(paths.config_dir),
+                    run_cfg=read_run_day_config(paths.config_dir), reasons=reasons)
+        tag = etag(body)
+        headers = {"ETag": tag, "Cache-Control": "no-cache"}
+        if request.headers.get("if-none-match") == tag:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(body, headers=headers)
 
     @app.get("/api/health")
     def health() -> dict:

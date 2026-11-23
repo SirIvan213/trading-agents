@@ -1,0 +1,199 @@
+{
+  "as_of": "2026-11-23T10:12:00-05:00",
+  "et_date": "2026-11-23",
+  "market": {
+    "state": "open",
+    "text": "Market open",
+    "open": true,
+    "opens": "09:30",
+    "closes": "16:00"
+  },
+  "status": {
+    "kind": "blocked",
+    "sentence": "New trades are blocked: run_day's last heartbeat was at 10:10:25 ET, more than 90 s ago: it may have stopped",
+    "reasons": [
+      {
+        "code": "heartbeat_stale",
+        "text": "run_day's last heartbeat was at 10:10:25 ET, more than 90 s ago: it may have stopped"
+      }
+    ]
+  },
+  "key_limits": [
+    {
+      "key": "decisions",
+      "label": "AI decisions today",
+      "unit": "count",
+      "used": "3",
+      "limit": "10",
+      "reached": false,
+      "pct": 30,
+      "note": null
+    },
+    {
+      "key": "money_at_risk",
+      "label": "Money at risk today",
+      "unit": "usd",
+      "used": "15.91",
+      "limit": "150.00",
+      "reached": false,
+      "pct": 10,
+      "note": null
+    },
+    {
+      "key": "open_positions",
+      "label": "Open positions",
+      "unit": "count",
+      "used": "1",
+      "limit": "2",
+      "reached": false,
+      "pct": 50,
+      "note": null
+    }
+  ],
+  "caps": [
+    {
+      "key": "tokens",
+      "label": "AI usage (tokens)",
+      "unit": "tokens",
+      "used": "214000",
+      "limit": "600000",
+      "reached": false,
+      "pct": 35,
+      "note": "12000 more reserved for calls in progress"
+    },
+    {
+      "key": "av_calls",
+      "label": "Earnings calendar calls (Alpha Vantage)",
+      "unit": "count",
+      "used": "1",
+      "limit": "5",
+      "reached": false,
+      "pct": 20,
+      "note": null
+    },
+    {
+      "key": "fmp_requests",
+      "label": "FMP data calls",
+      "unit": "count",
+      "used": "1",
+      "limit": "3",
+      "reached": false,
+      "pct": 33,
+      "note": null
+    },
+    {
+      "key": "trades",
+      "label": "Trades today",
+      "unit": "count",
+      "used": "1",
+      "limit": "3",
+      "reached": false,
+      "pct": 33,
+      "note": null
+    }
+  ],
+  "ceilings": {
+    "max_decisions": 10,
+    "max_tokens": 600000,
+    "max_fmp_requests": 3,
+    "max_av_calls": 5
+  },
+  "ticket": null,
+  "today": [
+    {
+      "symbol": "AMD",
+      "outcome": "NO_OUTCOME",
+      "why": "counted as today's decision, but no outcome was recorded",
+      "order_status": null,
+      "run_id": null,
+      "at": null
+    },
+    {
+      "symbol": "DIS",
+      "outcome": "SKIPPED",
+      "why": "Not proven to report earnings (no SEC 8-K item 2.02 in 100 days), so no AI time was spent",
+      "order_status": null,
+      "run_id": "r-dis",
+      "at": "2026-11-23T10:05:00-05:00"
+    },
+    {
+      "symbol": "KO",
+      "outcome": "PASS",
+      "why": "The Trader decided to pass",
+      "order_status": null,
+      "run_id": "r-ko",
+      "at": "2026-11-23T10:00:00-05:00"
+    },
+    {
+      "symbol": "NVDA",
+      "outcome": "BUY",
+      "why": "Approved in the terminal",
+      "order_status": {
+        "code": "submitted",
+        "text": "sent, fill not recorded"
+      },
+      "run_id": "r-nvda",
+      "at": "2026-11-23T09:45:00-05:00"
+    }
+  ],
+  "current": {
+    "symbol": "AMD",
+    "step": null,
+    "line": "deciding AMD",
+    "analysts": null,
+    "live": false
+  },
+  "positions": [
+    {
+      "symbol": "NVDA",
+      "run_id": "r-nvda",
+      "client_order_id": "ta-a7848cd31f85124e0a58bdd12477ce46",
+      "approved_at": "2026-11-23T09:45:00-05:00",
+      "qty": 6,
+      "filled_qty": 0,
+      "avg_price": null,
+      "stop": "243.77",
+      "target": "262.46",
+      "max_loss": "15.91",
+      "status": {
+        "code": "submitted",
+        "text": "sent, fill not recorded"
+      },
+      "unrealized": null
+    }
+  ],
+  "sources": {
+    "ok": true,
+    "summary": "All 3 sources OK",
+    "expanded": false,
+    "items": [
+      {
+        "name": "Prices (Alpaca)",
+        "ok": true,
+        "detail": "last scan ok at 09:40 ET"
+      },
+      {
+        "name": "Earnings calendar (Alpha Vantage)",
+        "ok": true,
+        "detail": "today's calendar is in (1 of 5 calls today)"
+      },
+      {
+        "name": "Earnings calendar (FMP, block-only)",
+        "ok": true,
+        "detail": "today's calendar is in (1 of 3 calls today)"
+      }
+    ]
+  },
+  "run_day": {
+    "heartbeat_at": "2026-11-23T10:10:25-05:00",
+    "age_s": 95.0,
+    "stale": true,
+    "future": false,
+    "phase": "deciding AMD",
+    "pid": 4242,
+    "started_at": "2026-11-23T09:25:00-05:00",
+    "last_scan_at": "2026-11-23T09:40:00-05:00",
+    "last_end": null
+  },
+  "problems": []
+}

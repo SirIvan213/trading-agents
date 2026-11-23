@@ -1,22 +1,4 @@
-// Pages not built yet: a plain "coming in UI-n" note, so nothing looks live that isn't.
-
-const PLANNED = {
-  live: { title: "Live run", pr: "UI-5", issue: 218 },
-} as const;
-
-export function Placeholder({ page, id }: { page: keyof typeof PLANNED; id?: string }) {
-  const p = PLANNED[page];
-  return (
-    <main className="page placeholder">
-      <h1>{p.title}</h1>
-      {id !== undefined && <p className="muted">Decision <code>{id}</code></p>}
-      <p className="planned-box">
-        This page is coming in {p.pr} (#{p.issue}). Nothing here reads live data yet.
-      </p>
-      <p><a href="#/">Back to How it works</a></p>
-    </main>
-  );
-}
+// A hash that matches no page.
 
 export function NotFound({ hash }: { hash: string }) {
   return (
