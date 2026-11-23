@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -177,7 +178,7 @@ def test_a_not_started_record_without_a_journal_row(paths):
     rewrite_record(paths, not_started)
     body = get(paths)
     s = steps(body)
-    assert "a daily cap stopped it before the analysts" in body["in_short"]
+    assert "it stopped before the analysts" in body["in_short"]
     for key in ("analysts", "plans", "debate", "trader", "order_ticket", "approve_and_log"):
         assert s[key]["state"] == "not_reached", key
 
@@ -297,3 +298,90 @@ def test_an_unknown_forced_pass_code_is_capped_and_made_visible(paths):
     rewrite_record(paths, lambda r: r["trader"].update(forced_pass="\u202e" + "z" * 500))
     line = steps(get(paths))["trader"]["line"]
     assert "\u202e" not in line and "⟨U+202E⟩" in line and len(line) < 200
+
+
+# ---- round 3: inputs JSON allows but the page cannot send, sizes, code strings ----
+
+def test_an_unpaired_surrogate_is_a_problem_not_a_500(paths):
+    write_case("buy_approved", paths.journal)
+    # json.dumps writes the lone surrogate as the JSON escape \ud800, which JSON allows
+    lone = chr(0xD800)
+    rewrite_record(paths, lambda r: r["analysts"]["technical"]["report"]["evidence"][0]
+                   .update(point=lone + " breakout"))
+    body = get(paths)
+    assert body["record_available"] is False
+    assert any("unpaired surrogate" in p["text"] for p in body["problems"])
+
+
+def test_an_integer_too_long_to_parse_is_a_problem_not_a_500(paths):
+    write_case("buy_approved", paths.journal)
+    record_file(paths).write_text('{"schema": 1, "x": ' + "9" * 5000 + "}", encoding="utf-8")
+    body = get(paths)
+    assert any("not valid JSON" in p["text"] for p in body["problems"])
+
+
+def test_a_record_over_the_size_limit_is_not_read(paths, monkeypatch):
+    write_case("buy_approved", paths.journal)
+    monkeypatch.setattr(dt, "MAX_RECORD_BYTES", 100)
+    body = get(paths)
+    assert body["record_available"] is False
+    assert any("too large" in p["text"] for p in body["problems"])
+
+
+def test_code_written_record_strings_are_capped_and_made_visible(paths):
+    write_case("pass_analyst_failed", paths.journal)
+    long_rlo = "‮" + "q" * 5000
+
+    def odd(r):
+        r["analysts"]["technical"]["run"]["reason_code"] = long_rlo
+        r["outcome"]["status"] = "error"
+        r["error"] = {"type": long_rlo, "reason_code": long_rlo}
+        r["coverage"]["extra_key"] = {"nested": ["x" * 100000]}
+
+    rewrite_record(paths, odd)
+    body = get(paths)
+    s = steps(body)
+    assert len(s["analysts"]["line"]) < 300 and "‮" not in s["analysts"]["line"]
+    assert all(len(p["text"]) < 300 and "‮" not in p["text"] for p in body["problems"])
+    assert set(s["event_check"]["details"]["coverage"]) == {
+        "covered", "last_item_202", "reason", "fetch_failed"}
+
+
+@pytest.mark.parametrize("analyst", [{"report": None, "run": None},
+                                     {"report": None, "run": {"ok": True,
+                                                              "reason_code": None}}])
+def test_an_analyst_with_nothing_recorded_is_not_a_guessed_done(paths, analyst):
+    write_case("buy_approved", paths.journal)
+    rewrite_record(paths, lambda r: r["analysts"].update(technical=analyst))
+    s = steps(get(paths))
+    assert "Chart not recorded" in s["analysts"]["line"]
+    assert "None" not in s["analysts"]["line"]
+    assert s["analysts"]["details"]["analysts"][0]["ok"] is None
+
+
+def test_a_journal_entry_with_an_odd_shape_is_a_problem_not_a_500(paths):
+    write_case("buy_approved", paths.journal)
+    lines = paths.journal.read_text(encoding="utf-8").splitlines()
+    approved = json.loads(lines[1])
+    approved["verdict"] = {"verdict": "PASS", "reasons": {"not": "a list"}}
+    paths.journal.write_text(lines[0] + "\n" + json.dumps(approved) + "\n", encoding="utf-8")
+    body = get(paths)
+    assert any("journal entry has an unexpected shape" in p["text"] for p in body["problems"])
+    assert all(x["state"] == "not_recorded" for x in body["steps"])
+
+
+def test_a_not_started_record_names_its_error(paths):
+    write_case("buy_approved", paths.journal)
+
+    def not_started(r):
+        r["outcome"]["status"] = "not_started"
+        r["error"] = {"type": "ValueError", "reason_code": "exception"}
+
+    rewrite_record(paths, not_started)
+    assert any("did not start (ValueError, exception)" in p["text"]
+               for p in get(paths)["problems"])
+
+
+def test_the_detail_module_source_has_no_invisible_characters():
+    src = Path(dt.__file__).read_text(encoding="utf-8")
+    assert not dt._INVISIBLE.search(src)

@@ -15,6 +15,7 @@ const STATE_LABEL: Record<StepState, string> = {
   done: "done", blocked: "blocked", skipped: "skipped", not_reached: "not reached",
   failed: "failed", not_recorded: "not recorded",
 };
+const STANCES = ["bullish", "bearish", "neutral"];
 const OUTCOME_LABEL = { BUY: "BUY", PASS: "PASS", SKIPPED: "Skipped", FAILED: "Failed" } as const;
 
 type State =
@@ -68,7 +69,7 @@ function Ready({ d }: { d: Detail }) {
   const n = d.numbers;
   const keys = n ? [
     { label: "Shares", value: n.shares === null ? MISSING : String(n.shares), cls: "" },
-    { label: "Buy at", value: n.entry ?? MISSING, cls: "" },
+    { label: "Planned entry", value: n.entry ?? MISSING, cls: "" },
     { label: "Sell for a profit at", value: n.target ?? MISSING, cls: "teal" },
     { label: "Most it can lose", value: showMoney(n.max_loss), cls: "orange" },
   ] : [];
@@ -177,7 +178,7 @@ function Analysts({ list }: { list: AnalystView[] }) {
             <div className="analyst-head">
               <span className="strong">{a.name}</span>
               {a.ok === true && (
-                <span className={`stance stance-${a.stance}`}>{a.stance}</span>
+                <span className={`stance ${STANCES.includes(a.stance ?? "") ? `stance-${a.stance}` : ""}`}>{a.stance}</span>
               )}
               {a.ok === false && (
                 <span className="state state-failed">failed ({a.reason_code ?? "unknown"})</span>

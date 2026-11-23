@@ -41,10 +41,15 @@ from ui.api.history import decisions
 from ui.api.readers.journal_snapshot import JournalSnapshot
 from ui.api.readers.shared_open import read_bytes_shared
 
-RUN_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"  # no dot, slash or backslash: safe in a path
+# No dot, slash or backslash: safe in a path. Stricter than pipeline/records.py's RUN_ID, which
+# also allows dots; real run ids are secrets.token_hex(8) (pipeline/ledger.py). If the id
+# format ever gains dots, widen this (and ui/web/src/router.ts) on purpose.
+RUN_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}", re.ASCII)  # used with fullmatch
 DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 SCHEMA = 1
+MAX_RECORD_BYTES = 2_000_000  # a record is tens of KB; anything this big is not one
+SHAPE_ERRORS = (AttributeError, TypeError, KeyError, ValueError, IndexError)
 TEXT_CAP = 600
 SHORT_CAP = 240
 EVENT_FIELDS = ("limit_price", "filled_qty", "avg_price", "closed_by", "realized_pnl",
@@ -66,8 +71,8 @@ SKIP_TEXT = {"analyst_failed": "an analyst failed, so the Trader passes without 
 TICKET_STATUSES = frozenset({APPROVED, "declined", "refused_after_approval",
                              "changed_after_approval"})
 # make text that could visually reorder or hide content visible (untrusted model text)
-_INVISIBLE = re.compile("[\u0000-\u0008\u000b-\u001f\u007f-\u009f؜‎‏"
-                        "‪-‮⁦-⁩]")
+_INVISIBLE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f"
+                        r"\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
 
 # The record fields the page reads, and their types: the contract with pipeline/records.py
 # (ui/tests/test_detail.py checks the golden records in tests/fixtures/records/ against it).
@@ -243,17 +248,31 @@ def read_record(directory: Path, run_id: str, day_hint: str | None
         return None, {"level": "warn", "text": "no decision record was found for this "
                       "decision: the analysts, plans, debate and Trader are not shown"}
     try:
+        if path.stat().st_size > MAX_RECORD_BYTES:
+            return None, {"level": "error", "text": "the decision record is too large to be "
+                          "a record (over 2 MB): not read"}
         raw = read_bytes_shared(path)
     except OSError as exc:
         return None, {"level": "error",
                       "text": f"the decision record could not be read ({type(exc).__name__})"}
+    if len(raw) > MAX_RECORD_BYTES:
+        return None, {"level": "error", "text": "the decision record is too large to be "
+                      "a record (over 2 MB): not read"}
     try:
+        # ValueError covers JSONDecodeError, UnicodeDecodeError and Python's limit on the
+        # digits of an integer
         obj = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         return None, {"level": "error", "text": "the decision record is not valid JSON"}
     try:
         why = validate_record(obj, run_id)
-    except (TypeError, AttributeError, KeyError, ValueError, IndexError):
+        if why is None:
+            # a string JSON allows but UTF-8 cannot carry (an unpaired surrogate) would fail
+            # when the response is sent: refuse it here
+            json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        why = "it contains text that cannot be shown (an unpaired surrogate)"
+    except (*SHAPE_ERRORS, RecursionError):
         why = "a field has an unexpected shape"
     if why:
         return None, {"level": "error", "text": f"the decision record is unusable: {why}"}
@@ -290,16 +309,38 @@ def decision_detail(snap: JournalSnapshot, now: datetime, run_id: str, directory
         problems.append(rec_problem)
     try:
         body = _build(snap, run_id, row, record, reasons)
-    except (AttributeError, TypeError, KeyError, ValueError, IndexError):
+    except SHAPE_ERRORS:
         # a record the contract let through but the page cannot use: shown as a problem,
         # and the page is built from the journal alone (never a 500)
-        if record is None:
-            raise
-        problems.append({"level": "error", "text": "the decision record is unusable: a "
-                         "field has an unexpected shape"})
-        body = _build(snap, run_id, row, None, reasons)
+        body = None
+        if record is not None:
+            problems.append({"level": "error", "text": "the decision record is unusable: a "
+                             "field has an unexpected shape"})
+            try:
+                body = _build(snap, run_id, row, None, reasons)
+            except SHAPE_ERRORS:
+                body = None
+        if body is None:
+            problems.append({"level": "error", "text": "this decision's journal entry has an "
+                             "unexpected shape: its steps are not shown"})
+            body = _skeleton(run_id, row)
     body["problems"] = problems + body.pop("_problems")
     return body
+
+
+def _skeleton(run_id: str, row: dict | None) -> dict:
+    """The page when nothing could be built: every step not recorded, problems shown."""
+    return {
+        "run_id": run_id, "symbol": cap((row or {}).get("symbol"), 20),
+        "at": (row or {}).get("at"), "day": (row or {}).get("day"),
+        "outcome": (row or {}).get("outcome"), "why": (row or {}).get("why"),
+        "order_status": (row or {}).get("order_status"),
+        "in_short": "This decision could not be shown; see the problems.",
+        "numbers": None,
+        "steps": [_step(n, key, title, actor, "not_recorded", NOT_RECORDED)
+                  for n, key, title, actor in STEPS],
+        "order_events": [], "record_available": False, "_problems": [],
+    }
 
 
 def _build(snap: JournalSnapshot, run_id: str, row: dict | None, record: dict | None,
@@ -307,10 +348,11 @@ def _build(snap: JournalSnapshot, run_id: str, row: dict | None, record: dict | 
     extra: list[dict] = []
     status = ((record or {}).get("outcome") or {}).get("status")
     err = (record or {}).get("error")
-    if status in ("error", "stopped"):
-        what = "stopped on an error" if status == "error" else "was stopped by a daily cap"
-        why = (f"{err.get('type')}, {err.get('reason_code')}" if isinstance(err, dict)
-               else "type not recorded")
+    if status in ("error", "stopped", "not_started"):
+        what = {"error": "stopped on an error", "stopped": "was stopped by a daily cap",
+                "not_started": "did not start"}[status]
+        why = (f"{cap(err.get('type'), 40)}, {cap(err.get('reason_code'), 40)}"
+               if isinstance(err, dict) else "type not recorded")
         extra.append({"level": "error" if status == "error" else "warn",
                       "text": f"the decision {what} ({why})"})
     entry, timeout, events = _journal_parts(snap, run_id, row)
@@ -398,7 +440,7 @@ def _in_short(row: dict | None, numbers: dict | None, symbol: str | None,
     if row is None:
         status = ((record or {}).get("outcome") or {}).get("status")
         fixed = {"error": "it stopped on an error", "stopped": "a daily cap stopped it",
-                 "not_started": "a daily cap stopped it before the analysts",
+                 "not_started": "it stopped before the analysts (see the problems)",
                  "skipped": "it was skipped before any AI ran"}.get(str(status))
         tail = f" The record says {fixed}." if fixed else ""
         return f"The journal has no outcome for {sym}; only the decision record was found.{tail}"
@@ -412,7 +454,7 @@ def _in_short(row: dict | None, numbers: dict | None, symbol: str | None,
         return f"The decision on {sym} did not finish. {why}."
     shares = (numbers or {}).get("shares")
     status = (row.get("order_status") or {}).get("text")
-    lead = (f"The agents proposed buying {shares} shares of {sym}." if shares is not None
+    lead = (f"The ticket was for {shares} shares of {sym}." if shares is not None
             else f"The Trader chose a plan to buy {sym}.")
     tail = f" Order: {status}." if status else ""
     loss = (numbers or {}).get("max_loss")
@@ -463,11 +505,14 @@ def _event_step(record: dict | None, row: dict | None) -> dict:
     if isinstance(cov, dict):
         if cov.get("covered") is True:
             last = cap(cov.get("last_item_202"), 40)
+            filed = f" (last SEC 8-K item 2.02 filed {last})" if last else ""
             return _step(n, key, title, actor, "done",
-                         "Proven to report earnings (last SEC 8-K item 2.02 filed "
-                         f"{last}). The earnings and halt check itself is at step 7.",
-                         {"coverage": {k: cap(v, SHORT_CAP) if isinstance(v, str) else v
-                                       for k, v in cov.items()}})
+                         f"Proven to report earnings{filed}. The earnings and halt check "
+                         "itself is at step 7.",
+                         {"coverage": {
+                             "covered": True, "last_item_202": last,
+                             "reason": cap(cov.get("reason"), SHORT_CAP),
+                             "fetch_failed": cov.get("fetch_failed")}})
         reason = cap(cov.get("reason"), SHORT_CAP) or "quarterly reporting not proven"
         state = "failed" if cov.get("fetch_failed") else "blocked"
         return _step(n, key, title, actor, state,
@@ -505,12 +550,18 @@ def _analysts_step(record: dict | None, row: dict | None) -> dict:
             continue
         rep = a.get("report") or {}
         run = a.get("run") or {}
-        ok = run.get("ok") is not False
-        if not ok:
-            failed.append(f"{AGENT_NAME[agent]} ({run.get('reason_code') or 'failed'})")
+        code = cap(run.get("reason_code"), 40)
+        if run.get("ok") is False:
+            ok: bool | None = False
+            failed.append(f"{AGENT_NAME[agent]} ({code or 'failed'})")
+        elif not a.get("report"):
+            ok = None  # nothing recorded for this analyst: never a guessed "done"
+            missing.append(AGENT_NAME[agent])
+        else:
+            ok = True
         out.append({
             "agent": agent, "name": AGENT_NAME[agent], "ok": ok,
-            "reason_code": run.get("reason_code"),
+            "reason_code": code,
             "stance": cap(rep.get("stance"), 20) if ok else None,
             "confidence": rep.get("confidence") if ok else None,
             "evidence": ([{"point": cap(e.get("point")), "source": cap(e.get("source"), 60)}
@@ -534,8 +585,9 @@ def _plans_step(record: dict | None, row: dict | None) -> dict:
         return _step(n, key, title, actor, "not_recorded", NOT_RECORDED)
     chosen = (record.get("trader") or {}).get("plan_id")
     plans = [{"plan_id": cap(p.get("plan_id"), 40), "setup": cap(p.get("setup"), 20),
-              "entry": p.get("entry"), "stop": p.get("stop"), "target": p.get("target"),
-              "reward_to_risk": p.get("reward_to_risk"),
+              "entry": cap(p.get("entry"), 40), "stop": cap(p.get("stop"), 40),
+              "target": cap(p.get("target"), 40),
+              "reward_to_risk": cap(p.get("reward_to_risk"), 40),
               "chosen": chosen is not None and p.get("plan_id") == chosen}
              for p in record["exit_plans"]]
     if not plans:
@@ -588,7 +640,9 @@ def _debate_step(record: dict | None, row: dict | None) -> dict:
         "bear": cap(((bear.get("objections") or [None])[0]), 300),
         "turns": turns,
     }
-    rounds = f"{d.get('rounds_run')} round{'s' if d.get('rounds_run') != 1 else ''}"
+    run_n = d.get("rounds_run")
+    rounds = ("Rounds not recorded" if run_n is None
+              else f"{run_n} round{'s' if run_n != 1 else ''}")
     if "bear" in failed_sides:
         return _step(n, key, title, actor, "failed",
                      f"{rounds}. The Bear's call failed, so the debate fails closed and "

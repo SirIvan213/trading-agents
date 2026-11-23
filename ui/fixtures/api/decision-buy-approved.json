@@ -13,7 +13,7 @@
     "code": "approved_not_sent",
     "text": "approved, not sent"
   },
-  "in_short": "The agents proposed buying 13 shares of ABCD. Approved in the terminal. Order: approved, not sent. Worst case at the stop: $46.80.",
+  "in_short": "The ticket was for 13 shares of ABCD. Approved in the terminal. Order: approved, not sent. Worst case at the stop: $46.80.",
   "numbers": {
     "shares": 13,
     "entry": "103.10",
@@ -44,8 +44,8 @@
       "details": {
         "coverage": {
           "covered": true,
-          "reason": null,
           "last_item_202": "2026-10-04",
+          "reason": null,
           "fetch_failed": false
         }
       }

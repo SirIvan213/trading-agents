@@ -34,8 +34,8 @@
       "details": {
         "coverage": {
           "covered": true,
-          "reason": null,
           "last_item_202": "2026-10-04",
+          "reason": null,
           "fetch_failed": false
         }
       }

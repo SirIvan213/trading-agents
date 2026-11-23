@@ -107,7 +107,7 @@ def test_an_approved_buy(paths):
     assert body["record_available"] is True and body["problems"] == []
     assert body["numbers"] == {"shares": 13, "entry": "103.10", "limit_price": "103.21",
                                "stop": "99.61", "target": "106.59", "max_loss": "46.80"}
-    assert body["in_short"] == ("The agents proposed buying 13 shares of ABCD. Approved in "
+    assert body["in_short"] == ("The ticket was for 13 shares of ABCD. Approved in "
                                 "the terminal. Order: approved, not sent. Worst case at the "
                                 "stop: $46.80.")
     assert s["scan"]["state"] == "done" and "11:59 ET" in s["scan"]["line"]
