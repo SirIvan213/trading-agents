@@ -93,6 +93,10 @@ ORDER_STATUSES = frozenset({
     "pending_cancel", "pending_replace", "accepted", "pending_new", "accepted_for_bidding",
     "stopped", "rejected", "suspended", "calculated", "held",
 })
+# HTTP statuses after which Alpaca has definitely not acted on the request. Anything else
+# (no status, 408, 429, 5xx, an unexpected success) may have acted (pipeline/send.py uses
+# the same set for a POST).
+DEFINITE_REFUSALS = frozenset({400, 401, 403, 404, 422})
 # Statuses after which an order does nothing more today. Anything else (stopped: a trade is
 # guaranteed; suspended; pending_*; held) counts as still working, so a doubt never reads as
 # "the close is done" and invites a second sell.
@@ -105,11 +109,12 @@ class BrokerError(RuntimeError):
     failure or a refusal before any call); `code` is Alpaca's numeric error code, if any.
 
     `may_have_acted` is True when the request may have reached Alpaca and been carried out
-    although this call failed: a timeout, a network error, a 5xx or another unexpected
-    status, or a reply that could not be read (the probe, #196: a close that FILLED while its
-    reply was refused here). After such an error, check the broker's state before acting
-    again (check_close for a close); never repeat the request blindly. A 4xx refusal and a
-    refusal before any request are False."""
+    although this call failed: a timeout, a network error, a 408, 429, 5xx or another
+    unexpected status, or a reply that could not be read (the probe, #196: a close that FILLED
+    while its reply was refused here). After such an error, check the broker's state before acting
+    again (check_close for a close); never repeat the request blindly. A definite refusal
+    (DEFINITE_REFUSALS: 400, 401, 403, 404, 422) and a refusal before any request are
+    False."""
 
     def __init__(self, message: str, *, status: int | None = None,
                  code: int | None = None, may_have_acted: bool = False) -> None:
@@ -392,10 +397,10 @@ class AlpacaPaperBroker:
                 raw_err = exc.read(4096) if exc.fp is not None else b""
             except OSError:
                 raw_err = b""
-            # a 4xx is Alpaca refusing the request; a 5xx may come after it acted
+            # a definite refusal did not act; a 408, 429 or 5xx may come after it acted
             raise BrokerError(f"{where} failed: HTTP {exc.code}", status=exc.code,
                               code=_error_code(raw_err),
-                              may_have_acted=not 400 <= exc.code < 500) from None
+                              may_have_acted=exc.code not in DEFINITE_REFUSALS) from None
         except TimeoutError:
             raise BrokerError(f"{where} timed out", may_have_acted=True) from None
         except urllib.error.URLError as exc:
@@ -579,9 +584,11 @@ class AlpacaPaperBroker:
         sym = normalize_symbol(symbol)
         if sym is None:
             raise BrokerError("symbol is not a valid ticker")
-        position = next((p for p in self.list_positions() if p["symbol"] == sym), None)
+        # orders first, then the position: a close that fills between the two reads then
+        # shows as "closed" (position gone), never as "open" (a filled close, position seen)
         closes = [o for o in self.list_orders(sym)
                   if o["side"] == "sell" and o["order_class"] == "simple"]
+        position = next((p for p in self.list_positions() if p["symbol"] == sym), None)
         working = [o for o in closes if o["status"] not in FINAL_STATUSES]
         state = "closed" if position is None else "closing" if working else "open"
         return {"state": state, "position": position, "close_orders": closes}

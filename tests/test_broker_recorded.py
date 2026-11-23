@@ -234,7 +234,7 @@ def test_check_close_reads_the_position_and_the_orders_and_sends_nothing(positio
     b, fake = client({("GET", "/v2/positions"): pos, ("GET", "/v2/orders"): served(orders)})
     out = b.check_close("SPY")
     assert out["state"] == state
-    q = fake.requests[-1].full_url
+    (q,) = [r.full_url for r in fake.requests if "/v2/orders" in r.full_url]
     assert "status=all" in q and "symbols=SPY" in q and "nested=true" in q
     assert all(r.get_method() == "GET" for r in fake.requests)  # read only
 
@@ -295,3 +295,48 @@ def test_a_refusal_before_any_request_did_not_act():
         b.close_position("not a symbol!")
     assert e.value.may_have_acted is False
     assert all(r.get_method() == "GET" for r in fake.requests)
+
+
+# ---- review round 1 ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("status", [408, 429])
+def test_a_408_or_429_may_have_acted(status):
+    b, _ = client({("DELETE", "/v2/positions/SPY"): (status, {"code": 1})})
+    with pytest.raises(BrokerError) as e:
+        b.close_position("SPY")
+    assert e.value.may_have_acted is True
+
+
+def test_the_definite_refusals_are_one_set_shared_with_send():
+    import pipeline.send as send
+    import tools.broker as broker
+    assert send.DEFINITE_REFUSALS is broker.DEFINITE_REFUSALS
+    assert broker.DEFINITE_REFUSALS == {400, 401, 403, 404, 422}
+
+
+def test_check_close_reads_the_orders_before_the_position():
+    """A close that fills between the two reads shows as closed, never as "open"."""
+    b, fake = client({("GET", "/v2/positions"): (200, []),
+                      ("GET", "/v2/orders"): served("open_orders_with_close.json")})
+    assert b.check_close("SPY")["state"] == "closed"
+    paths = [r.full_url.split("?")[0].rsplit("/", 1)[-1] for r in fake.requests
+             if r.get_method() == "GET"]
+    assert paths.index("orders") < paths.index("positions")
+
+
+def test_check_close_with_the_close_filled_between_the_reads_is_closed():
+    """The orders read saw the close working; it filled before the positions read."""
+    b, _ = client({("GET", "/v2/orders"): served("open_orders_with_close.json"),
+                   ("GET", "/v2/positions"): (200, [])})
+    assert b.check_close("SPY")["state"] == "closed"
+
+
+def test_blocked_an_unrelated_simple_stop_makes_a_listing_fail_closed():
+    """Pinned choice: a simple order of a type this system never places (a stop with no
+    class) is refused, so a listing that holds one fails closed rather than misreading it.
+    Relaxing this later means check_close and the probe's close test must require market."""
+    stray = {**rec("close_position_simple.json")["body"], "type": "stop",
+             "stop_price": "700.00", "order_class": ""}
+    b, _ = client({("GET", "/v2/orders"): (200, [stray])})
+    with pytest.raises(BrokerError, match="simple order of an unexpected type"):
+        b.list_open_orders()

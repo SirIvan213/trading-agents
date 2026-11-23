@@ -75,7 +75,10 @@ FILL_WAIT_S, LEGS_WAIT_S, FLAT_WAIT_S, POLL_S = 30, 15, 30, 1.0
 MIN_MINUTES_TO_CLOSE = 10
 CLEANUP_PASSES = 3
 MAX_QUOTE_AGE = timedelta(seconds=15)
-FINAL = frozenset({"filled", "canceled", "expired", "rejected", "done_for_day"})
+FINAL = FINAL_STATUSES  # one set: tools/broker.py
+# The answers the probe exists to record (#196): anything else is an error, not a finding.
+EXPECTED_RESEND = (422, 40010001)  # a resent client_order_id
+EXPECTED_CLOSE_WITH_LEGS = (403, 40310000)  # closing while the legs hold the shares
 
 
 def plan_lines(symbol: str) -> list[str]:
@@ -117,7 +120,7 @@ def probe_order(symbol: str, ask: Decimal) -> dict:
 
 class RecordingOpener:
     """Wraps the default opener and keeps Alpaca's raw replies (method, path, status, body),
-    with account_number redacted, so they can become test fixtures (#196)."""
+    with the account's number and id redacted, so they can become test fixtures (#196)."""
 
     def __init__(self, inner: Callable = _default_open) -> None:
         self.inner, self.replies = inner, []
@@ -128,7 +131,10 @@ class RecordingOpener:
         except (ValueError, UnicodeDecodeError):
             body = raw[:2000].decode("utf-8", "replace")
         if isinstance(body, dict) and "account_number" in body:
+            # the account reply: its number and its id both identify the account
             body = {**body, "account_number": "REDACTED"}
+            if "id" in body:
+                body["id"] = "REDACTED"
         self.replies.append({"method": req.get_method(),
                              "path": urllib.parse.urlsplit(req.full_url).path,
                              "status": status, "body": body})
@@ -268,7 +274,7 @@ class Probe:
             # (no status, a 5xx, an unreadable or mismatched reply) means the order may exist
             refused = exc.status is not None and not exc.may_have_acted
             r["4_resend"] = {"accepted": False if refused else "unknown", **_err(exc)}
-            if not refused:
+            if (exc.status, exc.code) != EXPECTED_RESEND:
                 self._error("4_resend", exc)
         # 5. wait for the fill; record what holds the shares; close with the legs open
         state: dict[str, Any] = {}
@@ -294,6 +300,7 @@ class Probe:
             r["5_close_with_legs_open"] = {"closed": False, **_err(exc)}
             if exc.may_have_acted:  # not a refusal: find out, never assume it failed
                 r["5_close_with_legs_open"]["check"] = self._check_close()
+            if (exc.status, exc.code) != EXPECTED_CLOSE_WITH_LEGS:
                 self._error("5_close_with_legs_open", exc)
         # 6. cancel the legs (at once, also if the close above succeeded), then close
         for leg in legs:
@@ -303,8 +310,11 @@ class Probe:
                                       LEGS_WAIT_S)
         if not r["6_legs_gone"]:
             self.errors.append("6_legs_gone: the legs were still listed")
+        step5 = r.get("5_close_with_legs_open") or {}
         if self._position() is None:
             r["6_close_after_legs"] = "no position left"
+        elif (step5.get("check") or {}).get("state") == "closing":
+            r["6_close_after_legs"] = "a close is already working: not closed again"
         else:
             try:
                 r["6_close_after_legs"] = {"closed": True,

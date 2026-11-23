@@ -420,7 +420,8 @@ def test_the_recording_opener_keeps_raw_replies_and_redacts_the_account_number()
         def __exit__(self, *a):
             return False
 
-    body = json.dumps({"account_number": "PA123", "status": "ACTIVE"}).encode()
+    body = json.dumps({"id": "acct-uuid-1", "account_number": "PA123",
+                       "status": "ACTIVE"}).encode()
 
     def inner(req, timeout=None):
         if req.full_url.endswith("/v2/orders"):
@@ -436,7 +437,7 @@ def test_the_recording_opener_keeps_raw_replies_and_redacts_the_account_number()
     assert exc.value.read() == b'{"code": 42210000}'  # the broker can still read it
     assert rec.replies == [
         {"method": "GET", "path": "/v2/account", "status": 200,
-         "body": {"account_number": "REDACTED", "status": "ACTIVE"}},
+         "body": {"id": "REDACTED", "account_number": "REDACTED", "status": "ACTIVE"}},
         {"method": "POST", "path": "/v2/orders", "status": 422, "body": {"code": 42210000}},
     ]
 
@@ -646,3 +647,75 @@ def test_the_cleanup_leaves_a_working_close_alone_and_waits(capsys):
     # step 5 (refused, legs open) and step 6 only: no close while one is working
     assert [c for c in fake.calls if c[0] == "close"] == [("close", "SPY")] * 2
     assert report(capsys)["cleanup"]["flat"] is True
+
+
+# ======================= review round 1 =======================
+
+@pytest.mark.parametrize("status, code", [(429, None), (401, 40110000), (422, 42210000)])
+def test_an_unexpected_answer_to_the_resend_is_an_error_not_a_finding(capsys, status, code):
+    fake = FakePaper()
+    real = fake.submit_bracket
+    sent = {"n": 0}
+
+    def submit(order, cid):
+        sent["n"] += 1
+        if sent["n"] == 2:
+            raise BrokerError(f"POST /v2/orders failed: HTTP {status}", status=status,
+                              code=code, may_have_acted=status == 429)
+        return real(order, cid)
+
+    fake.submit_bracket = submit
+    assert run(fake) == pb.INCOMPLETE
+    assert any(e.startswith("4_resend:") for e in report(capsys)["errors"])
+
+
+@pytest.mark.parametrize("status, code", [(403, 40310001), (429, None), (404, 40410000)])
+def test_an_unexpected_answer_to_the_close_with_legs_is_an_error(capsys, status, code):
+    fake = FakePaper()
+    real_close = fake.close_position
+    n = {"close": 0}
+
+    def close(symbol):
+        n["close"] += 1
+        if n["close"] == 1:
+            raise BrokerError(f"DELETE /v2/positions/{symbol} failed: HTTP {status}",
+                              status=status, code=code, may_have_acted=status == 429)
+        return real_close(symbol)
+
+    fake.close_position = close
+    assert run(fake) == pb.INCOMPLETE
+    assert any(e.startswith("5_close_with_legs_open:") for e in report(capsys)["errors"])
+
+
+def test_step_6_does_not_close_again_while_step_5s_close_is_working(capsys):
+    """Step 5's close was unclear and check_close found it working: step 6 never closes."""
+    fake = FakePaper()
+    n = {"close": 0}
+
+    def close(symbol):
+        n["close"] += 1
+        if n["close"] == 1:  # placed, reply unreadable, still working
+            fake.orders["close-7"] = {"id": "close-7", "symbol": symbol, "status": "new",
+                                      "side": "sell", "order_class": "simple",
+                                      "type": "market", "legs": []}
+            raise unclear(symbol)
+        raise AssertionError("closed again while a close was working")
+
+    real_positions = fake.list_positions
+    reads = {"n": 0}
+
+    def positions():
+        reads["n"] += 1
+        if reads["n"] > 6 and "close-7" in fake.orders:  # it fills later
+            fake.orders["close-7"]["status"] = "filled"
+            fake.positions.pop("SPY", None)
+        return real_positions()
+
+    fake.close_position = close
+    fake.list_positions = positions
+    run(fake)
+    r = report(capsys)
+    assert r["5_close_with_legs_open"]["check"]["state"] == "closing"
+    assert r["6_close_after_legs"] in ("a close is already working: not closed again",
+                                       "no position left")
+    assert n["close"] == 1 and r["cleanup"]["flat"] is True

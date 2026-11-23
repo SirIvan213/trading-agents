@@ -50,11 +50,12 @@ from journal.orders import (
     client_order_id,
 )
 from pipeline.order_flow import Clock, Outcome, check_before_send, wall_clock
-from tools.broker import BrokerError, bracket_legs_problem, bracket_request
-
-# HTTP statuses after which Alpaca has definitely not accepted the order. Anything else
-# (no status, 408, 429, 5xx) may have created it, so it is looked up, never resent.
-DEFINITE_REFUSALS = frozenset({400, 401, 403, 404, 422})
+from tools.broker import (
+    DEFINITE_REFUSALS,  # Alpaca definitely did not accept the order (else: look it up)
+    BrokerError,
+    bracket_legs_problem,
+    bracket_request,
+)
 
 NOT_SENT = "not_sent"  # this call POSTed nothing (`journaled`: the approval was expired)
 ALREADY_SENT = "already_sent"  # the order was sent before (the broker may hold it)
