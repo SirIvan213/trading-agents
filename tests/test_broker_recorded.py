@@ -325,9 +325,18 @@ def test_check_close_reads_the_orders_before_the_position():
 
 
 def test_check_close_with_the_close_filled_between_the_reads_is_closed():
-    """The orders read saw the close working; it filled before the positions read."""
-    b, _ = client({("GET", "/v2/orders"): served("open_orders_with_close.json"),
-                   ("GET", "/v2/positions"): (200, [])})
+    """The race itself: the position is there until the orders are read, and the close
+    fills right after. Read in this order, the outcome is "closed", never "open"."""
+    held = {"filled": False}
+
+    def orders(req):
+        held["filled"] = True  # the close fills just after this read
+        return served("open_orders_with_close.json")
+
+    def positions(req):
+        return (200, []) if held["filled"] else served("positions_legs_open.json")
+
+    b, _ = client({("GET", "/v2/orders"): orders, ("GET", "/v2/positions"): positions})
     assert b.check_close("SPY")["state"] == "closed"
 
 

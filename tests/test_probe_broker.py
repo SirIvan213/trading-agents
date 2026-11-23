@@ -719,3 +719,26 @@ def test_step_6_does_not_close_again_while_step_5s_close_is_working(capsys):
     assert r["6_close_after_legs"] in ("a close is already working: not closed again",
                                        "no position left")
     assert n["close"] == 1 and r["cleanup"]["flat"] is True
+
+
+def test_step_6_leaves_an_unchecked_unclear_close_to_the_cleanup(capsys):
+    fake = FakePaper()
+    real_close = fake.close_position
+    n = {"close": 0}
+
+    def close(symbol):
+        n["close"] += 1
+        if n["close"] == 1:
+            raise unclear(symbol)  # step 5: unclear; its check fails below
+        return real_close(symbol)
+
+    def check_fails(symbol):
+        raise BrokerError("GET /v2/orders failed: HTTP 503", status=503, may_have_acted=True)
+
+    fake.close_position = close
+    fake.check_close = check_fails
+    assert run(fake) == pb.INCOMPLETE
+    r = report(capsys)
+    assert r["5_close_with_legs_open"]["check"]["state"] == "unknown"
+    assert r["6_close_after_legs"] == "step 5's close could not be checked: left to the cleanup"
+    assert r["cleanup"]["flat"] is True and fake.positions == {}

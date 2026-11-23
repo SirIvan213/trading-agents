@@ -28,5 +28,5 @@ ui/web/dist/
 
 # probe_broker output (--out / --raw-out): paper account replies, never committed as is
 # (tests/fixtures/broker/ holds the anonymized ones)
-/probe.json
-/raw.json
+probe.json
+raw.json

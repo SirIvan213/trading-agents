@@ -313,8 +313,13 @@ class Probe:
         step5 = r.get("5_close_with_legs_open") or {}
         if self._position() is None:
             r["6_close_after_legs"] = "no position left"
-        elif (step5.get("check") or {}).get("state") == "closing":
-            r["6_close_after_legs"] = "a close is already working: not closed again"
+        elif (step5.get("check") or {}).get("state") in ("closing", "unknown"):
+            # a close is working, or step 5's close was unclear and could not be checked:
+            # never close again blindly; the cleanup checks and acts
+            r["6_close_after_legs"] = ("a close is already working: not closed again"
+                                       if step5["check"]["state"] == "closing" else
+                                       "step 5's close could not be checked: left to the "
+                                       "cleanup")
         else:
             try:
                 r["6_close_after_legs"] = {"closed": True,
