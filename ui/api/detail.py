@@ -314,8 +314,9 @@ def decision_detail(snap: JournalSnapshot, now: datetime, run_id: str, directory
         # and the page is built from the journal alone (never a 500)
         body = None
         if record is not None:
-            problems.append({"level": "error", "text": "the decision record is unusable: a "
-                             "field has an unexpected shape"})
+            problems.append({"level": "error", "text": "this decision could not be shown in "
+                             "full: a field in its record or journal entry has an unexpected "
+                             "shape, so the record is not used"})
             try:
                 body = _build(snap, run_id, row, None, reasons)
             except SHAPE_ERRORS:
@@ -356,7 +357,7 @@ def _build(snap: JournalSnapshot, run_id: str, row: dict | None, record: dict | 
         extra.append({"level": "error" if status == "error" else "warn",
                       "text": f"the decision {what} ({why})"})
     entry, timeout, events = _journal_parts(snap, run_id, row)
-    symbol = (row or {}).get("symbol") or (record or {}).get("symbol")
+    symbol = cap((row or {}).get("symbol") or (record or {}).get("symbol"), 20)
     order = entry.get("order") if isinstance(entry.get("order"), dict) else None
     limit = _limit_price(record, events)
     numbers = None

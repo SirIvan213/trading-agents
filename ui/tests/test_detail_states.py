@@ -385,3 +385,12 @@ def test_a_not_started_record_names_its_error(paths):
 def test_the_detail_module_source_has_no_invisible_characters():
     src = Path(dt.__file__).read_text(encoding="utf-8")
     assert not dt._INVISIBLE.search(src)
+
+
+def test_a_record_only_symbol_is_capped_and_made_visible(paths):
+    write_case("pass_fatal_bear", paths.journal)
+    paths.journal.write_text("", encoding="utf-8")  # no journal row: the record's symbol is used
+    rewrite_record(paths, lambda r: r.update(symbol="‮" + "S" * 500))
+    body = get(paths)
+    assert len(body["symbol"]) <= 20 and "‮" not in body["symbol"]
+    assert "‮" not in body["in_short"] and len(body["in_short"]) < 200
