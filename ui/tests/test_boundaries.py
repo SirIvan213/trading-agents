@@ -32,6 +32,7 @@ ALLOWED = {
 }
 DENIED = ("tools.broker", "pipeline.send", "pipeline.orders", "pipeline.order_flow",
           "pipeline.decide", "pipeline.run_day", "pipeline.metering", "pipeline.probe_broker",
+          "pipeline.records",
           "agents", "anthropic", "tools.http", "tools.scan")
 # Stdlib network modules are not listed: the framework loads some (starlette imports
 # http.client for its status codes). ui/api's own code may not import them (the static check,

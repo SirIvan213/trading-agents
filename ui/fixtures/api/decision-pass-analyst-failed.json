@@ -1,0 +1,151 @@
+{
+  "run_id": "RUN_ID",
+  "symbol": "ABCD",
+  "at": "2026-11-03T12:00:20-05:00",
+  "day": "2026-11-03",
+  "outcome": "PASS",
+  "why": {
+    "code": "pass:analyst_failed",
+    "text": "An analyst failed, so the decision passed without calling the Trader",
+    "detail": null
+  },
+  "order_status": null,
+  "in_short": "No trade in ABCD. An analyst failed, so the decision passed without calling the Trader.",
+  "numbers": null,
+  "steps": [
+    {
+      "n": 1,
+      "key": "scan",
+      "title": "Scan",
+      "actor": "code",
+      "state": "done",
+      "line": "A run_day scan listed it at 11:59 ET.",
+      "details": {
+        "scan_at": "2026-11-03T11:59:40-05:00"
+      }
+    },
+    {
+      "n": 2,
+      "key": "event_check",
+      "title": "Event check",
+      "actor": "code",
+      "state": "done",
+      "line": "Proven to report earnings (last SEC 8-K item 2.02 filed 2026-10-04). The earnings and halt check itself is at step 7.",
+      "details": {
+        "coverage": {
+          "covered": true,
+          "last_item_202": "2026-10-04",
+          "reason": null,
+          "fetch_failed": false
+        }
+      }
+    },
+    {
+      "n": 3,
+      "key": "analysts",
+      "title": "Analysts",
+      "actor": "ai",
+      "state": "failed",
+      "line": "Failed: Chart (invalid_output). A failed analyst forces a PASS.",
+      "details": {
+        "analysts": [
+          {
+            "agent": "technical",
+            "name": "Chart",
+            "ok": false,
+            "reason_code": "invalid_output",
+            "stance": null,
+            "confidence": null,
+            "evidence": []
+          },
+          {
+            "agent": "sentiment",
+            "name": "News",
+            "ok": true,
+            "reason_code": null,
+            "stance": "bullish",
+            "confidence": 0.7,
+            "evidence": [
+              {
+                "point": "two positive headlines",
+                "source": "get_news"
+              }
+            ]
+          },
+          {
+            "agent": "fundamentals",
+            "name": "Finances",
+            "ok": true,
+            "reason_code": null,
+            "stance": "bullish",
+            "confidence": 0.7,
+            "evidence": [
+              {
+                "point": "revenue grew",
+                "source": "get_fundamentals"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "n": 4,
+      "key": "plans",
+      "title": "Plans",
+      "actor": "code",
+      "state": "skipped",
+      "line": "No plan was made.",
+      "details": {
+        "plans": []
+      }
+    },
+    {
+      "n": 5,
+      "key": "debate",
+      "title": "Debate",
+      "actor": "ai",
+      "state": "skipped",
+      "line": "Skipped: an analyst failed, so the Trader passes without a call.",
+      "details": {
+        "skip_code": "analyst_failed"
+      }
+    },
+    {
+      "n": 6,
+      "key": "trader",
+      "title": "Trader",
+      "actor": "ai",
+      "state": "blocked",
+      "line": "Forced PASS without a Trader call. An analyst failed, so the decision passed without calling the Trader.",
+      "details": {
+        "action": "PASS",
+        "plan_id": null,
+        "confidence": 0.0,
+        "forced_pass": "analyst_failed",
+        "reasoning": null
+      }
+    },
+    {
+      "n": 7,
+      "key": "order_ticket",
+      "title": "Order ticket",
+      "actor": "code",
+      "state": "not_reached",
+      "line": "Not reached: no plan was chosen.",
+      "details": null
+    },
+    {
+      "n": 8,
+      "key": "approve_and_log",
+      "title": "Approve and log",
+      "actor": "you",
+      "state": "not_reached",
+      "line": "Not reached: no ticket to approve.",
+      "details": null
+    }
+  ],
+  "order_events": [],
+  "record_available": true,
+  "problems": []
+}

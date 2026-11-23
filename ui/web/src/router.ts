@@ -13,7 +13,8 @@ export function parseHash(hash: string): Route {
   if (path === "/") return { page: "about" };
   if (path === "/live") return { page: "live" };
   if (path === "/history") return { page: "history" };
-  const decision = /^\/decision\/([A-Za-z0-9_.-]{1,128})$/.exec(path);
+  // the API's run_id pattern (ui/api/detail.py RUN_ID_PATTERN): no dots, at most 64
+  const decision = /^\/decision\/([A-Za-z0-9_-]{1,64})$/.exec(path);
   if (decision) return { page: "decision", id: decision[1] };
   return { page: "not_found", hash };
 }

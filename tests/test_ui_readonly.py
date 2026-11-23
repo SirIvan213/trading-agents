@@ -38,6 +38,8 @@ DENY = (
     "pipeline.decide", "pipeline.run_day", "pipeline.probe_broker",
     # billed calls: the agents, the Claude client, the metered client
     "agents", "anthropic", "pipeline.metering",
+    # the decision records' writer: ui/api reads the files as JSON itself (#217)
+    "pipeline.records",
     # project modules that load a network client (tools.scan -> tools.http)
     "tools.scan", "tools.http",
     # network clients

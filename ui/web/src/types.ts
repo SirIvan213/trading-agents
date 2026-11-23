@@ -80,3 +80,57 @@ export interface Decisions {
   next_cursor: string | null;
   problems: Problem[];
 }
+
+// GET /api/decisions/{run_id} (ui/api/detail.py). Golden copies:
+// ui/fixtures/api/decision-*.json. Record text in `details` is untrusted model text.
+export type StepState = "done" | "blocked" | "skipped" | "not_reached" | "failed" | "not_recorded";
+
+export interface Step {
+  n: number;
+  key: string;
+  title: string;
+  actor: Actor;
+  state: StepState;
+  line: string;
+  details: Record<string, unknown> | null;
+}
+
+export interface AnalystView {
+  agent: string; name: string; ok: boolean | null; // null: not in the record
+  reason_code: string | null;
+  stance: string | null; confidence: number | null;
+  evidence: { point: string | null; source: string | null }[];
+}
+
+export interface PlanView {
+  plan_id: string | null; setup: string | null; entry: string | null; stop: string | null;
+  target: string | null; reward_to_risk: string | null; chosen: boolean;
+}
+
+export interface TurnView {
+  round: number | null; side: "bull" | "bear" | null; ok: boolean; argument: string | null;
+  points: (string | null)[]; fatal: boolean | null;
+}
+
+export interface OrderEvent {
+  status: string; at: string | null; fields: Record<string, string | null>;
+}
+
+export interface DecisionDetail {
+  run_id: string;
+  symbol: string | null;
+  at: string | null;
+  day: string | null;
+  outcome: Outcome | null;
+  why: { code: string; text: string; detail: string | null } | null;
+  order_status: { code: string; text: string } | null;
+  in_short: string;
+  numbers: {
+    shares: number | null; entry: string | null; limit_price: string | null;
+    stop: string | null; target: string | null; max_loss: string | null;
+  } | null;
+  steps: Step[];
+  order_events: OrderEvent[];
+  record_available: boolean;
+  problems: Problem[];
+}
