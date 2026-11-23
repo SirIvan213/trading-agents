@@ -147,6 +147,7 @@ class Reconciler:
         self.stuck_since: dict[str, datetime] = {}  # symbol -> a flatten not done since
         self.retry_since: dict[str, datetime] = {}
         self.latest: dict[str, dict | None] = {}  # a lookup made after acting (a cancel)
+        self.flattened: set[str] = set()  # symbols flattened in this pass
         self.limits_by_cid: dict[str, Decimal] = {}
         self.earlier_day: set[str] = set()  # symbols an earlier day's order may hold
         self.known_cids: set[str] = set()
@@ -275,6 +276,7 @@ class Reconciler:
         return self.journal.orders(), self.journal.entries()
 
     def _run(self, now: datetime) -> None:
+        self.flattened: set[str] = set()
         reads = self.report["read_errors"]
         try:  # the reconciler's own client, verified every pass (#155 review)
             self.broker.verify_paper_account()
@@ -362,6 +364,11 @@ class Reconciler:
             for sym in list(self.stuck_since):
                 if sym not in positions:
                     self.stuck_since.pop(sym, None)  # flat now: a later flatten starts fresh
+            held_cids = {o.client_order_id for trades in owners.values() for o in trades
+                         if o.symbol in positions}
+            for cid in list(self.activating_since):
+                if cid not in held_cids:
+                    self.activating_since.pop(cid, None)
             for sym, pos in positions.items():
                 self._protect(sym, pos, owners.get(sym, []), looked, approved, now, today)
             for sym, trades in holding.items():
@@ -377,7 +384,6 @@ class Reconciler:
                 if found:
                     known.add(found["id"])
                     known.update(leg["id"] for leg in found.get("legs") or [])
-            flattened: set[str] = set()
             for o in listing["orders"]:
                 # our own close, also for a fill the journal has not recorded yet
                 if (o["id"] in known or o.get("client_order_id") in self.known_cids
@@ -386,9 +392,6 @@ class Reconciler:
                 self._block("orphan", f"orphan-order:{o['id']}",
                             f"an open {o['type']} {o['side']} order in {o['symbol']} is not "
                             "in the journal", symbol=o["symbol"])
-                if o["symbol"] in flattened:
-                    continue
-                flattened.add(o["symbol"])
                 self._flatten(o["symbol"], [x.client_order_id
                                             for x in owners.get(o["symbol"], [])],
                               "an orphan order", now)
@@ -453,9 +456,15 @@ class Reconciler:
                              f"which the journal cannot follow from {status}: check it",
                              o.symbol)
             return
-        if b_status == "rejected" and status == SUBMITTED:
-            if b_fill == 0:
-                self._event(o, REJECTED, reason="rejected by the broker")
+        if b_status == "rejected" and status == SUBMITTED and b_fill == 0:
+            self._event(o, REJECTED, reason="rejected by the broker")
+            return
+        if b_status == "rejected" or (b_status == "filled" and b_fill != o.qty):
+            # the broker and the journal disagree on what filled: never silent
+            self._block("conflict", f"qty:{cid}:{b_status}",
+                        f"{cid} ({o.symbol}) is {b_status} at the broker with {b_fill} of "
+                        f"{o.qty} shares filled, which the journal cannot follow from "
+                        f"{status}", symbol=o.symbol, client_order_id=cid)
             return
         if not entry_can_fill(found):
             self.partial_since.pop(cid, None)
@@ -565,7 +574,10 @@ class Reconciler:
         if verdict.get("activating"):
             first = self.activating_since.setdefault(cid, now)
             if now - first < timedelta(seconds=PARTIAL_GRACE_S):
-                return  # Alpaca may show filled/held/held for a moment: one poll of grace
+                # Alpaca may show filled/held/held for a moment: one poll of grace
+                self.report["errors" if not self.check_only else "would"].append(
+                    f"{sym}: the legs are still activating; judged again next pass")
+                return
             verdict = {"state": UNPROTECTED, "reason": verdict["reason"] + " after one poll"}
             state = UNPROTECTED
         else:
@@ -596,6 +608,9 @@ class Reconciler:
         self._flatten(sym, cids, verdict["reason"], now)
 
     def _flatten(self, sym: str, cids: list[str], why: str, now: datetime) -> FlattenResult:
+        if sym in self.flattened:  # once per symbol per pass, whatever asked for it
+            return FlattenResult("done this pass", "already flattened in this pass")
+        self.flattened.add(sym)
         if sym in self.earlier_day:
             # decision 8 and the PR 5 morning rule: nothing an earlier day's order may hold
             # is closed or cancelled automatically, whatever the path (#155 review)
