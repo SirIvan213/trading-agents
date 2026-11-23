@@ -83,7 +83,10 @@ export interface Decisions {
 
 // GET /api/decisions/{run_id} (ui/api/detail.py). Golden copies:
 // ui/fixtures/api/decision-*.json. Record text in `details` is untrusted model text.
-export type StepState = "done" | "blocked" | "skipped" | "not_reached" | "failed" | "not_recorded";
+export type StepState =
+  | "done" | "blocked" | "skipped" | "not_reached" | "failed" | "not_recorded"
+  | "declined" // a human answer other than yes: neutral, not a refusal by the code
+  | "unanswered"; // no answer before the plan expired: neutral
 
 export interface Step {
   n: number;

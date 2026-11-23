@@ -764,6 +764,15 @@ def _approval_step(record: dict | None, row: dict | None, entry: dict,
         return _step(n, key, title, actor, "failed", f"{why}.", details)
     if row["why"]["code"] == "timeout_no_outcome":
         return _step(n, key, title, actor, "failed", f"{why}.", details)
+    # A human answer other than yes, and no answer in time, are neither the code refusing
+    # nor a failure: each has its own neutral state. Only run_day's timeout note tells them
+    # apart (the journal's "declined" entry is the same for both); a decline without that
+    # note is shown as a decline.
+    if row["why"]["code"] == "declined:timeout":
+        return _step(n, key, title, actor, "unanswered", f"{why}.", details)
+    if status == "declined":
+        return _step(n, key, title, actor, "declined", f"{why}.", details)
+    # "blocked" is only the code refusing: the re-check, the gate, a stale plan
     if status in TICKET_STATUSES:
         return _step(n, key, title, actor, "blocked", f"{why}.", details)
     return _step(n, key, title, actor, "not_recorded", NOT_RECORDED)

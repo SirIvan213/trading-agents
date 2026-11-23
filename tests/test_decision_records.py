@@ -105,7 +105,10 @@ def test_an_approved_buy_writes_the_whole_record(tmp_path):
 
 def test_a_declined_ticket_is_recorded(tmp_path):
     go(tmp_path, scripts(), ask=lambda _: "no")
-    assert only_record(tmp_path)[1]["outcome"]["status"] == "declined"
+    rec = only_record(tmp_path)[1]
+    assert rec["outcome"]["status"] == "declined" and rec["outcome"]["approval"] == "declined"
+    assert rec["proposal"]["approved_limit_price"] is None
+    check_golden("buy_declined", rec)
 
 
 def test_a_trader_pass_is_recorded(tmp_path):

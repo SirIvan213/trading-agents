@@ -28,6 +28,8 @@ CASES = {  # case -> the golden record it reads (None: no record)
     "pass_analyst_failed": "pass_analyst_failed",
     "skipped": "skipped",
     "missing_record": None,
+    "declined": "buy_declined",
+    "not_answered": "buy_declined",
 }
 
 
@@ -54,6 +56,20 @@ def write_case(case: str, journal_path: Path) -> None:
             "client_order_id": client_order_id(RUN_ID, "plan-1"),
             "expires_at": (NOON + timedelta(minutes=5)).isoformat(),
         })
+    elif case in ("declined", "not_answered"):
+        at = NOON + timedelta(seconds=40)
+        j.append({
+            "status": "declined", "reason": "not approved", "run_id": RUN_ID,
+            "plan_id": "plan-1", "symbol": "ABCD",
+            "order": {"symbol": "ABCD", "side": "buy", "qty": 13, "entry": "103.10",
+                      "stop_loss": "99.61", "take_profit": "106.59", "slippage": "0.11"},
+            "max_loss": "46.80", "decided_by": "max_loss_per_trade", "quote": None,
+            "gate": {"status": "CLEAR", "reason": "no earnings through 2026-11-10; no halt"},
+            "verdict": {"verdict": "PASS", "reasons": []}, "checked_at": at.isoformat(),
+        })
+        if case == "not_answered":  # run_day's note: the terminal's deadline passed
+            j.append({"status": "run_day_approval_timeout", "at": at.isoformat(),
+                      "symbol": "ABCD", "run_id": RUN_ID})
     elif case == "pass_fatal_bear":
         j.append({"status": "pass", "run_id": RUN_ID, "symbol": "ABCD",
                   "forced_pass": "fatal_bear",

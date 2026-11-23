@@ -19,15 +19,15 @@
     "no_order:journal": "The plan already had an order, or the journal could not be read, so no order was made",
     "no_order:risk": "The risk check blocked the order",
     "no_order:events": "The earnings and halt check could not run, so no order was made",
-    "declined": "The ticket was declined in the terminal",
-    "declined:timeout": "No answer before the plan expired, so the ticket was declined",
+    "declined": "Declined by you: the answer was not yes, so nothing was approved",
+    "declined:timeout": "Not answered in time: no answer before the plan expired, so nothing was approved",
     "refused_after_approval": "Approved, but the final re-check refused it",
     "changed_after_approval": "Approved, but the order changed at the re-check, so it was not approved",
     "approved": "Approved in the terminal",
     "journal_locked": "The journal was busy when the answer came, so nothing was approved",
     "journal_error": "The journal could not be written when the answer came, so nothing was approved",
     "alert": "run_day raised an alert for this stock and no outcome was recorded (see the detail)",
-    "timeout_no_outcome": "No answer before the plan expired, and the decline could not be recorded"
+    "timeout_no_outcome": "Not answered in time, and the outcome could not be recorded"
   },
   "order_status": {
     "approved_not_sent": "approved, not sent",

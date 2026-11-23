@@ -9,7 +9,7 @@
       "outcome": "FAILED",
       "why": {
         "code": "timeout_no_outcome",
-        "text": "No answer before the plan expired, and the decline could not be recorded",
+        "text": "Not answered in time, and the outcome could not be recorded",
         "detail": null
       },
       "forced_pass": null,
@@ -336,7 +336,7 @@
       "outcome": "BUY",
       "why": {
         "code": "declined",
-        "text": "The ticket was declined in the terminal",
+        "text": "Declined by you: the answer was not yes, so nothing was approved",
         "detail": "not approved"
       },
       "forced_pass": null,
@@ -362,7 +362,7 @@
       "outcome": "BUY",
       "why": {
         "code": "declined:timeout",
-        "text": "No answer before the plan expired, so the ticket was declined",
+        "text": "Not answered in time: no answer before the plan expired, so nothing was approved",
         "detail": "not approved"
       },
       "forced_pass": null,

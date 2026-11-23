@@ -80,7 +80,7 @@ def test_failed_and_unknown_decisions_are_never_dropped(hist):
     body = get(hist, outcome="failed")
     assert {i["symbol"] for i in body["items"]} == {"XOM", "CVX", "HD", "DIS", "NFLX"}
     lost = by_run(body)["r-lost"]  # only its timeout note survived
-    assert lost["why"]["text"].startswith("No answer before the plan expired")
+    assert lost["why"]["text"].startswith("Not answered in time")
     odd = by_run(body)["r-odd"]
     assert odd["why"]["text"] == "mystery_status"  # an unknown code is shown as itself
 
@@ -93,7 +93,8 @@ def test_why_is_a_fixed_string_for_a_known_code_with_the_recorded_detail(hist):
         assert row["why"]["text"] == reasons.get(code, code)
     assert rows["r-risk"]["why"]["detail"] == ("event gate: EVENT (earnings 2026-11-24 "
                                                "before the open)")
-    assert rows["r-timeout"]["why"]["text"].startswith("No answer before the plan expired")
+    assert rows["r-timeout"]["why"]["text"].startswith("Not answered in time")
+    assert rows["r-decl"]["why"]["text"].startswith("Declined by you")
 
 
 def test_the_event_check_is_recorded_or_not_reached_never_guessed(hist):

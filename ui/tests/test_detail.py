@@ -24,7 +24,8 @@ from ui.tests.journal_fixtures import HISTORY_NOW, write_history
 
 REPO = Path(__file__).resolve().parents[2]
 GOLDEN = REPO / "ui" / "fixtures" / "api"
-STATES = {"done", "blocked", "skipped", "not_reached", "failed", "not_recorded"}
+STATES = {"done", "blocked", "skipped", "not_reached", "failed", "not_recorded", "declined",
+          "unanswered"}
 RECORD_STEPS = ("analysts", "plans", "debate")
 
 
@@ -269,3 +270,58 @@ def test_reading_a_detail_never_locks_or_writes(paths):
     before = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
     get(paths)
     assert sorted(str(p.relative_to(root)) for p in root.rglob("*")) == before
+
+
+def test_a_typed_decline_is_declined_by_you_not_blocked(paths):
+    body = get(case_paths(paths, "declined")).json()
+    s = steps(body)
+    step = s["approve_and_log"]
+    assert step["state"] == "declined"
+    assert step["line"] == ("Declined by you: the answer was not yes, so nothing was "
+                            "approved.")
+    assert step["details"]["timed_out"] is False
+    assert body["numbers"]["shares"] == 13 and body["record_available"] is True
+    assert body["in_short"].startswith("The ticket was for 13 shares of ABCD. Declined by you")
+    assert s["order_ticket"]["state"] == "done"  # the ticket was made and shown
+    assert not any(x["state"] == "blocked" for x in body["steps"])
+
+
+def test_no_answer_in_time_is_not_answered_in_time_and_not_a_decline(paths):
+    body = get(case_paths(paths, "not_answered")).json()
+    step = steps(body)["approve_and_log"]
+    assert step["state"] == "unanswered"
+    assert step["line"].startswith("Not answered in time:")
+    assert "Declined by you" not in step["line"] and "Declined by you" not in body["in_short"]
+    assert step["details"]["timed_out"] is True
+    assert body["in_short"].startswith("The ticket was for 13 shares of ABCD. Not answered in")
+    assert not any(x["state"] == "blocked" for x in body["steps"])
+
+
+def test_blocked_stays_reserved_for_the_code_refusing(paths):
+    """refused_after_approval, changed_after_approval and no_order are the code saying no."""
+    from ui.tests.journal_fixtures import HISTORY_NOW, write_history
+
+    write_history(Journal(paths.journal))
+    c = TestClient(create_app(paths, clock=lambda: HISTORY_NOW, web_dir=None),
+                   base_url="http://127.0.0.1")
+    rows = {r["run_id"]: r for r in c.get("/api/decisions", params={"limit": 200}).json()["items"]}
+
+    def step8(run_id):
+        return steps(c.get(f"/api/decisions/{run_id}").json())["approve_and_log"]
+
+    assert step8("r-refused")["state"] == "blocked"
+    assert step8("r-changed")["state"] == "blocked"
+    assert step8("r-decl")["state"] == "declined"      # a typed decline (no timeout note)
+    assert step8("r-timeout")["state"] == "unanswered"  # run_day recorded a timeout
+    assert rows["r-decl"]["why"]["text"].startswith("Declined by you")
+    assert rows["r-timeout"]["why"]["text"].startswith("Not answered in time")
+
+
+def test_history_and_the_detail_use_the_same_words(paths):
+    for case, words in (("declined", "Declined by you"), ("not_answered", "Not answered in time")):
+        body = get(case_paths(paths, case)).json()
+        assert body["why"]["text"].startswith(words)
+        assert body["why"]["text"] in body["steps"][7]["line"]
+        paths.journal.unlink()
+        for f in (paths.journal.parent / "records").rglob("*.json"):
+            f.unlink()
