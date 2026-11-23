@@ -44,9 +44,9 @@
       "label": "Open positions",
       "unit": "count",
       "used": "1",
-      "limit": "1",
-      "reached": true,
-      "pct": 100,
+      "limit": "2",
+      "reached": false,
+      "pct": 50,
       "note": null
     }
   ],
@@ -164,7 +164,7 @@
   ],
   "sources": {
     "ok": false,
-    "summary": "Earnings calendar (Alpha Vantage): no valid calendar today, and all 5 calls are used: the event check cannot clear, so every new entry is blocked today",
+    "summary": "Not working: Earnings calendar (Alpha Vantage). Details below.",
     "expanded": true,
     "items": [
       {

@@ -274,3 +274,4 @@ a.today-row:hover { background: var(--panel2); }
 .source-list li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .source-name { flex: 1; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.status-card > .link-button, .side-card > .link-button { align-self: flex-start; }

@@ -10,11 +10,11 @@
   },
   "status": {
     "kind": "blocked",
-    "sentence": "New trades are blocked: run_day's heartbeat is 95 s old: it may have stopped",
+    "sentence": "New trades are blocked: run_day's last heartbeat was at 10:10:25 ET, more than 90 s ago: it may have stopped",
     "reasons": [
       {
         "code": "heartbeat_stale",
-        "text": "run_day's heartbeat is 95 s old: it may have stopped"
+        "text": "run_day's last heartbeat was at 10:10:25 ET, more than 90 s ago: it may have stopped"
       }
     ]
   },
@@ -44,9 +44,9 @@
       "label": "Open positions",
       "unit": "count",
       "used": "1",
-      "limit": "1",
-      "reached": true,
-      "pct": 100,
+      "limit": "2",
+      "reached": false,
+      "pct": 50,
       "note": null
     }
   ],

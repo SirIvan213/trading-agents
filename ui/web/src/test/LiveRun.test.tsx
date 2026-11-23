@@ -74,7 +74,8 @@ describe("Live run", () => {
       ["decisions", "money_at_risk", "open_positions"]);
     expect(limits[0]).toHaveTextContent("3 of 10");
     expect(limits[1]).toHaveTextContent("$15.91 of $150.00"); // as recorded
-    expect(limits[2]).toHaveTextContent("1 of 1 · reached");
+    expect(limits[2]).toHaveTextContent("1 of 2");
+    expect(limits[2]).not.toHaveTextContent("reached");
   });
 
   it("shows all limits behind the toggle", async () => {
@@ -149,7 +150,7 @@ describe("Live run", () => {
     async () => {
       await open(stale as unknown as Live);
       expect(screen.getByRole("region", { name: "Status" }))
-        .toHaveTextContent("run_day's heartbeat is 95 s old");
+        .toHaveTextContent("run_day's last heartbeat was at 10:10:25 ET, more than 90 s ago");
       const rows = within(screen.getByRole("region", { name: "Today's stocks" }))
         .getAllByRole("listitem");
       expect(rows[0]).toHaveTextContent("No outcome");
@@ -158,11 +159,33 @@ describe("Live run", () => {
 
   it("is calm when not running outside market hours", async () => {
     await open(notRunning as unknown as Live);
+    expect(document.querySelector(".big-dot")).toHaveClass("dot-idle");
     expect(screen.getByRole("region", { name: "Status" }))
       .toHaveTextContent("Not running today · market closed");
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByText("No stock has been looked at today.")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Open position" })).toHaveTextContent("None.");
+  });
+
+  it("marks not running during market hours with the warn dot", async () => {
+    const body = { ...(notRunning as unknown as Live),
+      market: { ...NORMAL.market },
+      status: { kind: "not_running", sentence: "Not running today · run_day has not started",
+        reasons: [] } } as Live;
+    await open(body);
+    expect(document.querySelector(".big-dot")).toHaveClass("dot-warn");
+  });
+
+  it("shows a reached limit in the status sentence and on its bar", async () => {
+    const body = structuredClone(NORMAL) as Live;
+    body.status = { kind: "normal", reasons: [],
+      sentence: "Running · no new entries while 1 position is open (at most 1 at once)" };
+    body.key_limits[2] = { ...body.key_limits[2], limit: "1", reached: true, pct: 100 };
+    await open(body);
+    expect(screen.getByRole("region", { name: "Status" }))
+      .toHaveTextContent("no new entries while 1 position is open");
+    expect(document.querySelector('.limit[data-key="open_positions"]'))
+      .toHaveTextContent("1 of 1 · reached");
   });
 
   it("never shows an approval card: the ticket needs #212", async () => {
@@ -232,7 +255,8 @@ describe("polling", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS); });
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("Can't reach the local UI server.");
+    expect(alert).toHaveTextContent("Live data is not updating.");
+    expect(alert).toHaveTextContent("did not answer");
     expect(alert).toHaveTextContent("may be out of date");
     expect(screen.getByText("All normal · nothing needs you")).toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS); });

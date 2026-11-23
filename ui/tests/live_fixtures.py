@@ -90,7 +90,12 @@ def write_live(paths: Paths, kind: str) -> datetime:
     assert kind in KINDS, kind
     j = Journal(paths.journal)
     now = LIVE_NOW
-    configs(paths, **({"trading_enabled": False} if kind == "kill_switch" else {}))
+    # two positions at once, so "normal" is all normal with one open; the reached limit has
+    # its own test
+    changes: dict = {"max_open_positions": 2}
+    if kind == "kill_switch":
+        changes["trading_enabled"] = False
+    configs(paths, **changes)
     if kind in ("not_running", "not_running_closed"):
         # yesterday's heartbeat is still on disk; nothing ran today
         heartbeat(paths, LIVE_NOW - timedelta(days=3), "ended")

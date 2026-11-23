@@ -117,7 +117,15 @@ def test_a_heartbeat_90_s_old_is_not_stale(paths):
     assert body["run_day"]["stale"] is False and body["status"]["kind"] == "normal"
 
 
-@pytest.mark.parametrize("seconds", [1, 300])
+def test_a_heartbeat_a_second_ahead_is_not_the_future(paths):
+    """The clock is read before the heartbeat: a write in between is not a clock problem."""
+    now = write_live(paths, "normal")
+    heartbeat(paths, now + timedelta(seconds=1), "deciding AMD")
+    body = client(paths, now).get("/api/live").json()
+    assert body["run_day"]["future"] is False and body["status"]["kind"] == "normal"
+
+
+@pytest.mark.parametrize("seconds", [5, 300])
 def test_a_heartbeat_dated_in_the_future_is_stale_and_blocked(paths, seconds):
     now = write_live(paths, "normal")
     heartbeat(paths, now + timedelta(seconds=seconds), "deciding AMD")
@@ -301,7 +309,8 @@ def test_key_limits_and_caps_as_recorded(paths):
     k = {x["key"]: x for x in body["key_limits"] + body["caps"]}
     assert (k["decisions"]["used"], k["decisions"]["limit"]) == ("3", "10")
     assert (k["money_at_risk"]["used"], k["money_at_risk"]["limit"]) == ("15.91", "150.00")
-    assert (k["open_positions"]["used"], k["open_positions"]["reached"]) == ("1", True)
+    assert (k["open_positions"]["used"], k["open_positions"]["limit"]) == ("1", "2")
+    assert k["open_positions"]["reached"] is False
     assert (k["trades"]["used"], k["trades"]["limit"]) == ("1", "3")
     assert k["money_at_risk"]["unit"] == "usd" and k["money_at_risk"]["reached"] is False
 
@@ -409,8 +418,11 @@ def test_sources_collapse_when_all_are_ok(paths):
 def test_a_failed_source_expands_the_line_by_itself(paths):
     src = get(paths, "calendar_down")["sources"]
     assert src["ok"] is False and src["expanded"] is True
-    assert src["summary"].startswith("Earnings calendar (Alpha Vantage): no valid calendar "
-                                     "today, and all 5 calls are used")
+    assert src["summary"] == ("Not working: Earnings calendar (Alpha Vantage). Details "
+                              "below.")
+    av = src["items"][1]
+    assert av["ok"] is False
+    assert av["detail"].startswith("no valid calendar today, and all 5 calls are used")
 
 
 def test_a_failed_scan_is_a_failed_source(paths):
@@ -493,3 +505,117 @@ def test_golden_responses(paths, case):
         path.write_text(json.dumps(body, indent=2, ensure_ascii=False) + "\n",
                         encoding="utf-8")
     assert body == json.loads(path.read_text(encoding="utf-8"))
+
+
+# ---- review round 1 ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("at", ["9999-12-31T23:00:00-05:00", "0001-01-01T00:00:00+05:00"])
+def test_a_time_at_the_date_limits_is_never_a_500(paths, at):
+    now = write_live(paths, "normal")
+    Journal(paths.journal).append({"status": "run_day_scan", "at": at, "ok": True,
+                                   "candidates": [], "rejected": 0})
+    assert client(paths, now).get("/api/live").status_code == 200
+    body = json.loads((paths.state_dir / "run_day.heartbeat.json").read_text("utf-8"))
+    body["at"] = at
+    (paths.state_dir / "run_day.heartbeat.json").write_text(json.dumps(body), "utf-8")
+    r = client(paths, now).get("/api/live")
+    assert r.status_code == 200 and r.json()["status"]["kind"] == "blocked"
+    # History reads the same times
+    assert client(paths, now).get("/api/decisions").status_code == 200
+
+
+@pytest.mark.parametrize("body", [
+    {"at": 12, "pid": "x", "phase": ["a"]}, {}, {"at": None}, {"phase": 3, "pid": True},
+])
+def test_a_heartbeat_with_odd_types_is_shown_not_a_500(paths, body):
+    now = write_live(paths, "normal")
+    (paths.state_dir / "run_day.heartbeat.json").write_text(json.dumps(body), "utf-8")
+    r = client(paths, now).get("/api/live")
+    assert r.status_code == 200
+    rd = r.json()["run_day"]
+    assert rd["stale"] is True and rd["pid"] is None and rd["phase"] is None
+
+
+def test_a_held_day_is_not_held_after_a_restart_that_found_nothing(paths):
+    now = write_live(paths, "held")
+    Journal(paths.journal).append({"status": "run_day_start", "day": DAY,
+                                   "at": (now - timedelta(minutes=30)).isoformat(),
+                                   "pid": 4243, "caps": {}, "universe": []})
+    body = client(paths, now).get("/api/live").json()
+    assert body["status"]["kind"] == "normal", body["status"]
+
+
+def test_an_end_whose_reason_is_not_text_is_blocked(paths):
+    now = write_live(paths, "normal")
+    Journal(paths.journal).append({"status": "run_day_end", "day": DAY,
+                                   "at": now.isoformat(), "reason": ["x"]})
+    body = client(paths, now).get("/api/live").json()
+    assert body["status"]["kind"] == "blocked"
+    assert body["status"]["reasons"][0]["text"] == "run_day ended with no reason recorded"
+
+
+def test_after_a_normal_end_with_the_market_open_the_reasons_are_problems(paths):
+    now = write_live(paths, "ended")
+    configs(paths, trading_enabled=False)
+    body = client(paths, now).get("/api/live").json()
+    assert body["market"]["state"] == "open"
+    assert body["status"]["kind"] == "idle"
+    assert any("kill switch" in p["text"] for p in body["problems"])
+
+
+def test_the_normal_end_reasons_are_run_days_own():
+    """NORMAL_ENDS are pipeline/run_day.py's literal reasons: a reworded one fails here."""
+    src = (Path(__file__).resolve().parent.parent.parent / "pipeline" / "run_day.py"
+           ).read_text(encoding="utf-8")
+    assert '"entry window closed"' in src
+    assert 'f"no session ({closed_reason(today)})"' in src
+    assert lv.NORMAL_ENDS == ("entry window closed", "no session (")
+
+
+def test_a_phase_4_approval_without_a_client_order_id_shows_its_stop_and_target(paths):
+    now = write_live(paths, "normal")
+    lines = paths.journal.read_text(encoding="utf-8").splitlines()
+    out = []
+    for line in lines:
+        e = json.loads(line)
+        if e.get("status") == "approved_not_sent":
+            e.pop("client_order_id")
+        out.append(json.dumps(e))
+    paths.journal.write_text("\n".join(out) + "\n", encoding="utf-8")
+    p = client(paths, now).get("/api/live").json()["positions"][0]
+    assert (p["stop"], p["target"]) == ("243.77", "262.46")
+
+
+@pytest.mark.parametrize(("change", "words"), [
+    ({"max_open_positions": 1}, "1 position is open (at most 1 at once)"),
+    ({"max_trades_per_day": 1}, "all 1 of today's trades are used"),
+    ({"daily_loss_limit": "15.00"}, "today's money-at-risk limit ($15.00) is reached"),
+])
+def test_a_reached_risk_limit_is_said_never_all_normal(paths, change, words):
+    now = write_live(paths, "normal")
+    configs(paths, **{"max_open_positions": 2, **change})
+    st = client(paths, now).get("/api/live").json()["status"]
+    assert st["kind"] == "normal"
+    assert st["sentence"] == f"Running · no new entries while {words}"
+
+
+def test_a_calendar_not_in_yet_with_calls_left_is_blocked(paths):
+    now = write_live(paths, "normal")
+    os.remove(paths.journal.parent / "cache" / f"av-earnings-{DAY}.json")
+    budget(paths, av_calls=3)
+    st = client(paths, now).get("/api/live").json()["status"]
+    assert st["kind"] == "blocked"
+    assert st["reasons"][0]["code"] == "event_calendar"
+    assert "3 of 5 calls used" in st["reasons"][0]["text"]
+
+
+def test_a_stale_heartbeat_still_answers_304_between_polls(paths):
+    now = write_live(paths, "stale_heartbeat")
+    clock = {"now": now}
+    c = TestClient(create_app(paths, clock=lambda: clock["now"], web_dir=None),
+                   base_url="http://127.0.0.1")
+    r = c.get("/api/live")
+    assert r.json()["status"]["reasons"][0]["text"].startswith(
+        "run_day's last heartbeat was at 10:10:25 ET, more than 90 s ago")
+    clock["now"] = now + timedelta(seconds=2)
+    assert c.get("/api/live", headers={"If-None-Match": r.headers["etag"]}).status_code == 304

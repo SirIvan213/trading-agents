@@ -25,6 +25,13 @@ const KIND_CLASS: Record<Live["status"]["kind"], string> = {
   not_running: "dot-idle",
 };
 
+/** Not running while the market is open is worth a look (run_day should be running); outside
+ * market hours it is the calm, ordinary state. */
+function dotClass(kind: Live["status"]["kind"], market: Live["market"]["state"]): string {
+  if (kind === "not_running" && market === "open") return "dot-warn";
+  return KIND_CLASS[kind];
+}
+
 type State = {
   data: Live | null;
   error: string | null; // the last poll failed: the data below is from `asOf`
@@ -121,7 +128,7 @@ export function LiveRun() {
 
       {error && (
         <div role="alert" className="problems">
-          <strong>Can't reach the local UI server.</strong> {error}{" "}
+          <strong>Live data is not updating.</strong> {error}{" "}
           {data && asOf
             ? `What's below was last confirmed at ${asOf.toLocaleTimeString("en-US")} and may be out of date.`
             : "Nothing to show yet."}
@@ -148,7 +155,8 @@ function Ready({ data }: { data: Live }) {
 
       <section aria-label="Status" className={`card status-card status-${st.kind}`}>
         <div className="status-line">
-          <span className={`dot big-dot ${KIND_CLASS[st.kind]}`} aria-hidden="true" />
+          <span className={`dot big-dot ${dotClass(st.kind, data.market.state)}`}
+            aria-hidden="true" />
           <span className="status-sentence" data-kind={st.kind}>{st.sentence}</span>
           <span className="small muted">{data.market.text}</span>
         </div>

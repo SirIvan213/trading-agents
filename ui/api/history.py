@@ -80,10 +80,10 @@ def _when(entry: dict) -> datetime | None:
         if isinstance(text, str):
             try:
                 when = datetime.fromisoformat(text)
-            except ValueError:
+                if when.tzinfo is not None:
+                    return when.astimezone(NY)
+            except (ValueError, OverflowError):  # OverflowError: a time at the date limits
                 continue
-            if when.tzinfo is not None:
-                return when.astimezone(NY)
     return None
 
 

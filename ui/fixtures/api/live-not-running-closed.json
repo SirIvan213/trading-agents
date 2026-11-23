@@ -39,7 +39,7 @@
       "label": "Open positions",
       "unit": "count",
       "used": "0",
-      "limit": "1",
+      "limit": "2",
       "reached": false,
       "pct": 0,
       "note": null

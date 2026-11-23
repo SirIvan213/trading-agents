@@ -39,9 +39,9 @@
       "label": "Open positions",
       "unit": "count",
       "used": "1",
-      "limit": "1",
-      "reached": true,
-      "pct": 100,
+      "limit": "2",
+      "reached": false,
+      "pct": 50,
       "note": null
     }
   ],

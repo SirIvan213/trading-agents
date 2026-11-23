@@ -45,7 +45,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from journal.log import JournalError
-from journal.orders import APPROVED, SEND_UNKNOWN, SUBMITTED, SUBMITTING
+from journal.orders import (
+    APPROVED,
+    SEND_UNKNOWN,
+    SUBMITTED,
+    SUBMITTING,
+    OrderError,
+    client_order_id,
+)
 from tools.market_calendar import CalendarError, closed_reason, session_hours
 from ui.api.detail import cap
 from ui.api.history import decisions
@@ -62,9 +69,12 @@ from ui.api.readers.state import (
 
 NY = ZoneInfo("America/New_York")
 DEFAULT_SCAN = time(9, 40)  # pipeline.budget.RunDayConfig.scan_time's default
-NORMAL_ENDS = ("entry window closed", "no session (")  # run_day_end reasons of a normal day
+# run_day_end reasons of a normal day: pipeline/run_day.py _the_day's literals (a test reads
+# them there, so a reworded reason fails it)
+NORMAL_ENDS = ("entry window closed", "no session (")
 CAPS_KEYS = ("decisions", "tokens_used", "fmp_requests", "av_calls")
 SYMBOL_PHASE = re.compile(r"deciding ([A-Z][A-Z0-9.\-]{0,9})")  # Day.beat(f"deciding {sym}")
+HEARTBEAT_SKEW_S = 2  # the clock is read before the heartbeat: allow this much "future"
 NOT_FILLED = frozenset({SUBMITTING, SUBMITTED, SEND_UNKNOWN})
 TEXT = 300
 
@@ -123,9 +133,9 @@ def _ny(text: object) -> datetime | None:
         return None
     try:
         when = datetime.fromisoformat(text)
-    except ValueError:
+        return when.astimezone(NY) if when.tzinfo is not None else None
+    except (ValueError, OverflowError):  # OverflowError: a time at the date limits
         return None
-    return when.astimezone(NY) if when.tzinfo is not None else None
 
 
 @dataclass
@@ -150,7 +160,8 @@ def day_notes(entries: tuple[dict, ...], today: date) -> DayNotes:
         if not on_today:
             continue
         if status == "run_day_start":
-            notes.started, notes.ended = e, None  # a restart: only a later end counts
+            # a restart: only a later end counts, and its own held check decides again
+            notes.started, notes.ended, notes.held_alert = e, None, False
         elif status == "run_day_end":
             notes.ended = e  # also an end with no start (the budget closed at opening)
         elif status == "run_day_scan":
@@ -265,8 +276,8 @@ def build_sources(notes: DayNotes, budget: dict | None, caps: Any,
     ]
     failed = [i for i in items if i["ok"] is False]
     if failed:
-        summary = (f"{failed[0]['name']}: {failed[0]['detail']}"
-                   + (f" (and {len(failed) - 1} more)" if len(failed) > 1 else ""))
+        names = " and ".join(i["name"] for i in failed)
+        summary = f"Not working: {names}. Details below."
     elif all(i["ok"] is True for i in items):
         summary = f"All {len(items)} sources OK"
     else:
@@ -281,12 +292,24 @@ def build_positions(entries: tuple[dict, ...], orders: dict, reasons: dict) -> l
     """Orders that were sent and may still hold a position (any day), newest first. Fills
     are recorded by the reconciler (#155): until then a sent order is "sent, fill not
     recorded". Unrealized P&L is always null: the UI has no live quotes."""
-    approved = {e.get("client_order_id"): e for e in entries if e.get("status") == APPROVED}
+    # an approved entry without client_order_id (Phase 4) has the one its run and plan derive,
+    # as journal/orders.py from_approved gives it
+    approved: dict[str, dict] = {}
+    for e in entries:
+        if e.get("status") == APPROVED:
+            cid = e.get("client_order_id")
+            if not isinstance(cid, str):
+                try:
+                    cid = client_order_id(e.get("run_id"), e.get("plan_id"))
+                except (OrderError, ValueError, TypeError):
+                    continue
+            approved[cid] = e
     out = []
     for cid, o in orders.items():
         if not (o.sent and o.open):
             continue
-        order = (approved.get(cid) or {}).get("order") or {}
+        order = (approved.get(cid) or {}).get("order")
+        order = order if isinstance(order, dict) else {}
         if o.status in NOT_FILLED and o.filled_qty == 0:
             text = _sent_text(o.status)
         else:
@@ -388,7 +411,8 @@ def live(paths: Any, snap: JournalSnapshot, now: datetime, *, limits: Loaded,
                                 today=today, run_started=run_started)
     status = _status(reasons_, run_started=run_started, ended=ended, market=market,
                      now=now, scan_time=(run_cfg.value.scan_time if run_cfg.value is not None
-                                         else DEFAULT_SCAN), notes=notes)
+                                         else DEFAULT_SCAN), notes=notes,
+                     held_back=_held_back(day_state, lim))
     if status["kind"] != "blocked":  # never hidden: each reason is a problem instead
         for r in reasons_:
             problems.append({"level": "warn", "text": r["text"]})
@@ -442,7 +466,7 @@ def _iso(text: object) -> str | None:
 def _heartbeat(hb: StateFile, now: datetime, today: date) -> dict:
     age = heartbeat_age_s(hb, now)
     at = _ny(hb.data.get("at")) if hb.data is not None else None
-    future = age is not None and age < 0
+    future = age is not None and age < -HEARTBEAT_SKEW_S
     pid = hb.data.get("pid") if hb.data is not None else None
     phase = hb.data.get("phase") if hb.data is not None else None
     return {
@@ -481,10 +505,12 @@ def _blocked_reasons(*, limits: Any, limits_error: str | None, run_cfg: Loaded,
         add("heartbeat_future", "run_day's heartbeat is dated in the future: check the "
             "PC's clock")
     elif run_started and ended is None and hb_view["stale"]:
-        age = hb_view["age_s"]
-        add("heartbeat_stale", "run_day's heartbeat is "
-            + (f"{age:.0f} s old" if age is not None else "missing")
-            + ": it may have stopped")
+        # the time, not the age: the text (and so the ETag) stays the same between polls
+        at = hb_view["at"]
+        add("heartbeat_stale",
+            f"run_day's last heartbeat was at {at[11:19]} ET, more than "
+            f"{HEARTBEAT_STALE_S} s ago: it may have stopped" if at else
+            "run_day's heartbeat is missing or unreadable: it may have stopped")
     reason = ended.get("reason") if ended is not None else None
     held = notes.held_alert or (isinstance(reason, str) and reason.startswith("held:"))
     if held:
@@ -514,26 +540,50 @@ def _blocked_reasons(*, limits: Any, limits_error: str | None, run_cfg: Loaded,
             and f"av-earnings-{today.isoformat()}.json" not in names):
         add("event_calendar", "the earnings calendar could not be fetched today, so the "
             "event check blocks every new entry")
+    elif (budget.data is not None and caps is not None and names is not None
+            and budget.data["av_calls"] > 0
+            and f"av-earnings-{today.isoformat()}.json" not in names):
+        add("event_calendar", "the earnings calendar has not come in yet today "
+            f"({budget.data['av_calls']} of {caps.max_av_calls} calls used), so the event "
+            "check blocks new entries until it does")
     return out
 
 
+def _held_back(day_state: Any, limits: Any) -> str | None:
+    """Why risk_check refuses every new entry now although nothing is wrong: a limit the day
+    reached (tools/risk_check.py). Display only, from DayState and the limits."""
+    if day_state is None or limits is None:
+        return None
+    if day_state.open_positions >= limits.max_open_positions:
+        n = day_state.open_positions
+        return (f"{n} position{'s are' if n != 1 else ' is'} open (at most "
+                f"{limits.max_open_positions} at once)")
+    if day_state.trades_today >= limits.max_trades_per_day:
+        return f"all {limits.max_trades_per_day} of today's trades are used"
+    if day_state.risk_used_today >= limits.daily_loss_limit:
+        return f"today's money-at-risk limit (${limits.daily_loss_limit}) is reached"
+    return None
+
+
 def _status(reasons: list[dict], *, run_started: bool, ended: dict | None, market: dict,
-            now: datetime, scan_time: time, notes: DayNotes) -> dict:
+            now: datetime, scan_time: time, notes: DayNotes,
+            held_back: str | None = None) -> dict:
     if not run_started:
         tail = ("market closed" if market["state"] != "open"
                 else "run_day has not started")
         return {"kind": "not_running", "sentence": f"Not running today · {tail}",
                 "reasons": []}
-    # Blocked while the market is open, and outside it too while the run has not ended (a
-    # stale heartbeat before the open is still a run that stopped). After a run ended and
-    # the market closed, the day is over: its reasons are problems, not the status.
-    if reasons and (market["state"] == "open" or ended is None):
+    # Blocked while the run has not ended (a stale heartbeat before the open is still a run
+    # that stopped), and while the market is open after a run that ended on a problem. After
+    # a normal end, or once the market closed, the day is over: its reasons are problems.
+    reason = ended.get("reason") if ended is not None else None
+    normal_end = isinstance(reason, str) and reason.startswith(NORMAL_ENDS)
+    if reasons and (ended is None or (not normal_end and market["state"] == "open")):
         first = reasons[0]["text"]
         more = f" (and {len(reasons) - 1} more)" if len(reasons) > 1 else ""
         return {"kind": "blocked",
                 "sentence": f"New trades are blocked: {first}{more}", "reasons": reasons}
     if ended is not None:
-        reason = ended.get("reason")
         what = ("the entry window closed" if reason == "entry window closed"
                 else "no session today" if isinstance(reason, str)
                 and reason.startswith("no session (") else "run_day ended")
@@ -542,6 +592,9 @@ def _status(reasons: list[dict], *, run_started: bool, ended: dict | None, marke
         return {"kind": "idle", "sentence": f"Idle · {market['text']}", "reasons": []}
     if notes.scan is None and now.time() < scan_time:
         return {"kind": "idle", "sentence": f"Idle · waiting for the {_hm(scan_time)} scan",
+                "reasons": []}
+    if held_back:
+        return {"kind": "normal", "sentence": f"Running · no new entries while {held_back}",
                 "reasons": []}
     return {"kind": "normal", "sentence": "All normal · nothing needs you", "reasons": []}
 
