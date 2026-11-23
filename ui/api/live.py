@@ -507,8 +507,11 @@ def _blocked_reasons(*, limits: Any, limits_error: str | None, run_cfg: Loaded,
     elif run_started and ended is None and hb_view["stale"]:
         # the time, not the age: the text (and so the ETag) stays the same between polls
         at = hb_view["at"]
+        # the date too when the last heartbeat is from an earlier day
+        when = ((at[11:19] if at[:10] == today.isoformat() else f"{at[:10]} {at[11:19]}")
+                if at else "")
         add("heartbeat_stale",
-            f"run_day's last heartbeat was at {at[11:19]} ET, more than "
+            f"run_day's last heartbeat was at {when} ET, more than "
             f"{HEARTBEAT_STALE_S} s ago: it may have stopped" if at else
             "run_day's heartbeat is missing or unreadable: it may have stopped")
     reason = ended.get("reason") if ended is not None else None
@@ -578,7 +581,9 @@ def _status(reasons: list[dict], *, run_started: bool, ended: dict | None, marke
     # a normal end, or once the market closed, the day is over: its reasons are problems.
     reason = ended.get("reason") if ended is not None else None
     normal_end = isinstance(reason, str) and reason.startswith(NORMAL_ENDS)
-    if reasons and (ended is None or (not normal_end and market["state"] == "open")):
+    held = any(r["code"] == "held" for r in reasons)  # lasts all day, whatever the hour
+    if reasons and (held or ended is None
+                    or (not normal_end and market["state"] == "open")):
         first = reasons[0]["text"]
         more = f" (and {len(reasons) - 1} more)" if len(reasons) > 1 else ""
         return {"kind": "blocked",

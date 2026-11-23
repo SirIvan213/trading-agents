@@ -619,3 +619,25 @@ def test_a_stale_heartbeat_still_answers_304_between_polls(paths):
         "run_day's last heartbeat was at 10:10:25 ET, more than 90 s ago")
     clock["now"] = now + timedelta(seconds=2)
     assert c.get("/api/live", headers={"If-None-Match": r.headers["etag"]}).status_code == 304
+
+
+# ---- review round 2 ----------------------------------------------------------------------
+
+@pytest.mark.parametrize(("hour", "minute"), [(9, 27), (17, 0)])
+def test_a_held_day_is_blocked_outside_the_session_too(paths, hour, minute):
+    now = write_live(paths, "held").replace(hour=hour, minute=minute)
+    heartbeat(paths, now - timedelta(seconds=5), "ended")
+    body = client(paths, now).get("/api/live").json()
+    assert body["market"]["state"] == "closed"
+    assert body["status"]["kind"] == "blocked"
+    assert body["status"]["reasons"][0]["code"] == "held"
+    assert body["status"]["sentence"].startswith(
+        "New trades are blocked: a position from an earlier day may still be open")
+
+
+def test_a_stale_heartbeat_from_an_earlier_day_names_its_date(paths):
+    now = write_live(paths, "normal")
+    heartbeat(paths, now - timedelta(days=1), "deciding AMD")
+    st = client(paths, now).get("/api/live").json()["status"]
+    assert st["kind"] == "blocked"  # run_day started today and its heartbeat is old
+    assert "last heartbeat was at 2026-11-22 10:12:00 ET" in st["reasons"][0]["text"]

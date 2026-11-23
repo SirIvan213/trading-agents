@@ -297,7 +297,7 @@ function Positions({ positions }: { positions: LivePosition[] | null }) {
         <p className="orange">Not shown: the journal's order history does not replay.</p>
       )}
       {positions !== null && positions.length === 0 && (
-        <p className="muted">None. The system holds at most one stock at a time.</p>
+        <p className="muted">None.</p>
       )}
       {positions?.map((p) => (
         <div key={p.client_order_id} className="position" data-symbol={p.symbol}>
