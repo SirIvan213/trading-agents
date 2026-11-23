@@ -354,7 +354,7 @@ def reconcile_problem(day: Day) -> str | None:
 
 
 class _Reconcile(threading.Thread):
-    """Runs a reconcile pass every day.reconcile_s (default reconcile.POLL_S) seconds."""
+    """Runs a reconcile pass every `period` (reconcile.POLL_S) seconds."""
 
     def __init__(self, day: Day, period: float = RECONCILE_POLL_S) -> None:
         super().__init__(daemon=True, name="run-day-reconcile")
@@ -489,11 +489,9 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
         return REFUSED
     pulse = _Pulse(day)
     pulse.start()
-    if day.broker is not None:
+    if day.broker is not None:  # the thread starts after the held check (_the_day)
         day.reconciler = Reconciler(day.journal, day.reconcile_broker or day.broker,
                                     clock=day.clock, limits=limits)
-        day.reconcile_thread = _Reconcile(day)
-        day.reconcile_thread.start()
     try:
         return _the_day(day, limits, now, today, budget)
     except CapReached as exc:  # S9: a budget doubt anywhere ends the day cleanly
@@ -502,7 +500,7 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
         day.alert(f"run_day stopped on an unexpected error ({type(exc).__name__})")
         return _end(day, today, f"error: {type(exc).__name__}")
     finally:
-        if day.reconcile_thread is not None:
+        if day.reconcile_thread is not None:  # never on a held day: it never started
             day.reconcile_thread.stop()
             reconcile_pass(day)  # one last pass at the end of the day
         pulse.stop()
@@ -548,6 +546,9 @@ def _the_day(day: Day, limits: Any, now: datetime, today: date, budget: DailyBud
                   "today until Ivan checks it (nothing is closed automatically)", orders=held)
         _end(day, today, "held: position from an earlier day")
         return HELD
+    if day.reconciler is not None:  # not held: watch from now on (#155)
+        day.reconcile_thread = _Reconcile(day)
+        day.reconcile_thread.start()
     entry_start, entry_end, _flat = day_times(today, limits)
     at = lambda t: datetime.combine(today, t, tzinfo=NY)  # noqa: E731
     scan_at, end_at = at(day.config.scan_time), at(entry_end)

@@ -179,7 +179,13 @@ def _record(journal: Journal, cid: str, status: str, clock: Clock, result: SendR
             except JournalError:
                 current = None
             if current is not None and current.status not in (SUBMITTING, APPROVED):
-                return result
+                if current.status == status:
+                    return result
+                reason = (f"{result.reason or status}; the journal already reads "
+                          f"{current.status} (the reconciler recorded the broker's answer)")
+                _alert(f"order {cid}: {reason}")
+                return SendResult(current.status, reason, cid, result.broker_order_id,
+                                  result.verdict, alert=True, details=result.details)
     reason = (f"{result.reason or status}; the {status} event could NOT be journaled "
               f"({last}), the journal still reads submitting")
     _alert(f"order {cid}: {reason}")

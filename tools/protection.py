@@ -95,10 +95,12 @@ def stop_status(entry: dict, position_qty: object, *,
     sf, tf = _dec(stop.get("filled_qty") or "0"), _dec(target.get("filled_qty") or "0")
     if None in (sq, tq, sf, tf):
         return {"state": UNPROTECTED, "reason": "a leg's quantity is not readable"}
-    if sq != filled or tq != filled:
+    # the take-profit is sized to the fill; the stop too, or to what the take-profit left
+    # (in case Alpaca shrinks it after a partial take-profit fill)
+    if tq != filled or sq not in (filled, filled - tf):
         return {"state": UNPROTECTED, "reason": f"the legs are for {sq} and {tq} shares, "
                 f"the entry filled {filled}"}
-    left = filled - sf - tf
+    left = (sq - sf) if sq == filled - tf else filled - sf - tf
     if left != held:
         return {"state": UNPROTECTED,
                 "reason": f"the stop covers {left} of {held} shares held"}

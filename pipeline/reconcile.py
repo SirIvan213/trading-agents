@@ -64,9 +64,15 @@ from journal.orders import (
     client_order_id,
     replay,
 )
-from pipeline.flatten import FLAT, SKIPPED_UNREADABLE, FlattenResult, flatten_symbol
+from pipeline.flatten import (
+    CLOSING,
+    FLAT,
+    SKIPPED_UNREADABLE,
+    FlattenResult,
+    flatten_symbol,
+)
 from tools.broker import ACTION_LOCK, FINAL_STATUSES, BrokerError, is_close_order
-from tools.market_calendar import CalendarError, day_times
+from tools.market_calendar import CalendarError, day_times, session_hours
 from tools.protection import (
     EXECUTING,
     PENDING,
@@ -141,6 +147,8 @@ class Reconciler:
         self.retry_since: dict[str, datetime] = {}
         self.latest: dict[str, dict | None] = {}  # a lookup made after acting (a cancel)
         self.limits_by_cid: dict[str, Decimal] = {}
+        self.earlier_day: set[str] = set()  # symbols an earlier day's order may hold
+        self.known_cids: set[str] = set()
         self.report: dict[str, Any] = {}
 
     # ---- outputs ----------------------------------------------------------------------
@@ -212,6 +220,14 @@ class Reconciler:
         self.report["recorded"].append(what)
         return True
 
+    def _persisting(self, key: str, message: str, symbol: str | None = None) -> None:
+        """A failure that the next pass retries: recorded, and alerted once it has lasted
+        RETRY_ALERT_S (run_day never shows the report, so nothing may stay quiet)."""
+        self.report["errors"].append(message)
+        first = self.retry_since.setdefault(key, self._now())
+        if self._now() - first >= timedelta(seconds=RETRY_ALERT_S):
+            self._alert(f"{message} (since {first:%H:%M:%S})", symbol=symbol)
+
     def _moved_on(self, o: OrderState) -> bool:
         """The order's journal state differs from this pass's snapshot of it."""
         try:
@@ -227,8 +243,9 @@ class Reconciler:
         try:
             self.broker.cancel_order(order_id)
             self.report["actions"].append(f"cancel {what} ({order_id})")
+            self.retry_since.pop(f"cancel:{order_id}", None)
         except BrokerError as exc:  # never repeated blindly: the next lookup says
-            self.report["errors"].append(f"cancel {what} ({order_id}): {exc}")
+            self._persisting(f"cancel:{order_id}", f"cancel {what} ({order_id}) failed: {exc}")
 
     # ---- one pass ---------------------------------------------------------------------
     def pass_once(self) -> dict:
@@ -269,6 +286,10 @@ class Reconciler:
             reads.append(f"the journal cannot be read: {exc}")
             return
         today = now.date()
+        # before anything can act: the symbols an earlier day's order may hold (decision 8)
+        self.earlier_day = {o.symbol for o in orders.values()
+                            if o.sent and o.status not in (CLOSED, REJECTED)
+                            and o.approved_at.astimezone(NY).date() < today}
         approved = _approved_orders(entries)
         self.limits_by_cid = _limit_prices(entries)
         listing = positions = None
@@ -331,7 +352,13 @@ class Reconciler:
                     o.filled_qty > 0 or o.status in (SUBMITTING, SUBMITTED, SEND_UNKNOWN)):
                 owners.setdefault(o.symbol, []).append(o)
 
+        self.earlier_day |= {o.symbol for trades in owners.values() for o in trades
+                             if o.approved_at.astimezone(NY).date() < today}
+        self.known_cids = set(orders)
         if positions is not None:
+            for sym in list(self.stuck_since):
+                if sym not in positions:
+                    self.stuck_since.pop(sym, None)  # flat now: a later flatten starts fresh
             for sym, pos in positions.items():
                 self._protect(sym, pos, owners.get(sym, []), looked, approved, now, today)
             for sym, trades in holding.items():
@@ -349,7 +376,8 @@ class Reconciler:
                     known.update(leg["id"] for leg in found.get("legs") or [])
             for o in listing["orders"]:
                 # our own close, also for a fill the journal has not recorded yet
-                if o["id"] in known or (is_close_order(o) and o["symbol"] in owners):
+                if (o["id"] in known or o.get("client_order_id") in self.known_cids
+                        or (is_close_order(o) and o["symbol"] in owners)):
                     continue
                 self._block("orphan", f"orphan-order:{o['id']}",
                             f"an open {o['type']} {o['side']} order in {o['symbol']} is not "
@@ -379,8 +407,8 @@ class Reconciler:
         b_fill = _dec(found["filled_qty"]) or Decimal(0)
         avg = found.get("filled_avg_price")
         if o.status == REJECTED:
-            if b_status == "rejected" and b_fill == 0:
-                return  # the broker rejected it too: nothing to do
+            if b_status in ("rejected", "canceled", "expired") and b_fill == 0:
+                return  # the broker never filled it either: nothing to do
             self._block("conflict", f"rejected-held:{cid}",
                         f"the journal says {cid} ({o.symbol}) was rejected, but the broker "
                         f"holds it ({b_status})", symbol=o.symbol, client_order_id=cid)
@@ -438,7 +466,9 @@ class Reconciler:
             try:
                 again = self.broker.get_order_by_client_id(o.client_order_id)
             except BrokerError as exc:
-                self.report["errors"].append(f"confirm cancel {o.client_order_id}: {exc}")
+                self._persisting(f"confirm:{o.client_order_id}",
+                                 f"the cancel of {o.client_order_id} ({o.symbol}) could not be "
+                                 f"confirmed: {exc}", o.symbol)
                 return
             legs_done = all(g["status"] in FINAL for g in (again or {}).get("legs") or [])
             nothing_filled = again is None or not (_dec(again["filled_qty"]) or 0) > 0
@@ -448,10 +478,12 @@ class Reconciler:
                                  and (legs_done or not nothing_filled)):
                 break
             if self.monotonic() >= deadline:
-                self.report["errors"].append(f"cancel of {o.client_order_id} not confirmed "
-                                             "yet")
+                self._persisting(f"confirm:{o.client_order_id}",
+                                 f"the cancel of {o.client_order_id} ({o.symbol}) is not "
+                                 "confirmed yet", o.symbol)
                 return
             self.sleep(1.0)
+        self.retry_since.pop(f"confirm:{o.client_order_id}", None)
         self.latest[o.client_order_id] = again
         if again is not None:
             try:
@@ -536,6 +568,13 @@ class Reconciler:
         self._flatten(sym, cids, verdict["reason"], now)
 
     def _flatten(self, sym: str, cids: list[str], why: str, now: datetime) -> FlattenResult:
+        if sym in self.earlier_day:
+            # decision 8 and the PR 5 morning rule: nothing an earlier day's order may hold
+            # is closed or cancelled automatically, whatever the path (#155 review)
+            self._block("unprotected", f"earlier-day-symbol:{sym}",
+                        f"{sym} would be flattened ({why}), but an order from an earlier day "
+                        f"may hold it: {EARLIER_DAY}", symbol=sym)
+            return FlattenResult("held", "an earlier day's position: not acted on")
         if self.check_only:
             self._would(f"flatten {sym} ({why}): cancel its legs and orders, confirm, close")
             return FlattenResult("check", "check only")
@@ -544,6 +583,13 @@ class Reconciler:
         self.report["actions"].extend(result.actions)
         if result.state == FLAT:
             self.stuck_since.pop(sym, None)
+            return result
+        if result.state == CLOSING and not self._market_open(now):
+            # a market close queued for the open: say so once, never escalate before then
+            if sym not in self.stuck_since:
+                self._alert(f"{sym}: {result.detail}; it fills when the market opens",
+                            symbol=sym)
+            self.stuck_since.setdefault(sym, now)
             return result
         # not flat yet: alert every pass, never quiet; loud after LOUD_S or at the flat-by
         first = self.stuck_since.setdefault(sym, now)
@@ -558,6 +604,14 @@ class Reconciler:
             self._alert(f"{sym}: {what} ({result.detail}); the next pass tries again",
                         symbol=sym)
         return result
+
+    @staticmethod
+    def _market_open(now: datetime) -> bool:
+        try:
+            hours = session_hours(now.date())
+        except CalendarError:
+            return True  # unknown: never hold back an alert
+        return hours is not None and hours[0] <= now.time() < hours[1]
 
     def _flat_by(self, now: datetime) -> datetime | None:
         if self.limits is None:
@@ -581,10 +635,19 @@ class Reconciler:
                               "qty": leg["filled_qty"], "avg": leg["filled_avg_price"],
                               "at": leg.get("filled_at")})
         try:
-            closes = self.broker.list_orders(o.symbol)
+            history = self.broker.list_orders_checked(o.symbol)
         except BrokerError as exc:
-            self.report["errors"].append(f"close orders for {o.symbol}: {exc}")
+            self._persisting(f"history:{o.symbol}", f"{o.symbol}'s recent orders cannot be "
+                             f"read, so its close is not recorded yet: {exc}", o.symbol)
             return
+        self.retry_since.pop(f"history:{o.symbol}", None)
+        for u in history["unreadable"]:
+            self._block("unreadable_order",
+                        f"unreadable:{u.get('id') or u.get('symbol') or u.get('why')}",
+                        f"an order in {o.symbol}'s recent history cannot be read (id "
+                        f"{u.get('id')}: {u.get('why')}); the close is recorded from the "
+                        "readable fills", symbol=o.symbol)
+        closes = history["orders"]
         opened = _when(found.get("submitted_at"))
         for c in closes:
             if not is_close_order(c) or not (_dec(c["filled_qty"]) or 0) > 0:
