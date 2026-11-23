@@ -349,3 +349,75 @@ def test_blocked_an_unrelated_simple_stop_makes_a_listing_fail_closed():
     b, _ = client({("GET", "/v2/orders"): (200, [stray])})
     with pytest.raises(BrokerError, match="simple order of an unexpected type"):
         b.list_open_orders()
+
+
+# ---- #246: listings parsed one order at a time -------------------------------------------
+
+def stray_stop(**over):
+    """A hand-placed simple stop: a type this system never places."""
+    return {**rec("close_position_simple.json")["body"], "id": "stray-1", "symbol": "AAPL",
+            "type": "stop", "stop_price": "200.00", "order_class": "", **over}
+
+
+def test_a_checked_listing_keeps_the_readable_orders_and_reports_the_stray_one():
+    listing = rec("open_orders_missing_held_stop.json")["body"] + [stray_stop()]
+    b, _ = client({("GET", "/v2/orders"): (200, listing)})
+    out = b.list_open_orders_checked()
+    assert [(o["symbol"], o["type"]) for o in out["orders"]] == [("SPY", "limit")]
+    assert out["unreadable"] == [{"id": "stray-1", "symbol": "AAPL",
+                                  "why": "broker reply is a simple order of an unexpected type"}]
+    # the strict listing still fails closed on the same reply
+    with pytest.raises(BrokerError, match="could not be read"):
+        b.list_open_orders()
+
+
+@pytest.mark.parametrize("over, oid, sym", [
+    ({"id": "../etc", "symbol": "aapl"}, None, None),  # not a plain id; not canonical
+    ({"id": 7, "symbol": ["AAPL"]}, None, None),
+    ({"status": "weird", "id": "ok-1", "symbol": "SPY"}, "ok-1", "SPY"),
+])
+def test_an_unreadable_order_reports_only_plain_ids_and_symbols(over, oid, sym):
+    b, _ = client({("GET", "/v2/orders"): (200, [stray_stop(**over)])})
+    (u,) = b.list_open_orders_checked()["unreadable"]
+    assert (u["id"], u["symbol"]) == (oid, sym)
+    assert "weird" not in u["why"] and "etc" not in u["why"]  # never echoes the reply
+
+
+@pytest.mark.parametrize("item", ["not an order", 3, None, []])
+def test_a_non_object_in_a_listing_is_unreadable_not_a_crash(item):
+    b, _ = client({("GET", "/v2/orders"): (200, [item])})
+    (u,) = b.list_open_orders_checked()["unreadable"]
+    assert u == {"id": None, "symbol": None, "why": "broker reply is not an order"}
+
+
+def test_a_listing_that_is_not_a_list_still_raises():
+    b, _ = client({("GET", "/v2/orders"): (200, {"orders": []})})
+    with pytest.raises(BrokerError, match="not a list"):
+        b.list_open_orders_checked()
+
+
+def test_list_orders_checked_drops_other_symbols_but_reports_every_unreadable():
+    other = {**rec("close_position_simple.json")["body"], "symbol": "QQQ"}
+    reply = rec("open_orders_with_close.json")["body"] + [other, stray_stop()]
+    b, fake = client({("GET", "/v2/orders"): (200, reply)})
+    out = b.list_orders_checked("SPY")
+    assert [o["symbol"] for o in out["orders"]] == ["SPY"]
+    assert [u["id"] for u in out["unreadable"]] == ["stray-1"]
+    assert "symbols=SPY" in fake.requests[-1].full_url
+
+
+def test_check_close_still_fails_closed_on_an_unreadable_order_in_its_symbol():
+    reply = rec("open_orders_with_close.json")["body"] + [stray_stop(symbol="SPY")]
+    b, _ = client({("GET", "/v2/orders"): (200, reply),
+                   ("GET", "/v2/positions"): served("positions_legs_open.json")})
+    with pytest.raises(BrokerError, match="could not be read"):
+        b.check_close("SPY")
+
+
+def test_check_close_counts_only_a_market_sell_as_a_close():
+    limit_sell = {**rec("close_position_simple.json")["body"], "type": "limit",
+                  "limit_price": "730.00", "status": "new"}
+    b, _ = client({("GET", "/v2/orders"): (200, [limit_sell]),
+                   ("GET", "/v2/positions"): served("positions_legs_open.json")})
+    out = b.check_close("SPY")
+    assert out["state"] == "open" and out["close_orders"] == []

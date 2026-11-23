@@ -213,8 +213,20 @@ class Probe:
 
     @staticmethod
     def _is_close(o: dict) -> bool:
-        """A closing order (DELETE /v2/positions: a simple sell)."""
-        return o.get("side") == "sell" and o.get("order_class") == "simple"
+        """A closing order (DELETE /v2/positions: a simple market sell)."""
+        return (o.get("side") == "sell" and o.get("order_class") == "simple"
+                and o.get("type") == "market")
+
+    def _open_mine(self) -> list[dict]:
+        """The symbol's open orders. An order the parser cannot read is ignored only when it
+        is plainly in another symbol (#246); one in this symbol, or with no readable symbol,
+        raises BrokerError (fail closed: the probe never assumes its symbol is clear)."""
+        listing = self.b.list_open_orders_checked()
+        bad = [u for u in listing["unreadable"] if u["symbol"] in (None, self.symbol)]
+        if bad:
+            raise BrokerError(f"an open order that may be in {self.symbol} cannot be read "
+                              f"({bad[0]['why']})")
+        return self._mine(listing["orders"])
 
     def _position(self) -> dict | None:
         return next((p for p in self.b.list_positions() if p["symbol"] == self.symbol), None)
@@ -237,7 +249,7 @@ class Probe:
                     f"are time in force day, so run the probe earlier")
         if self._position() is not None:
             return f"the paper account already holds {self.symbol}: the probe leaves it alone"
-        if self._mine(self.b.list_open_orders()):
+        if self._open_mine():
             return f"the paper account has open orders in {self.symbol}"
         return None
 
@@ -292,7 +304,7 @@ class Probe:
         legs = entry.get("legs") or []
         r["5_legs_before_close"] = legs
         r["5_position_before_close"] = self._position()
-        r["5_open_orders_listing"] = self._mine(self.b.list_open_orders())
+        r["5_open_orders_listing"] = self._open_mine()
         try:
             closed = self.b.close_position(self.symbol)
             r["5_close_with_legs_open"] = {"closed": True, "order": closed}
@@ -306,7 +318,7 @@ class Probe:
         for leg in legs:
             if leg.get("status") not in FINAL:
                 self._cancel(leg["id"], f"6_cancel_leg_{leg.get('type')}")
-        r["6_legs_gone"] = self._wait(lambda: not self._mine(self.b.list_open_orders()),
+        r["6_legs_gone"] = self._wait(lambda: not self._open_mine(),
                                       LEGS_WAIT_S)
         if not r["6_legs_gone"]:
             self.errors.append("6_legs_gone: the legs were still listed")
@@ -354,7 +366,7 @@ class Probe:
             notes.append(f"look up the entry's legs: {exc}")
         closing = False
         try:
-            orders = self._mine(self.b.list_open_orders())
+            orders = self._open_mine()
         except BrokerError as exc:
             notes.append(f"list orders: {exc}")
             orders = []
@@ -369,7 +381,7 @@ class Probe:
             except BrokerError as exc:
                 notes.append(f"cancel {oid}: {exc}")
         try:
-            self._wait(lambda: not [o for o in self._mine(self.b.list_open_orders())
+            self._wait(lambda: not [o for o in self._open_mine()
                                     if not self._is_close(o)], LEGS_WAIT_S)
         except BrokerError as exc:
             notes.append(f"wait for cancels: {exc}")
@@ -382,7 +394,7 @@ class Probe:
                 notes.append(f"close check: {self._check_close().get('state')}")
         try:
             return self._wait(lambda: self._position() is None
-                              and not self._mine(self.b.list_open_orders()), FLAT_WAIT_S)
+                              and not self._open_mine(), FLAT_WAIT_S)
         except BrokerError as exc:
             notes.append(f"flat check: {exc}")
             return False
