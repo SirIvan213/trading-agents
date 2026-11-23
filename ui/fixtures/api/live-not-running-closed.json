@@ -1,0 +1,134 @@
+{
+  "as_of": "2026-11-23T18:12:00-05:00",
+  "et_date": "2026-11-23",
+  "market": {
+    "state": "closed",
+    "text": "Market closed for the day",
+    "open": false,
+    "opens": "09:30",
+    "closes": "16:00"
+  },
+  "status": {
+    "kind": "not_running",
+    "sentence": "Not running today · market closed",
+    "reasons": []
+  },
+  "key_limits": [
+    {
+      "key": "decisions",
+      "label": "AI decisions today",
+      "unit": "count",
+      "used": null,
+      "limit": "10",
+      "reached": false,
+      "pct": null,
+      "note": null
+    },
+    {
+      "key": "money_at_risk",
+      "label": "Money at risk today",
+      "unit": "usd",
+      "used": "0",
+      "limit": "150.00",
+      "reached": false,
+      "pct": 0,
+      "note": null
+    },
+    {
+      "key": "open_positions",
+      "label": "Open positions",
+      "unit": "count",
+      "used": "0",
+      "limit": "1",
+      "reached": false,
+      "pct": 0,
+      "note": null
+    }
+  ],
+  "caps": [
+    {
+      "key": "tokens",
+      "label": "AI usage (tokens)",
+      "unit": "tokens",
+      "used": null,
+      "limit": "600000",
+      "reached": false,
+      "pct": null,
+      "note": null
+    },
+    {
+      "key": "av_calls",
+      "label": "Earnings calendar calls (Alpha Vantage)",
+      "unit": "count",
+      "used": null,
+      "limit": "5",
+      "reached": false,
+      "pct": null,
+      "note": null
+    },
+    {
+      "key": "fmp_requests",
+      "label": "FMP data calls",
+      "unit": "count",
+      "used": null,
+      "limit": "3",
+      "reached": false,
+      "pct": null,
+      "note": null
+    },
+    {
+      "key": "trades",
+      "label": "Trades today",
+      "unit": "count",
+      "used": "0",
+      "limit": "3",
+      "reached": false,
+      "pct": 0,
+      "note": null
+    }
+  ],
+  "ceilings": {
+    "max_decisions": 10,
+    "max_tokens": 600000,
+    "max_fmp_requests": 3,
+    "max_av_calls": 5
+  },
+  "ticket": null,
+  "today": [],
+  "current": null,
+  "positions": [],
+  "sources": {
+    "ok": true,
+    "summary": "0 of 3 sources used today, none failed",
+    "expanded": false,
+    "items": [
+      {
+        "name": "Prices (Alpaca)",
+        "ok": null,
+        "detail": "no scan yet today"
+      },
+      {
+        "name": "Earnings calendar (Alpha Vantage)",
+        "ok": null,
+        "detail": "not known: the budget cannot be read"
+      },
+      {
+        "name": "Earnings calendar (FMP, block-only)",
+        "ok": null,
+        "detail": "not known: the budget cannot be read"
+      }
+    ]
+  },
+  "run_day": {
+    "heartbeat_at": "2026-11-20T10:12:00-05:00",
+    "age_s": 288000.0,
+    "stale": true,
+    "future": false,
+    "phase": "ended",
+    "pid": 4242,
+    "started_at": null,
+    "last_scan_at": null,
+    "last_end": null
+  },
+  "problems": []
+}

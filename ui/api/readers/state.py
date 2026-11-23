@@ -10,7 +10,8 @@ handle), and a budget write still blocked after its 0.5 s retry is CapReached an
 day's decisions. So these files are read only through open_shared (read_state_file), one read
 at a time, never held open. /api/health needs only whether today's budget file exists, which
 budget_exists reads from the folder's listing without opening the file; the Live run page
-(UI-5, #218) will read the budget's contents. The heartbeat's write is best effort, and the
+(UI-5, #218, ui/api/live.py) reads the budget's contents with ONE read_state_file call per
+request. The heartbeat's write is best effort, and the
 next one follows within 30 s.
 """
 from __future__ import annotations

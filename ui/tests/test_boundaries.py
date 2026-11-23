@@ -47,7 +47,8 @@ def loaded_modules() -> list[str]:
             "d = Path(tempfile.mkdtemp()); "
             "c = TestClient(ui.api.app.create_app(Paths(d / 'j', d / 's', d / 'c'), "
             "web_dir=None), base_url='http://127.0.0.1'); "
-            "[c.get(u) for u in ('/api/health', '/api/explainer', '/')]; "
+            "[c.get(u) for u in ('/api/health', '/api/explainer', '/api/live', "
+            "'/api/decisions', '/')]; "
             "print(json.dumps(sorted(sys.modules)))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True,
                          text=True, check=True, timeout=120)
