@@ -218,3 +218,37 @@ def test_check_shows_a_position_waiting_for_its_legs(tmp_path, capsys):
     rc.main(["--check"], broker=r.broker, journal=j, clock=clock)
     report = json.loads(capsys.readouterr().out)
     assert any("still activating" in w for w in report["would"])
+
+
+def test_a_rejection_with_a_fill_is_a_conflict(tmp_path):
+    sim, j, clock, r, alerts = world(tmp_path)
+    cid = sent(j, qty=10)
+    e = sim.add_entry(cid, qty=10)
+    e.update(status="rejected", filled_qty="3", filled_avg_price="718.32")
+    r.pass_once()
+    assert any(b["key"] == f"qty:{cid}:rejected" for b in blocks(j))
+
+
+def test_a_rejection_after_a_recorded_partial_fill_is_a_conflict(tmp_path):
+    sim, j, clock, r, alerts = world(tmp_path)
+    cid = sent(j, qty=10)
+    e = sim.add_entry(cid, qty=10)
+    sim.fill(cid, qty=4)
+    r.pass_once()
+    e["status"] = "rejected"
+    clock.step(5)
+    r.pass_once()
+    assert any(b["key"] == f"qty:{cid}:rejected" for b in blocks(j))
+
+
+def test_a_partial_then_full_fill_raises_no_quantity_conflict(tmp_path):
+    sim, j, clock, r, alerts = world(tmp_path)
+    cid = sent(j, qty=10)
+    sim.add_entry(cid, qty=10)
+    sim.fill(cid, qty=4)
+    r.pass_once()
+    sim.fill(cid, qty=10)
+    clock.step(5)
+    r.pass_once()
+    assert statuses(j, cid)[-1] == "filled"
+    assert not any(b["key"].startswith("qty:") for b in blocks(j))
