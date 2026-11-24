@@ -19,7 +19,8 @@ The day (New York time, the NYSE calendar in tools/market_calendar.py):
   3. start-of-day check (decision 8): an order sent on an earlier day that may still hold a
      position blocks, alerts and holds the day (HELD): no decisions, nothing closed. With a
      broker (#209), so does any position or open order AT THE BROKER that no order sent
-     today explains, and a broker that cannot be checked (fail closed);
+     today explains, matched by order, never by symbol (#257: a position larger than
+     today's fills explain holds too), and a broker that cannot be checked (fail closed);
   4. the scan at scan_time (09:40 by default, #131: trades and quotes are fresh by then, so
      the 120 s staleness rule applies unchanged), over the configured universe, with the
      listing (#168) and quarterly-reporting (#170) checks;
@@ -61,12 +62,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from agents.orchestrator import load_checked_limits
 from journal.log import Journal, JournalError
-from journal.orders import APPROVED, SEND_UNKNOWN, SUBMITTING
+from journal.orders import APPROVED, CLOSED, SEND_UNKNOWN, SUBMITTING, OrderState
 from pipeline.budget import (
     STATE_DIR,
     AlreadyDecided,
@@ -453,60 +455,113 @@ def block_held(day: Day, held: list[str]) -> None:
               + EARLIER_DAY, symbol=sym, client_order_id=cid)
 
 
-def broker_start_check(day: Day, today: date) -> tuple[list[str], list[str]] | None:
-    """#209: before the reconciler starts, what AT THE BROKER no order sent today explains:
-    a position or an open order (from an earlier day, or placed by hand), or an open order
-    that cannot be read. Each is blocked. Returns (those, today's positions), ([], ...) when
-    clean; None when the broker cannot be checked (the caller holds the day: fail closed).
-    Reads only: nothing is closed or cancelled (decision 8). The account flags are the
-    paper-account check's.
+def held_by_today(sent_today: dict[str, OrderState],
+                  looked: dict[str, dict | None]) -> tuple[dict[str, Decimal], set[str]]:
+    """#257: the shares the orders sent today still hold, per symbol, by the broker's own
+    record of each order (its lookup with legs): the entry's filled quantity less what its
+    legs sold. A trade the journal has closed holds none, and neither does an order the
+    broker does not know (or shows in another symbol). Also the ids of those orders' bracket
+    legs. Pure: no broker call."""
+    held: dict[str, Decimal] = {}
+    legs: set[str] = set()
+    for cid, o in sent_today.items():
+        found = looked.get(cid)
+        if found is None or found["symbol"] != o.symbol:
+            continue
+        legs.update(g["id"] for g in found["legs"])
+        if o.status == CLOSED:
+            continue
+        sold = sum((Decimal(g["filled_qty"]) for g in found["legs"]), Decimal(0))
+        left = Decimal(found["filled_qty"]) - sold
+        if left > 0:
+            held[o.symbol] = held.get(o.symbol, Decimal(0)) + left
+    return held, legs
 
-    It matches by symbol: on a restart, something left from an earlier day in a symbol also
-    traded today passes here; the reconciler's quantity and orphan checks judge it then."""
+
+def broker_start_check(day: Day, today: date
+                       ) -> tuple[list[str], list[str], list[str]] | None:
+    """#209, #257: before the reconciler starts, what AT THE BROKER no order sent today
+    explains, matched BY ORDER, never by symbol. Each is blocked:
+      - an open order, unless it is an order sent today (its client_order_id, same symbol) or
+        one of their bracket legs (the leg ids each one's lookup shows);
+      - a position, unless it is long and no larger than what today's orders still hold
+        (held_by_today). Partly explained is unexplained: a position larger than today's
+        fills explain is blocked in full;
+      - an open order that cannot be read.
+    So an earlier day's leftover (or something placed by hand) in a symbol also traded today
+    holds the day like any other, on a run_day restart too. Our own flat-by close has an
+    Alpaca-made id that nothing records, so a close still working at a restart holds the day
+    as well (fail closed).
+
+    Returns (those, what of today's is at the broker: positions and working entries, the
+    symbols holding both), ([], ...) when clean; None when the broker cannot be checked (the
+    caller holds the day: fail closed). Reads only: nothing is closed or cancelled (decision
+    8). The account flags are the paper-account check's. Today's orders are looked up BEFORE
+    the positions are read, so a fill landing between the reads can only make a position
+    look larger (a hold), never hide a leftover."""
     broker = day.reconcile_broker or day.broker
     try:
+        orders = day.journal.orders()
+        sent_today = {cid: o for cid, o in orders.items()
+                      if o.sent and o.approved_at.astimezone(NY).date() == today}
         with ACTION_LOCK:
             broker.verify_paper_account()  # active, not blocked or suspended, no shorting
+            looked = {cid: broker.get_order_by_client_id(cid) for cid in sent_today}
             positions = broker.list_positions()
             listing = broker.list_open_orders_checked()
-        orders = day.journal.orders()
     except (BrokerError, JournalError) as exc:
         day.alert(f"the start-of-day broker check failed ({exc}): no decisions today "
                   "(fail closed)")
         return None
-    sent_today = {cid: o for cid, o in orders.items()
-                  if o.sent and o.approved_at.astimezone(NY).date() == today}
-    symbols_today = {o.symbol for o in sent_today.values()}
+    held, leg_ids = held_by_today(sent_today, looked)
     found: list[str] = []
+    todays: list[str] = []
+    today_syms: set[str] = set(held)
+    unexplained: set[str | None] = set()
     for pos in positions:
-        if pos["symbol"] not in symbols_today:
-            what = f"a {pos.get('side')} position in {pos['symbol']} ({pos.get('qty')} shares)"
-            found.append(what)
-            block(day, "orphan", f"start-of-day:{pos['symbol']}",
-                  f"{what} at the start of the day, not from an order sent today: "
-                  + EARLIER_DAY, symbol=pos["symbol"])
+        sym = pos["symbol"]
+        mine = held.get(sym, Decimal(0))
+        if mine > 0:
+            todays.append(f"{sym} position ({pos.get('qty')} shares)")
+        if pos.get("side") == "long" and Decimal(pos["qty"]) <= mine:
+            continue
+        unexplained.add(sym)
+        what = f"a {pos.get('side')} position in {sym} ({pos.get('qty')} shares)"
+        why = (f"orders sent today explain only {mine} of them" if mine > 0
+               else "not from an order sent today")
+        found.append(f"{what}: {why}")
+        block(day, "orphan", f"start-of-day:{sym}",
+              f"{what} at the start of the day, {why}: " + EARLIER_DAY, symbol=sym)
     for o in listing["orders"]:
-        if o["symbol"] not in symbols_today and o.get("client_order_id") not in sent_today:
-            what = f"an open {o['type']} {o['side']} order in {o['symbol']} ({o['id']})"
-            found.append(what)
-            block(day, "orphan", f"start-of-day-order:{o['id']}",
-                  f"{what} at the start of the day, not from an order sent today: "
-                  + EARLIER_DAY, symbol=o["symbol"])
+        entry = sent_today.get(o.get("client_order_id"))
+        if entry is not None and entry.symbol == o["symbol"]:
+            today_syms.add(o["symbol"])
+            todays.append(f"{o['symbol']} entry order ({o['status']})")
+            continue
+        if o["id"] in leg_ids:
+            continue
+        unexplained.add(o["symbol"])
+        what = f"an open {o['type']} {o['side']} order in {o['symbol']} ({o['id']})"
+        found.append(what)
+        block(day, "orphan", f"start-of-day-order:{o['id']}",
+              f"{what} at the start of the day, not from an order sent today: "
+              + EARLIER_DAY, symbol=o["symbol"])
     for u in listing["unreadable"]:
+        unexplained.add(u.get("symbol"))
         what = f"an open order that cannot be read (id {u.get('id')}, symbol {u.get('symbol')})"
         found.append(what)
         block(day, "unreadable_order",
               f"unreadable:{u.get('id') or u.get('symbol') or u.get('why')}",
               f"{what} at the start of the day: " + EARLIER_DAY, symbol=u.get("symbol"))
-    todays = [f"{p['symbol']} position ({p.get('qty')} shares)" for p in positions
-              if p["symbol"] in symbols_today]
-    return found, todays
+    return found, todays, sorted(s for s in today_syms & unexplained if s is not None)
 
 
-def _held_unwatched(day: Day, todays: list[str] | None = None) -> None:
+def _held_unwatched(day: Day, todays: list[str] | None = None,
+                    mixed: list[str] | None = None) -> None:
     """A held day starts no reconciler, so nothing watches or flattens today's positions (a
     restart): say so (#135 review). None: the broker could not be read, so say it may hold
-    some."""
+    some. `mixed`: symbols holding both today's and an earlier day's; pipeline.flatten --now
+    matches by symbol and would close or cancel both, so it is not advised then (#257)."""
     if todays == []:
         return
     if todays is None:  # the broker could not be read: only if an order was sent today
@@ -519,8 +574,13 @@ def _held_unwatched(day: Day, todays: list[str] | None = None) -> None:
             pass  # cannot tell: say it
     what = ("; ".join(todays) if todays else
             "any position of today's (the broker could not be read)")
-    day.alert(f"held: run_day will not watch or flatten {what}. MANUAL ACTION NEEDED: check "
-              "the Alpaca paper dashboard, or run python -m pipeline.flatten --now")
+    if mixed:
+        how = ("close today's shares in the Alpaca paper dashboard. Do NOT run "
+               "python -m pipeline.flatten --now: it matches by symbol, so it would also close "
+               "or cancel what an earlier day left in " + ", ".join(mixed))
+    else:
+        how = "check the Alpaca paper dashboard, or run python -m pipeline.flatten --now"
+    day.alert(f"held: run_day will not watch or flatten {what}. MANUAL ACTION NEEDED: {how}")
 
 
 def _unsettled_sends(day: Day) -> list[str]:
@@ -689,12 +749,12 @@ def _the_day(day: Day, limits: Any, now: datetime, today: date, budget: DailyBud
             _held_unwatched(day)
             _end(day, today, "held: the start-of-day broker check failed")
             return HELD
-        found, todays = checked
+        found, todays, mixed = checked
         if found:
             day.alert("at the broker, not from an order sent today: " + "; ".join(found)
                       + ". No decisions today until Ivan checks it (nothing is closed "
                       "automatically)")
-            _held_unwatched(day, todays)
+            _held_unwatched(day, todays, mixed)
             _end(day, today, "held: the broker holds something from an earlier day")
             return HELD
         day.reconcile_thread = _Reconcile(day)
