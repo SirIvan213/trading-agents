@@ -193,9 +193,10 @@ def test_a_position_smaller_than_todays_fills_is_explained(tmp_path, monkeypatch
 
 # ================= reads, and their order =================
 
-def test_todays_orders_are_looked_up_before_the_positions_are_read(tmp_path, monkeypatch):
-    """A fill landing between the reads can then only make a position look larger (a hold),
-    never hide a leftover."""
+def test_todays_orders_are_looked_up_before_and_after_the_positions_read(tmp_path,
+                                                                         monkeypatch):
+    """The entry's fill from before, the legs' sales from after: a fill landing between the
+    reads can then only make a position look larger (a hold), never hide a leftover."""
     sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch, start=RESTART)
     today_trade(sim, day)
     calls = []
@@ -204,7 +205,72 @@ def test_todays_orders_are_looked_up_before_the_positions_are_read(tmp_path, mon
         monkeypatch.setattr(day.broker, name,
                             lambda *a, _n=name, _r=real: calls.append(_n) or _r(*a))
     check(day)
-    assert calls == ["get_order_by_client_id", "list_positions", "list_open_orders_checked"]
+    assert calls == ["get_order_by_client_id", "list_positions", "get_order_by_client_id",
+                     "list_open_orders_checked"]
+
+
+def test_an_exit_between_the_reads_does_not_hide_a_leftover(tmp_path, monkeypatch):
+    """Review B2: today's 10 SPY and an earlier day's 3. The take-profit sells today's 10
+    right after the first lookup: the positions read shows 3, the first lookup still says
+    nothing sold. The legs' sales come from the lookup after the read: 10 - 10 = 0 explained,
+    so the 3 hold the day."""
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch, start=RESTART)
+    cid = today_trade(sim, day, qty=10)
+    sim.positions["SPY"] += 3
+    real = day.broker.list_positions
+
+    def exit_then_read():
+        sim.fill_leg(cid, "limit", "721.72")  # today's 10 sold (the sim drops the position)
+        sim.positions["SPY"] = 3  # the earlier day's 3 remain
+        return real()
+
+    monkeypatch.setattr(day.broker, "list_positions", exit_then_read)
+    found, todays, mixed = check(day)
+    assert found == ["a long position in SPY (3 shares): not from an order sent today"]
+    assert mixed == ["SPY"] and sim.writes == []
+
+
+def test_an_entry_fill_between_the_reads_holds(tmp_path, monkeypatch):
+    """The other direction fails closed: today's entry fills after its first lookup, so the
+    position looks larger than explained (a hold that costs the day, never a hidden
+    leftover)."""
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch, start=RESTART)
+    cid = sent(day.journal, at=SENT_AT)
+    sim.add_entry(cid)
+    real = day.broker.list_positions
+
+    def fill_then_read():
+        sim.fill(cid)
+        return real()
+
+    monkeypatch.setattr(day.broker, "list_positions", fill_then_read)
+    found, todays, mixed = check(day)
+    assert [f.startswith("a long position in SPY (1 shares)") for f in found] == [True]
+
+
+def test_a_short_position_in_a_symbol_traded_today_holds(tmp_path, monkeypatch):
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch, start=RESTART)
+    today_trade(sim, day)
+    monkeypatch.setattr(day.broker, "list_positions", lambda: [
+        {"symbol": "SPY", "side": "short", "qty": "-1", "avg_entry_price": "718.32"}])
+    found, todays, mixed = check(day)
+    assert found == ["a short position in SPY (-1 shares): orders sent today explain only 1 "
+                     "of them"]
+    assert [b["key"] for b in blocks(day.journal)] == ["start-of-day:SPY"]
+
+
+def test_a_reply_the_check_cannot_read_holds_the_day(tmp_path, monkeypatch):
+    """A broker object answering something unexpected (a missing key, a bad number) is a
+    failed check: held and alerted, never an unexplained crash."""
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch, start=RESTART)
+    today_trade(sim, day)
+    monkeypatch.setattr(day.broker, "list_positions", lambda: [
+        {"symbol": "SPY", "side": "long", "qty": "lots"}])
+    before = snapshot(sim)
+    assert rd.run_day(day, limits=LIMITS) == rd.HELD
+    assert_held_untouched(sim, day, dec, before)
+    assert any("start-of-day broker check failed (InvalidOperation" in m
+               for m in alerts(day))
 
 
 def test_a_lookup_that_fails_holds_the_day(tmp_path, monkeypatch):
@@ -217,6 +283,31 @@ def test_a_lookup_that_fails_holds_the_day(tmp_path, monkeypatch):
     msgs = alerts(day)
     assert any("start-of-day broker check failed" in m for m in msgs)
     assert any("any position of today's (the broker could not be read)" in m for m in msgs)
+
+
+def test_a_symbol_with_a_closed_trade_today_is_not_advised_for_flatten_now(tmp_path,
+                                                                            monkeypatch):
+    """Review B1: today's SPY trade is closed (it explains no shares), an earlier day's SPY
+    share is still there, today's QQQ is open. --now counts SPY as today's (an order was sent
+    in it today) and would close that share: the alert must not advise it."""
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch, start=RESTART)
+    spy = today_trade(sim, day)
+    sim.fill_leg(spy, "limit", "721.72")
+    j = day.journal
+    j.record_order_event(spy, "filled", SENT_AT + timedelta(seconds=5), filled_qty=1,
+                         avg_price="718.32")
+    j.record_order_event(spy, "closed", SENT_AT + timedelta(minutes=30), closed_by="target",
+                         realized_pnl="3.40")
+    sim.positions["SPY"] = 1  # an earlier day's
+    qqq = sent(j, symbol="QQQ", at=SENT_AT)
+    sim.add_entry(qqq, symbol="QQQ")
+    sim.fill(qqq)
+    assert rd.run_day(day, limits=LIMITS) == rd.HELD
+    (unwatched,) = [m for m in alerts(day) if "will not watch or flatten" in m]
+    assert "QQQ position" in unwatched
+    assert "Do NOT run python -m pipeline.flatten --now" in unwatched
+    assert unwatched.endswith("SPY")
+    assert sim.writes == []
 
 
 def test_an_unmixed_hold_still_advises_flatten_now(tmp_path, monkeypatch):
@@ -251,10 +342,22 @@ def test_held_by_today():
         "c": _state("c", symbol="QQQ"),  # the broker shows it in another symbol: nothing
         "d": _state("d", symbol="IWM"),  # the broker does not know it: nothing
         "e": _state("e", symbol="DIA", status=FILLED, filled=10),  # legs sold all 10
+        "f": _state("f", symbol="IWM"),  # known before the read only: nothing
     }
     looked = {"a": _found("a", legs=("4", "0")), "b": _found("b"),
               "c": _found("c", symbol="SPY"), "d": None,
-              "e": _found("e", symbol="DIA", legs=("10", "0"))}
-    held, legs = rd.held_by_today(sent_today, copy.deepcopy(looked))
+              "e": _found("e", symbol="DIA", legs=("10", "0")), "f": _found("f", "IWM")}
+    after = copy.deepcopy(looked)
+    after["f"] = None
+    held, legs = rd.held_by_today(sent_today, copy.deepcopy(looked), after)
     assert held == {"SPY": Decimal("6")}
-    assert legs == {"leg-a-0", "leg-a-1", "leg-b-0", "leg-b-1", "leg-e-0", "leg-e-1"}
+    assert legs == {"leg-a-0", "leg-a-1", "leg-b-0", "leg-b-1", "leg-e-0", "leg-e-1",
+                    "leg-f-0", "leg-f-1"}
+
+
+def test_held_by_today_takes_the_fill_from_before_and_the_sales_from_after():
+    sent_today = {"a": _state("a")}
+    before = {"a": _found("a", filled="6", legs=("0", "0"))}
+    after = {"a": _found("a", filled="10", legs=("4", "0"))}  # 4 more filled, 4 sold
+    held, _ = rd.held_by_today(sent_today, before, after)
+    assert held == {"SPY": Decimal("2")}  # 6 - 4: the lower bound
