@@ -38,9 +38,15 @@ flat-by cancelled itself are no reason for an "unprotected" block. Not flat yet:
 repeats every pass, and after LOUD_S it says MANUAL ACTION NEEDED. An earlier day's position
 is never closed: blocked and alerted (decision 8). With today_only (pipeline.flatten's CLI,
 which has no start-of-day broker check), anything in a symbol with no order sent today counts
-as an earlier day's. After the close (or on a day with no session) nothing is cancelled or
-closed: a market close would wait for the next open and fill with nobody deciding (#135
-review); it alerts MANUAL ACTION NEEDED instead.
+as an earlier day's.
+
+Outside the session (before 09:30 ET, at or after the close, a weekend or holiday, or a year
+the calendar does not cover) the reconciler sends NOTHING to the broker: no cancel, no close
+(#256). Before the open every position is an earlier day's (decision 8); after the close a
+market close would wait for the next open and fill with nobody deciding. Whatever it would
+have flattened or cancelled is blocked ("outside-session:SYMBOL") and alerted MANUAL ACTION
+NEEDED. The check is made with the time now, and again inside flatten_symbol right before
+each cancel and before the close.
 
 Blocks (journal "reconcile_block", #189) stop every new entry (DayState.reconcile_blocks,
 risk_check) until a human resolves each one: `python -m journal.resolve`.
@@ -87,7 +93,7 @@ from journal.orders import (
 from pipeline.flatten import (
     CLOSING,
     FLAT,
-    SESSION_OVER,
+    OUTSIDE_SESSION,
     SKIPPED_UNREADABLE,
     FlattenResult,
     flat_by_reached,
@@ -560,6 +566,9 @@ class Reconciler:
                         f"{o.symbol}: would cancel an entry ({why}), but an order from an "
                         f"earlier day may hold it: {EARLIER_DAY}", symbol=o.symbol)
             return
+        if self._outside_session(self._now()):  # #256: nothing is sent outside the session
+            self._held_outside(o.symbol, f"would cancel entry {o.client_order_id} ({why})")
+            return
         self.cancel_sent.add(o.client_order_id)
         self._cancel(found["id"], f"entry {o.client_order_id} ({o.symbol}): {why}")
         if self.check_only:
@@ -749,39 +758,25 @@ class Reconciler:
                         f"{sym} would be flattened ({why}), but an order from an earlier day "
                         f"may hold it: {EARLIER_DAY}", symbol=sym)
             return FlattenResult("held", "an earlier day's position: not acted on")
-        # #135 review: after the close a market close would wait for the next open and fill
-        # then, with nobody deciding: cancel nothing, close nothing; a person acts. Judged by
-        # the time NOW (a pass can run long), and again inside flatten_symbol before each
-        # cancel and before the close.
-        why_not = ("the market is closed, so a market close would wait for the next open: "
-                   "nothing was cancelled or closed")
-        if self._session_over(self._now()):
-            if self.check_only:
-                self._would(f"flatten {sym} ({why}): not now, {why_not}")
-                return FlattenResult("check", "check only")
-            self._alert(MANUAL.format(symbol=sym) + f" ({why}; {why_not})", symbol=sym)
-            self.stuck_since.setdefault(sym, now)
-            return FlattenResult(SESSION_OVER, why_not)
+        # #256: outside the session nothing is sent to the broker (before the open every
+        # position is an earlier day's, decision 8; after the close a market close would fill
+        # at the next open with nobody deciding): block and alert. Judged by the time NOW (a
+        # pass can run long), and again inside flatten_symbol before each cancel and the close.
+        if self._outside_session(self._now()):
+            self._held_outside(sym, f"would flatten it ({why})")
+            return FlattenResult(OUTSIDE_SESSION, "outside the session: not acted on")
         if self.check_only:
             self._would(f"flatten {sym} ({why}): cancel its legs and orders, confirm, close")
             return FlattenResult("check", "check only")
         result = flatten_symbol(self.broker, sym, cids, sleep=self.sleep,
                                 monotonic=self.monotonic,
-                                may_act=lambda: not self._session_over(self._now()))
+                                may_act=lambda: not self._outside_session(self._now()))
         self.report["actions"].extend(result.actions)
-        if result.state == SESSION_OVER:
-            self._alert(MANUAL.format(symbol=sym) + f" ({why}; {result.detail})", symbol=sym)
-            self.stuck_since.setdefault(sym, now)
+        if result.state == OUTSIDE_SESSION:
+            self._held_outside(sym, f"was flattening it ({why}; {result.detail})")
             return result
         if result.state == FLAT:
             self.stuck_since.pop(sym, None)
-            return result
-        if result.state == CLOSING and not self._market_open(now):
-            # a market close queued for the open: say so once, never escalate before then
-            if sym not in self.stuck_since:
-                self._alert(f"{sym}: {result.detail}; it fills when the market opens",
-                            symbol=sym)
-            self.stuck_since.setdefault(sym, now)
             return result
         # not flat yet: alert every pass, never quiet; loud after LOUD_S, or at the flat-by
         # for a skipped close (it never closes by itself) or a flatten stuck since before it.
@@ -801,22 +796,30 @@ class Reconciler:
         return result
 
     @staticmethod
-    def _session_over(now: datetime) -> bool:
-        """Today's session has ended, or there is none today. Unknown (an uncovered year):
-        False, so nothing is held back."""
+    def _outside_session(now: datetime) -> bool:
+        """`now` is not inside today's NYSE session: before the open, at or after the close
+        (13:00 on an early close), a weekend or holiday, or a year the calendar does not
+        cover (cannot tell: never act). #256."""
+        now = now.astimezone(NY)
         try:
             hours = session_hours(now.date())
         except CalendarError:
-            return False
-        return hours is None or now.time() >= hours[1]
+            return True
+        return hours is None or not hours[0] <= now.time() < hours[1]
 
-    @staticmethod
-    def _market_open(now: datetime) -> bool:
-        try:
-            hours = session_hours(now.date())
-        except CalendarError:
-            return True  # unknown: never hold back an alert
-        return hours is not None and hours[0] <= now.time() < hours[1]
+    def _held_outside(self, sym: str, what: str) -> None:
+        """Outside the session: block (once per symbol, until Ivan resolves it) and alert
+        MANUAL ACTION NEEDED on every pass. Nothing is sent to the broker."""
+        why = (f"{sym}: outside the market session, so the reconciler {what}: nothing was "
+               "cancelled or closed (before the open it is an earlier day's position, "
+               "decision 8; after the close a market close would fill at the next open with "
+               "nobody deciding)")
+        if self.check_only:
+            self._would(f"not act on {sym}: {why}")
+            return
+        self._block("unprotected", f"outside-session:{sym}", why, symbol=sym)
+        self._alert(MANUAL.format(symbol=sym) + f" ({why})", symbol=sym)
+        self.stuck_since.setdefault(sym, self._now())
 
     def _flat_by(self, now: datetime) -> datetime | None:
         if self.limits is None:

@@ -513,9 +513,12 @@ def test_after_the_close_nothing_is_cancelled_or_closed(tmp_path, check_only):
     r.pass_once(final=True)
     assert sim.writes == []
     if check_only:
-        assert any("not now, the market is closed" in w for w in r.report["would"])
+        assert any(w.startswith("not act on SPY") and "outside the market session" in w
+                   for w in r.report["would"])
     else:
-        assert any("MANUAL ACTION NEEDED" in a and "market is closed" in a for a in alerts)
+        assert any("MANUAL ACTION NEEDED" in a and "outside the market session" in a
+                   for a in alerts)
+        assert "outside-session:SPY" in [b["key"] for b in blocks(j)]
 
 
 def test_an_early_close_ends_acting_at_1300(tmp_path):
@@ -560,7 +563,8 @@ def test_a_close_is_never_sent_once_a_long_pass_crosses_the_close(tmp_path):
     r.pass_once()
     assert clock.t >= T0.replace(hour=16)
     assert CLOSE not in sim.writes
-    assert any("MANUAL ACTION NEEDED" in a and "market has closed" in a for a in alerts)
+    assert any("MANUAL ACTION NEEDED" in a and "market is closed now" in a for a in alerts)
+    assert "outside-session:SPY" in [b["key"] for b in blocks(j)]
 
 
 def test_now_refuses_while_run_days_pass_is_under_way(cli, tmp_path):

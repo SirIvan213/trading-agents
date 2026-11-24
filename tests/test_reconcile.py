@@ -661,7 +661,8 @@ def test_check_makes_no_write_calls_and_writes_nothing(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["mode"] == "check"
     assert any(w.startswith("journal") and "filled" in w for w in report["would"])
-    assert any(w.startswith("flatten SPY") for w in report["would"])
+    # after the close nothing is sent (#256): it would block and alert, not flatten
+    assert any(w.startswith("not act on SPY") for w in report["would"])
     assert any("unreadable_order" in w for w in report["would"])
 
 

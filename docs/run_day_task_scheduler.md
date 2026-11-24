@@ -124,8 +124,8 @@ alerts, and **no new entry is allowed until you resolve every block**:
 |---|---|
 | `conflict` | The broker reported something the journal refuses (a fill after a close, an order the journal calls rejected that the broker holds ...). |
 | `unreadable_order` | An open order the broker client cannot read (for example, one placed by hand). Nothing acts on it. |
-| `orphan` | A position or order that is not in the journal. It is flattened, except in a symbol an earlier day's order may hold. |
-| `unprotected` | A position without a working stop for all its shares. It is flattened, except an earlier day's position: that is never closed automatically (check it in the dashboard). A partial fill whose stop and take-profit Alpaca cancelled with the unfilled rest is flattened with an alert and blocks only if that close is not confirmed (closed at Alpaca and recorded with matching quantities within 60 s, or by the end of the last pass). Cancelling a partly filled entry by hand in the dashboard looks the same to it. |
+| `orphan` | A position or order that is not in the journal. During the session it is flattened, except in a symbol an earlier day's order may hold. |
+| `unprotected` | A position without a working stop for all its shares. During the session it is flattened, except an earlier day's position: that is never closed automatically (check it in the dashboard). A partial fill whose stop and take-profit Alpaca cancelled with the unfilled rest is flattened with an alert and blocks only if that close is not confirmed (closed at Alpaca and recorded with matching quantities within 60 s, or by the end of the last pass). Cancelling a partly filled entry by hand in the dashboard looks the same to it. Key `outside-session:SYMBOL`: something the reconciler would have cancelled or closed outside the market session (below); nothing was sent. |
 | `fill_above_limit` | An entry filled above its limit price. |
 
 List the open blocks, check the Alpaca paper dashboard, fix the cause, then resolve each one
@@ -198,12 +198,23 @@ Neither command uses a billed API. The Alpaca paper API is free.
 - `--now` refuses while run_day is running and watching (exit 4), because run_day flattens
   at the flat-by itself. To get out earlier, stop run_day first. If run_day is hung (no
   reconcile pass in the last 2 minutes), `--now` acts anyway.
-- `--now` refuses with the market closed (exit 5): a market close would wait for the next
-  open.
+- `--now` refuses outside the session (exit 5), and when the calendar does not cover the
+  year. It does this before any broker call.
 
-After the close, nothing cancels or closes anything (run_day's last pass, `--now`'s last
-pass, or `pipeline.reconcile --once` in the evening). A market close placed then would fill
-at the next open with nobody deciding. Instead it alerts MANUAL ACTION NEEDED.
+**Outside the market session nothing cancels or closes anything.** That covers:
+- before 9:30 AM New York;
+- at or after the close (4:00 PM, or 1:00 PM on an early close);
+- weekends and holidays;
+- a year the calendar does not cover.
+
+It applies to every path: run_day's reconciler (its first passes if started early, and its
+last pass), `pipeline.reconcile --once`, and `pipeline.flatten --now`. Before the open, every
+position is an earlier day's (decision 8). After the close, a market close would fill at the
+next open with nobody deciding.
+
+Whatever the reconciler would have cancelled or closed gets a block (`outside-session:SYMBOL`)
+and an alert, MANUAL ACTION NEEDED, repeated on every pass. Check the Alpaca paper dashboard,
+deal with it during the session, then resolve the block.
 
 | `--now` exit code | Meaning |
 |---|---|

@@ -59,7 +59,7 @@ CLOSING = "closing"  # a close is working (ours, or one we just placed)
 WAITING = "waiting"  # not done this pass (orders not gone yet, legs still holding shares)
 SKIPPED_UNREADABLE = "skipped_unreadable"  # an unreadable order may be a working close
 FAILED = "failed"  # a read failed: nothing was closed blindly; the next pass tries again
-SESSION_OVER = "market_closed"  # may_act said no: nothing more was cancelled or closed
+OUTSIDE_SESSION = "outside_session"  # may_act said no: nothing more cancelled or closed
 
 
 def flat_by_at(day: date, limits: Any) -> datetime | None:
@@ -147,10 +147,10 @@ def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
     """One flatten pass for `symbol` (`cids`: its journaled entries' client_order_ids). Never
     raises a BrokerError: the result says where it got to. `may_act` is asked again right
     before each cancel and before the close (the waits in between can cross the close, #135
-    review): False stops there (SESSION_OVER), with nothing more sent."""
+    review): False stops there (OUTSIDE_SESSION), with nothing more sent."""
     cids = list(cids)
     actions: list[str] = []
-    stopped = "the market has closed: nothing more was cancelled or closed"
+    stopped = "the market is closed now: nothing more was cancelled or closed"
     with ACTION_LOCK:
         try:
             ids, closing, unreadable = _working_ids(broker, symbol, cids)
@@ -158,7 +158,7 @@ def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
             return FlattenResult(FAILED, f"could not read {symbol}'s orders ({exc})", actions)
         for oid, what in ids.items():
             if not may_act():
-                return FlattenResult(SESSION_OVER, stopped, actions)
+                return FlattenResult(OUTSIDE_SESSION, stopped, actions)
             try:
                 broker.cancel_order(oid)
                 actions.append(f"cancel {what} ({oid})")
@@ -194,7 +194,7 @@ def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
         if closing:  # already placed: the next pass looks again (no wait every pass)
             return FlattenResult(CLOSING, f"a close of {symbol} is already working", actions)
         if not may_act():
-            return FlattenResult(SESSION_OVER, stopped, actions)
+            return FlattenResult(OUTSIDE_SESSION, stopped, actions)
         try:
             order = broker.close_position(symbol)
             actions.append(f"close {symbol} ({order['id']})")
@@ -238,7 +238,7 @@ def _await_flat(broker: Any, symbol: str, detail: str, actions: list[str],
 # ---- the CLI: python -m pipeline.flatten --check | --now --------------------------------
 
 LOCK_REFUSED = 4  # run_day is running and watching: it flattens at the flat-by itself
-MARKET_CLOSED = 5  # a market close would wait for the next open: nothing done
+MARKET_CLOSED = 5  # outside the session (or the calendar cannot tell): nothing done
 NOT_FLAT = 1
 # run_day holds its lock and its reconciler made a pass within this: it is watching, --now
 # refuses. Wider than reconcile.STALE_S: one pass can take a minute (each symbol waits up to
@@ -247,7 +247,6 @@ BACKSTOP_STALE_S = 120
 # a pass under way this long is a busy run_day (each symbol can wait 15 s for its cancels and
 # 15 s for its fill); longer, it is hung and the backstop acts
 PASS_RUNNING_S = 300
-MAX_NOW_S = 1800  # --now gives up after this when the calendar cannot say when the close is
 
 
 def flat_by_line(today: date, limits: Any) -> str:
@@ -339,9 +338,8 @@ def flatten_now(rec: Any, broker: Any, *, clock: Callable[[], datetime],
                 write: Callable[[str], None] = print) -> int:
     """Flat-by passes (rec has flat_now) every poll_s until everything of today's is flat
     (0), or the session ends (NOT_FLAT, after a final pass that acts on nothing, the market
-    being closed), or MAX_NOW_S when the calendar does not cover the year. An earlier day's
-    position, or an unreadable order, is left alone (NOT_FLAT: Ivan checks it)."""
-    started = clock()
+    being closed). An earlier day's position, or an unreadable order, is left alone (NOT_FLAT:
+    Ivan checks it)."""
     while True:
         with ACTION_LOCK:
             report = rec.pass_once()
@@ -357,12 +355,7 @@ def flatten_now(rec: Any, broker: Any, *, clock: Callable[[], datetime],
             return 0
         write("not flat yet: " + ("the broker cannot be read" if left is None
                                   else "; ".join(left)))
-        is_open = market_open(clock())
-        if is_open is None and (clock() - started).total_seconds() >= MAX_NOW_S:
-            write(f"still not flat after {MAX_NOW_S // 60} minutes: MANUAL ACTION NEEDED in "
-                  "the Alpaca paper dashboard")
-            return NOT_FLAT
-        if is_open is False:
+        if market_open(clock()) is not True:
             with ACTION_LOCK:
                 rec.pass_once(final=True)
             write("the market has closed with something still open: MANUAL ACTION NEEDED in "
@@ -400,9 +393,12 @@ def main(argv: list[str] | None = None, *, broker: Any = None, journal: Any = No
         return 2
     now = clock().astimezone(NY)
     print(flat_by_line(now.date(), limits))
-    if args.now and market_open(now) is False:
-        print("refused: the market is closed, so a market close would wait for the next "
-              "open. Nothing was done; use the Alpaca paper dashboard", file=sys.stderr)
+    is_open = market_open(now)
+    if args.now and is_open is not True:
+        why = ("the market calendar does not cover this year" if is_open is None
+               else "the market is closed, so a market close would wait for the next open")
+        print(f"refused: {why}. Nothing was done; use the Alpaca paper dashboard",
+              file=sys.stderr)
         return MARKET_CLOSED
     if broker is None:
         from pipeline.smoke_common import load_env

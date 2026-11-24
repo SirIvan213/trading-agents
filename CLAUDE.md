@@ -198,15 +198,50 @@ approval step and the journal ("approved, not sent"). The Trader is long only:
 it BUYs one tool-produced plan by `plan_id`, or PASSes.
 
 **Now: Phase 5, paper trading, is in progress.** Its gate (the open issues labeled
-`before-phase-5`) was clear on 2026-11-13. The build follows the agreed plan, one PR
-at a time, in the Phase 5 milestone:
+`before-phase-5`) was clear on 2026-11-13. Phase 5 PRs 1–5 are done:
 1. journal order lifecycle and day totals (#109, #127, #128, #129);
 2. the Alpaca paper broker client (#154, with #136, #138, #139);
 3. sending approved orders (#136, #148);
-4. reconciling fills and positions (#155);
-5. the flatten job (#135);
-6. the scheduler `run_day` (#156, #157, with #141, #131).
+4. reconciling fills and positions (#155, #251);
+5. the flat-by job (#135, #256), with run_day watching until flat (#248) and the
+   start-of-day broker check (#209).
 
-Nothing is sent to a broker until PR 3. The smoke scenarios
-(`python -m pipeline.smoke_debate --scenario clean-buy|extended-chase|tsla|red-flag`)
-still validate the decision path; only Ivan runs them with `--billed`.
+The scheduler `run_day` (#156, #157, with #141, #131) is built. **Agent orders now reach the
+Alpaca paper account** through `python -m pipeline.run_day --scheduled --send`, which only
+Ivan's Task Scheduler task passes. Both `pipeline.reconcile` and `pipeline.flatten` declare
+`RUN_DAY_READY`.
+
+Outside the NYSE session (before 09:30 ET, at or after the close, weekends, holidays, an
+uncovered year), nothing cancels or closes at the broker. It blocks and alerts instead.
+The setup and the first paper day checklist are in `docs/run_day_task_scheduler.md`.
+
+**Left in Phase 5** (milestone "Phase 5"):
+- **risk-sensitive:**
+  - #257 the start-of-day check matches by symbol on a restart;
+  - #258 `reconcile --once` in session flattens an orphan whose age it cannot know;
+  - #262 an end-to-end test of a send after the flat-by;
+  - #250 the paper probe's stop-leg size after a partial take-profit fill;
+  - #156 and #136 are still open.
+- **hardening:**
+  - #259 the uncovered-year flat-by inconsistency;
+  - #260 duplicate blocks under `today_only`;
+  - #261 the heartbeat pass stamp;
+  - #252 reconciler alert and block edge cases;
+  - #207 desktop notifications, not needed before the first paper day.
+
+**UI track** (milestone "UI track", never blocks the phases):
+- Phase 5 side: #212 run_day live status for the UI, #231 run_day alerts and early
+  no_order entries record run_id, kind and symbol.
+- UI work:
+  - #219 decision detail and approval card;
+  - #220 open position, fills and realized P&L;
+  - #249 hide reconciler notes in History, show open blocks on Live run;
+  - #244 Live run status polish;
+  - #239 a cheap Decision detail lookup;
+  - #232 a keyset cursor for `/api/decisions`;
+  - #228 pin transitive Python dependencies;
+  - #227 the light theme.
+
+The smoke scenarios (`python -m pipeline.smoke_debate --scenario
+clean-buy|extended-chase|tsla|red-flag`) still validate the decision path; only Ivan runs
+them with `--billed`.
