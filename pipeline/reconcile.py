@@ -824,6 +824,8 @@ class Reconciler:
             except BrokerError as exc:
                 problem = f"check_close failed ({exc})"
             if problem is not None:
+                # blocked first; the close is then recorded (its exits add up). A position that
+                # reappears later is caught as an orphan, blocked and flattened.
                 if not self._unconfirmed(cid, o.symbol, why, problem):
                     return  # no block written yet: nothing recorded, the next pass retries
             else:

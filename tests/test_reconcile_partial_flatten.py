@@ -452,3 +452,48 @@ def test_a_close_already_working_returns_at_once_without_waiting():
     slept = []
     out = flatten_symbol(Broker(), "SPY", [], sleep=slept.append, monotonic=lambda: 0.0)
     assert out.state == CLOSING and slept == []
+
+
+def test_a_block_written_then_a_crash_before_closed_records_it_after_a_restart(tmp_path,
+                                                                             monkeypatch):
+    """The block is open; the next process finds it open (add_block: already there) and
+    records the close."""
+    sim, j, clock, r, alerts, cid = partial_with_cancelled_legs(tmp_path)
+    sim.close_fills = False
+    r.pass_once()
+    sim.closes[-1].update(status="filled", filled_qty="4", filled_avg_price="718.79")
+    sim.positions.pop("SPY")
+    j.add_block("unprotected", f"unprotected:{cid}", "written before the crash",
+                clock())
+    restarted = fresh(r)
+
+    def unclear(symbol):
+        raise BrokerError("GET /v2/orders failed: HTTP 503", status=503, may_have_acted=True)
+
+    monkeypatch.setattr(restarted.broker, "check_close", unclear)
+    clock.step(15)
+    restarted.pass_once()
+    assert events(j, cid)[-1]["status"] == "closed"
+    assert kinds(j) == ["unprotected"]  # the one block, still open
+
+
+def test_confirmed_but_the_close_cannot_be_recorded_blocks_on_the_final_pass(tmp_path,
+                                                                              monkeypatch):
+    from journal.log import JournalLockTimeout
+    sim, j, clock, r, alerts, cid = partial_with_cancelled_legs(tmp_path)
+    sim.close_fills = False
+    r.pass_once()
+    sim.closes[-1].update(status="filled", filled_qty="4", filled_avg_price="718.79")
+    sim.positions.pop("SPY")
+    real = j.record_order_event
+
+    def busy_on_closed(cid_, status, *a, **k):
+        if status == "closed":
+            raise JournalLockTimeout("journal lock timed out")
+        return real(cid_, status, *a, **k)
+
+    monkeypatch.setattr(j, "record_order_event", busy_on_closed)
+    clock.step(15)
+    r.pass_once(final=True)
+    assert kinds(j) == ["unprotected"]
+    assert not any("flatten is confirmed" in a for a in alerts)
