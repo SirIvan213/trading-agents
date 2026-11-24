@@ -691,7 +691,8 @@ def watch_until_flat(day: Day, today: date) -> None:
     """#248: after the decisions, keep the reconciler running (it flattens at the flat-by,
     #135) until the account is flat or the market closes, keeping its health rule (a pass
     older than STALE_S or a dead thread alerts; run_day then makes the pass itself). Not
-    flat CLOSE_WARNING before the close alerts. At the close: close_out. Never raises."""
+    flat CLOSE_WARNING before the close alerts. Flat, or at the close: close_out (the final
+    pass records the last closes before run_day_end is written). Never raises."""
     if day.reconcile_thread is None or day.closed_out:
         return
     try:
@@ -706,7 +707,7 @@ def watch_until_flat(day: Day, today: date) -> None:
             left = still_open(day.reconcile_broker or day.broker)
             if left == []:
                 day.write("the paper account is flat: no position and no open order")
-                return
+                break
             now = day.clock()
             if close_at is None or now >= close_at:
                 break
