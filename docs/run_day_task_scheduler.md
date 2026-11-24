@@ -191,11 +191,19 @@ Neither command uses a billed API. The Alpaca paper API is free.
 - `--check` is read only: it prints today's flat-by time and what `--now` would cancel and
   close. It works while run_day runs.
 - `--now` flattens today's positions immediately, repeating every 15 seconds until they are
-  flat or the market closes. It never touches an earlier day's position. It refuses while
-  run_day is running and watching (exit 4): run_day flattens at the flat-by itself, so stop
-  run_day first if you want out earlier. If run_day is hung (no reconcile pass in the last
-  45 seconds), `--now` acts anyway. It refuses with the market closed (exit 5), because a
-  market close would wait for the next open.
+  flat or the market closes.
+- `--now` only closes what an order sent today explains. A position or order that no order
+  sent today explains counts as an earlier day's, so `--now` blocks it, alerts and leaves it
+  alone. So does an open order it cannot read. Close those in the dashboard yourself.
+- `--now` refuses while run_day is running and watching (exit 4), because run_day flattens
+  at the flat-by itself. To get out earlier, stop run_day first. If run_day is hung (no
+  reconcile pass in the last 2 minutes), `--now` acts anyway.
+- `--now` refuses with the market closed (exit 5): a market close would wait for the next
+  open.
+
+After the close, nothing cancels or closes anything (run_day's last pass, `--now`'s last
+pass, or `pipeline.reconcile --once` in the evening). A market close placed then would fill
+at the next open with nobody deciding. Instead it alerts MANUAL ACTION NEEDED.
 
 | `--now` exit code | Meaning |
 |---|---|
@@ -291,9 +299,10 @@ Start the UI and keep **http://127.0.0.1:8765/#/live** open:
 
 1. **Stop new orders:** set `"trading_enabled": false` in `config\limits.json`. risk_check
    then refuses every order, from the next decision on and at the send.
-2. **Close what is open:** `python -m pipeline.flatten --now` (stop run_day first, or it
-   refuses while run_day is watching), or close it in the Alpaca paper dashboard.
-3. **Stop run_day** only after that: press Ctrl+C in its window, or End the task in Task
-   Scheduler. A stopped run_day flattens nothing at the flat-by. Nothing is held overnight on
+2. **Stop run_day:** press Ctrl+C in its window, or End the task in Task Scheduler. Ctrl+C
+   lets it make a last reconcile pass and alert if anything is still open. A stopped run_day
+   flattens nothing at the flat-by.
+3. **Close what is open,** right away: run `python -m pipeline.flatten --now` while the
+   market is open, or close it in the Alpaca paper dashboard. Nothing is held overnight on
    purpose, so make sure the account is flat.
 4. Before the next day, set `"trading_enabled": true` again and resolve any open block.

@@ -322,7 +322,7 @@ def test_an_unreadable_close_reply_is_checked(tmp_path):
     assert sim.positions == {} and sim.writes.count(CLOSE) == 1
 
 
-def test_a_403_while_the_legs_hold_the_shares_waits_for_the_next_pass(tmp_path):
+def test_a_cancel_accepted_but_not_done_holds_the_close_until_the_next_pass(tmp_path):
     sim, faulty, j, clock, r, alerts = world(tmp_path)
     holding(sim, j, clock)
     real = sim._cancel
@@ -376,6 +376,7 @@ def test_a_failed_read_is_never_a_blind_close_and_the_next_pass_flattens(tmp_pat
 @pytest.fixture
 def cli(tmp_path, monkeypatch):
     monkeypatch.setattr(tc, "load_limits", lambda path=None: LIMITS)
+    monkeypatch.setattr(fl, "CONFIRM_WAIT_S", 0.0)  # main's reconciler waits in real time
     sim, faulty, j, clock, r, alerts = world(tmp_path, at=T0.replace(hour=11))
     return sim, j, clock, r.broker
 
@@ -447,6 +448,11 @@ def test_now_refuses_while_run_day_is_watching_and_acts_when_it_is_not(cli, tmp_
         assert sim.writes == []
         beat.write_text(json.dumps({"reconciled_at": (clock.t - timedelta(seconds=90))
                                     .isoformat()}), encoding="utf-8")
+        # 90 s: a long pass (a flatten waiting for fills), not a hung run_day
+        assert fl.main(["--now"], broker=broker, journal=j, clock=clock, state_dir=state,
+                       sleep=clock.step) == fl.LOCK_REFUSED
+        beat.write_text(json.dumps({"reconciled_at": (clock.t - timedelta(seconds=150))
+                                    .isoformat()}), encoding="utf-8")
         assert fl.main(["--now"], broker=broker, journal=j, clock=clock, state_dir=state,
                        sleep=clock.step) == 0  # the backstop: run_day is not watching
     assert sim.positions == {}
@@ -457,3 +463,75 @@ def test_paper_false_is_refused(monkeypatch, capsys):
     monkeypatch.setattr(tc, "load_limits", lambda path=None: replace(LIMITS, paper=False))
     assert fl.main(["--check"], broker=object()) == 2
     assert "paper must be true" in capsys.readouterr().err
+
+
+# ======================= #135 review: B1, B2 =======================
+
+def test_now_never_closes_what_no_order_sent_today_explains(cli, tmp_path, capsys):
+    """B1: --now (and the backstop) has no start-of-day broker check, so a position or an
+    order no order sent today explains is an earlier day's: blocked, never closed."""
+    sim, j, clock, broker = cli
+    holding(sim, j, clock)  # today's SPY: flattened
+    sim.positions["MSFT"] = 5  # overnight, the journal does not know it
+    foreign = sim.add_entry("yesterdays-entry", symbol="AAPL")  # working, not in the journal
+    code = fl.main(["--now"], broker=broker, journal=j, clock=clock,
+                   state_dir=tmp_path / "state", sleep=clock.step)
+    assert code == fl.NOT_FLAT
+    assert sim.positions == {"MSFT": 5}  # SPY flattened; MSFT left alone
+    assert ("DELETE", "/v2/positions/MSFT") not in sim.writes
+    assert ("DELETE", f"/v2/orders/{foreign['id']}") not in sim.writes
+    out = capsys.readouterr().out
+    assert "left alone" in out and "MSFT position" in out and "AAPL" in out
+    assert {b["symbol"] for b in blocks(j)} >= {"MSFT", "AAPL"}
+
+
+def test_check_does_not_offer_to_flatten_what_no_order_sent_today_explains(cli, capsys):
+    sim, j, clock, broker = cli
+    sim.positions["MSFT"] = 5
+    assert fl.main(["--check"], broker=broker, journal=j, clock=clock) == 0
+    out = capsys.readouterr().out
+    assert "flatten MSFT" not in out and "block new entries" in out
+
+
+def test_now_stops_at_once_on_an_order_it_cannot_read(cli, tmp_path, capsys):
+    sim, j, clock, broker = cli
+    sim.extra_open.append(stray(symbol="MSFT"))
+    start = clock.t
+    code = fl.main(["--now"], broker=broker, journal=j, clock=clock,
+                   state_dir=tmp_path / "state", sleep=clock.step)
+    assert code == fl.NOT_FLAT and clock.t == start  # no loop until the close
+    assert "cannot be read" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("check_only", [False, True])
+def test_after_the_close_nothing_is_cancelled_or_closed(tmp_path, check_only):
+    """B2: a market close after 16:00 would wait for the next open and fill then, with
+    nobody deciding. Nothing is cancelled or closed; a person acts."""
+    sim, faulty, j, clock, r, alerts = world(tmp_path, at=T0.replace(hour=16, second=5),
+                                             check_only=check_only)
+    holding(sim, j, clock)
+    r.pass_once(final=True)
+    assert sim.writes == []
+    if check_only:
+        assert any("not now, the market is closed" in w for w in r.report["would"])
+    else:
+        assert any("MANUAL ACTION NEEDED" in a and "market is closed" in a for a in alerts)
+
+
+def test_an_early_close_ends_acting_at_1300(tmp_path):
+    sim, faulty, j, clock, r, alerts = world(tmp_path, at=EARLY.replace(hour=13, minute=0))
+    holding(sim, j, clock)
+    r.pass_once()
+    assert sim.writes == []
+
+
+def test_now_makes_no_close_in_its_final_pass_after_the_close(cli, tmp_path):
+    sim, j, clock, broker = cli
+    clock.t = T0.replace(hour=15, minute=59, second=50)
+    holding(sim, j, clock)
+    real = sim._cancel
+    sim._cancel = lambda oid: (204, None)  # the legs never go: no close before 16:00
+    code = fl.main(["--now"], broker=broker, journal=j, clock=clock,
+                   state_dir=tmp_path / "state", sleep=clock.step)
+    sim._cancel = real
+    assert code == fl.NOT_FLAT and CLOSE not in sim.writes

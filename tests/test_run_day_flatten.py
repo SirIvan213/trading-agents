@@ -93,6 +93,8 @@ def test_run_day_waits_for_the_flat_by_flattens_and_only_then_exits(tmp_path, mo
 
 
 def test_not_flat_at_the_close_alerts_three_minutes_before_and_on_exit(tmp_path, monkeypatch):
+    import pipeline.flatten as fl
+    monkeypatch.setattr(fl, "CONFIRM_WAIT_S", 0.0)  # run_day's reconciler waits in real time
     sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch)
     holding(sim, day, TUESDAY - timedelta(minutes=20))
     sim.close_fills = False  # the close never fills
@@ -219,3 +221,69 @@ def test_the_guard_uses_the_early_close_flat_by(tmp_path, monkeypatch):
     day.limits = LIMITS
     with pytest.raises(BrokerError, match="flat-by"):
         rd.GuardedBroker(day).verify_paper_account()
+
+
+# ======================= #135 review =======================
+
+def test_run_day_places_no_close_after_the_close(tmp_path, monkeypatch):
+    """B2: the legs never go before 16:00, so no close is placed; the final pass after the
+    close places none either (it would fill at tomorrow's open)."""
+    import pipeline.flatten as fl
+    monkeypatch.setattr(fl, "CONFIRM_WAIT_S", 0.0)  # run_day's reconciler waits in real time
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch)
+    holding(sim, day, TUESDAY - timedelta(minutes=20))
+    sim._cancel = lambda oid: (204, None)  # accepted, never done
+    assert rd.run_day(day, limits=LIMITS) == rd.OK
+    assert CLOSE not in sim.writes
+    msgs = alerts(day)
+    assert any("run_day exits with this still open" in m for m in msgs)
+
+
+def test_an_error_mid_day_still_watches_and_flattens(tmp_path, monkeypatch):
+    start = TUESDAY.replace(hour=15, minute=20)
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch, start=start)
+    holding(sim, day, start - timedelta(minutes=5))
+
+    def boom(*a, **k):
+        raise RuntimeError("scan broke")
+
+    monkeypatch.setattr(rd, "scan_universe", boom)
+    assert rd.run_day(day, limits=LIMITS) == rd.OK
+    assert any("unexpected error" in a for a in alerts(day))
+    assert sim.positions == {}  # still flattened at the flat-by
+    (end,) = entries(day, "run_day_end")
+    assert datetime.fromisoformat(end["at"]) >= TUESDAY.replace(minute=55)
+
+
+def test_an_unsettled_send_is_not_flat(tmp_path, monkeypatch):
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch)
+    cid = sent(day.journal, at=TUESDAY, status="submitting")  # never reached the broker
+    assert rd.run_day(day, limits=LIMITS) == rd.OK
+    assert events(day.journal, cid)[-1]["status"] == "rejected"  # after the lost-send grace
+    (end,) = entries(day, "run_day_end")
+    assert datetime.fromisoformat(end["at"]) >= TUESDAY + timedelta(seconds=110)
+
+
+def test_a_held_restart_says_todays_position_is_unwatched(tmp_path, monkeypatch):
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch)
+    holding(sim, day, TUESDAY - timedelta(hours=2))  # today's SPY
+    sim.positions["MSFT"] = 5  # and something no order sent today explains
+    assert rd.run_day(day, limits=LIMITS) == rd.HELD
+    assert sim.writes == []
+    assert any("will not watch or flatten SPY position" in a and "MANUAL ACTION NEEDED" in a
+               for a in alerts(day))
+
+
+def test_a_block_that_cannot_be_written_still_holds_and_alerts(tmp_path, monkeypatch):
+    from journal.log import JournalError
+    sim, faulty, day, clock, dec, out = paper_day(tmp_path, monkeypatch,
+                                                  start=TUESDAY.replace(hour=9, minute=30))
+    sim.positions["SPY"] = 5
+
+    def refuse(*a, **k):
+        raise JournalError("disk full")
+
+    monkeypatch.setattr(day.journal, "add_block", refuse)
+    assert rd.run_day(day, limits=LIMITS) == rd.HELD
+    assert any("could not journal a block" in a for a in alerts(day))
+    assert sim.writes == []

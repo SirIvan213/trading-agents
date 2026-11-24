@@ -66,7 +66,7 @@ from typing import Any
 
 from agents.orchestrator import load_checked_limits
 from journal.log import Journal, JournalError
-from journal.orders import APPROVED
+from journal.orders import APPROVED, SEND_UNKNOWN, SUBMITTING
 from pipeline.budget import (
     STATE_DIR,
     AlreadyDecided,
@@ -158,6 +158,7 @@ class Day:
     reconcile_broker: Any | None = None
     reconciled_at: datetime | None = None  # the end of its last completed pass
     reconcile_thread: Any | None = None
+    pass_started_at: datetime | None = None  # a reconcile pass is under way since then
     limits: Any | None = None  # the checked limits (the flat-by guard on sends, #135)
     closed_out: bool = False  # the reconciler's final pass ran and what is open was checked
 
@@ -336,7 +337,11 @@ def reconcile_pass(day: Day, *, final: bool = False) -> bool:
         return True
     try:
         with ACTION_LOCK:
-            report = day.reconciler.pass_once(final=final)
+            day.pass_started_at = day.clock()
+            try:
+                report = day.reconciler.pass_once(final=final)
+            finally:
+                day.pass_started_at = None
     except Exception as exc:  # noqa: BLE001 - never kill the thread; staleness tells run_day
         day.alert(f"the reconcile pass failed ({type(exc).__name__}): {exc}")
         return False
@@ -443,12 +448,16 @@ def block_held(day: Day, held: list[str]) -> None:
               + EARLIER_DAY, symbol=sym, client_order_id=cid)
 
 
-def broker_start_check(day: Day, today: date) -> list[str] | None:
+def broker_start_check(day: Day, today: date) -> tuple[list[str], list[str]] | None:
     """#209: before the reconciler starts, what AT THE BROKER no order sent today explains:
     a position or an open order (from an earlier day, or placed by hand), or an open order
-    that cannot be read. Each is blocked. [] when clean; None when the broker cannot be
-    checked (the caller holds the day: fail closed). Reads only: nothing is closed or
-    cancelled (decision 8). The account flags are the paper-account check's."""
+    that cannot be read. Each is blocked. Returns (those, today's positions), ([], ...) when
+    clean; None when the broker cannot be checked (the caller holds the day: fail closed).
+    Reads only: nothing is closed or cancelled (decision 8). The account flags are the
+    paper-account check's.
+
+    It matches by symbol: on a restart, something left from an earlier day in a symbol also
+    traded today passes here; the reconciler's quantity and orphan checks judge it then."""
     broker = day.reconcile_broker or day.broker
     try:
         with ACTION_LOCK:
@@ -484,7 +493,33 @@ def broker_start_check(day: Day, today: date) -> list[str] | None:
         block(day, "unreadable_order",
               f"unreadable:{u.get('id') or u.get('symbol') or u.get('why')}",
               f"{what} at the start of the day: " + EARLIER_DAY, symbol=u.get("symbol"))
-    return found
+    todays = [f"{p['symbol']} position ({p.get('qty')} shares)" for p in positions
+              if p["symbol"] in symbols_today]
+    return found, todays
+
+
+def _held_unwatched(day: Day, todays: list[str] | None = None) -> None:
+    """A held day starts no reconciler, so nothing watches or flattens today's positions (a
+    restart): say so (#135 review). None: the broker could not be read, so say it may hold
+    some."""
+    if todays == []:
+        return
+    what = ("; ".join(todays) if todays else
+            "any position of today's (the broker could not be read)")
+    day.alert(f"held: run_day will not watch or flatten {what}. MANUAL ACTION NEEDED: check "
+              "the Alpaca paper dashboard, or run python -m pipeline.flatten --now")
+
+
+def _unsettled_sends(day: Day) -> list[str]:
+    """Orders whose send may still reach the broker (submitting, send unknown): never flat
+    while one is (the reconciler settles each within its lost-send grace). Unreadable
+    journal: one line saying so."""
+    try:
+        orders = day.journal.orders()
+    except JournalError:
+        return ["the journal cannot be read"]
+    return [f"a send of {o.symbol} not settled yet ({o.status})" for o in orders.values()
+            if o.status in (SUBMITTING, SEND_UNKNOWN)]
 
 
 def started_today(journal: Journal, today: date) -> bool:
@@ -636,14 +671,17 @@ def _the_day(day: Day, limits: Any, now: datetime, today: date, budget: DailyBud
         _end(day, today, "held: position from an earlier day")
         return HELD
     if day.reconciler is not None:  # not held: check the broker, then watch (#209, #155)
-        found = broker_start_check(day, today)
-        if found is None:
+        checked = broker_start_check(day, today)
+        if checked is None:
+            _held_unwatched(day)
             _end(day, today, "held: the start-of-day broker check failed")
             return HELD
+        found, todays = checked
         if found:
             day.alert("at the broker, not from an order sent today: " + "; ".join(found)
                       + ". No decisions today until Ivan checks it (nothing is closed "
                       "automatically)")
+            _held_unwatched(day, todays)
             _end(day, today, "held: the broker holds something from an earlier day")
             return HELD
         day.reconcile_thread = _Reconcile(day)
@@ -705,6 +743,8 @@ def watch_until_flat(day: Day, today: date) -> None:
     while True:
         try:
             left = still_open(day.reconcile_broker or day.broker)
+            if left is not None:
+                left += _unsettled_sends(day)
             if left == []:
                 day.write("the paper account is flat: no position and no open order")
                 break
@@ -716,6 +756,10 @@ def watch_until_flat(day: Day, today: date) -> None:
                 day.alert("not flat 3 minutes before the close: " + (
                     "; ".join(left) if left is not None else "the broker cannot be read"))
             why = reconcile_problem(day)
+            running = day.pass_started_at
+            if why is not None and running is not None and (
+                    day.clock() - running).total_seconds() <= RECONCILE_STALE_S:
+                why = None  # a long pass (a flatten waits for its fills) is not a stale one
             if why is not None:
                 day.alert(f"after the entry window: {why}; run_day makes the pass itself")
                 reconcile_pass(day)
@@ -724,6 +768,8 @@ def watch_until_flat(day: Day, today: date) -> None:
             day.beat()
         except Exception as exc:  # noqa: BLE001 - the watch never ends the day early
             day.alert(f"watching until flat: {type(exc).__name__}: {exc}")
+            if close_at is None or day.clock() >= close_at:
+                break  # never past the close, whatever keeps failing
             day.sleep(float(RECONCILE_POLL_S))
     close_out(day)
 

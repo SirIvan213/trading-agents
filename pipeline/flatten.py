@@ -231,6 +231,11 @@ def _await_flat(broker: Any, symbol: str, detail: str, actions: list[str],
 LOCK_REFUSED = 4  # run_day is running and watching: it flattens at the flat-by itself
 MARKET_CLOSED = 5  # a market close would wait for the next open: nothing done
 NOT_FLAT = 1
+# run_day holds its lock and its reconciler made a pass within this: it is watching, --now
+# refuses. Wider than reconcile.STALE_S: one pass can take a minute (each symbol waits up to
+# CONFIRM_WAIT_S for its cancels and again for its fill), and a busy run_day is not a hung one.
+BACKSTOP_STALE_S = 120
+MAX_NOW_S = 1800  # --now gives up after this when the calendar cannot say when the close is
 
 
 def flat_by_line(today: date, limits: Any) -> str:
@@ -261,7 +266,7 @@ def market_open(now: datetime) -> bool | None:
 def _run_day_watching(state_dir: Path, now: datetime, stale_s: float) -> str | None:
     """run_day holds its lock: is its reconciler watching (a pass in the last stale_s)?
     A reason to refuse, or None (it is not watching: --now acts as the backstop)."""
-    beat =_read_heartbeat(state_dir / "run_day.heartbeat.json")
+    beat = _read_heartbeat(state_dir / "run_day.heartbeat.json")
     last = beat.get("reconciled_at") if beat else None
     try:
         when = datetime.fromisoformat(last) if isinstance(last, str) else None
@@ -277,7 +282,9 @@ def _run_day_watching(state_dir: Path, now: datetime, stale_s: float) -> str | N
 
 
 def _read_heartbeat(path: Path) -> dict | None:
-    """One short read (run_day rewrites the file atomically, tools/atomic_write.py)."""
+    """One short read, the handle closed at once. The heartbeat is best effort (run_day's
+    writes never stop on it), so this is not ui/api's share-delete open: a write that meets
+    this read only misses one beat."""
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -287,7 +294,8 @@ def _read_heartbeat(path: Path) -> dict | None:
 
 def _today_left(broker: Any, earlier_day: set[str]) -> tuple[list[str] | None, list[str]]:
     """(what is still open outside an earlier day's symbols, or None when unreadable;
-    what is left alone because an earlier day's order may hold it, decision 8)."""
+    what is left alone: an earlier day's (decision 8), and open orders that cannot be read,
+    which nothing acts on (#246))."""
     try:
         with ACTION_LOCK:
             positions = broker.list_positions()
@@ -300,8 +308,8 @@ def _today_left(broker: Any, earlier_day: set[str]) -> tuple[list[str] | None, l
                       + [(f"open {o['type']} {o['side']} order in {o['symbol']}", o["symbol"])
                          for o in listing["orders"]]):
         (alone if sym in earlier_day else left).append(line)
-    left += [f"an open order that cannot be read (id {u.get('id')})"
-             for u in listing["unreadable"]]
+    alone += [f"an open order that cannot be read (id {u.get('id')}, symbol "
+              f"{u.get('symbol')})" for u in listing["unreadable"]]
     return left, alone
 
 
@@ -309,8 +317,10 @@ def flatten_now(rec: Any, broker: Any, *, clock: Callable[[], datetime],
                 sleep: Callable[[float], None], poll_s: float,
                 write: Callable[[str], None] = print) -> int:
     """Flat-by passes (rec has flat_now) every poll_s until everything of today's is flat
-    (0), or the session ends (NOT_FLAT, after a final pass). An earlier day's position is
-    left alone, blocked and alerted (NOT_FLAT: Ivan checks it)."""
+    (0), or the session ends (NOT_FLAT, after a final pass that acts on nothing, the market
+    being closed), or MAX_NOW_S when the calendar does not cover the year. An earlier day's
+    position, or an unreadable order, is left alone (NOT_FLAT: Ivan checks it)."""
+    started = clock()
     while True:
         with ACTION_LOCK:
             report = rec.pass_once()
@@ -326,7 +336,12 @@ def flatten_now(rec: Any, broker: Any, *, clock: Callable[[], datetime],
             return 0
         write("not flat yet: " + ("the broker cannot be read" if left is None
                                   else "; ".join(left)))
-        if market_open(clock()) is False:
+        is_open = market_open(clock())
+        if is_open is None and (clock() - started).total_seconds() >= MAX_NOW_S:
+            write(f"still not flat after {MAX_NOW_S // 60} minutes: MANUAL ACTION NEEDED in "
+                  "the Alpaca paper dashboard")
+            return NOT_FLAT
+        if is_open is False:
             with ACTION_LOCK:
                 rec.pass_once(final=True)
             write("the market has closed with something still open: MANUAL ACTION NEEDED in "
@@ -339,7 +354,7 @@ def main(argv: list[str] | None = None, *, broker: Any = None, journal: Any = No
          clock: Callable[[], datetime] | None = None, state_dir: Path | None = None,
          sleep: Callable[[float], None] = time.sleep) -> int:
     from journal.log import Journal
-    from pipeline.reconcile import POLL_S, STALE_S, ReadOnlyBroker, Reconciler
+    from pipeline.reconcile import POLL_S, ReadOnlyBroker, Reconciler
     from tools.config import load_limits
 
     p = argparse.ArgumentParser(prog="python -m pipeline.flatten", description=__doc__,
@@ -382,7 +397,7 @@ def main(argv: list[str] | None = None, *, broker: Any = None, journal: Any = No
             return 2
     if args.check:
         rec = Reconciler(journal or Journal(), ReadOnlyBroker(broker), clock=clock,
-                         limits=limits, check_only=True, flat_now=True)
+                         limits=limits, check_only=True, flat_now=True, today_only=True)
         report = rec.pass_once()
         print("--now would:" if report["would"] else "--now would do nothing: nothing of "
               "today's is open")
@@ -396,7 +411,10 @@ def main(argv: list[str] | None = None, *, broker: Any = None, journal: Any = No
     from pipeline.budget import STATE_DIR
     from pipeline.filelock import LockTimeout, exclusive_file_lock
     folder = state_dir or STATE_DIR
-    rec = Reconciler(journal or Journal(), broker, clock=clock, limits=limits, flat_now=True)
+    # today_only: no start-of-day broker check ran here, so anything no order sent today
+    # explains is an earlier day's: blocked, never closed (decision 8)
+    rec = Reconciler(journal or Journal(), broker, clock=clock, limits=limits, flat_now=True,
+                     today_only=True)
     run = lambda: flatten_now(rec, broker, clock=clock, sleep=sleep,  # noqa: E731
                               poll_s=POLL_S)
     try:
@@ -404,12 +422,13 @@ def main(argv: list[str] | None = None, *, broker: Any = None, journal: Any = No
         with exclusive_file_lock(folder / "run_day.lock", timeout_s=0):
             return run()
     except LockTimeout:
-        why = _run_day_watching(folder, clock(), STALE_S)
+        why = _run_day_watching(folder, clock(), BACKSTOP_STALE_S)
         if why is not None:
             print(f"refused: {why}", file=sys.stderr)
             return LOCK_REFUSED
         print("run_day holds its lock but its reconciler is not watching (no pass in the "
-              f"last {STALE_S} s): flattening anyway, as the backstop", file=sys.stderr)
+              f"last {BACKSTOP_STALE_S} s): flattening anyway, as the backstop",
+              file=sys.stderr)
         return run()
 
 
