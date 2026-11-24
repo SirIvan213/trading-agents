@@ -375,3 +375,80 @@ def test_identification_edges():
     assert decided(*entry_with(t0, t0, key="expired_at", status="expired"))
     assert not decided(*entry_with(t0, None))  # a leg without its time: not this case
     assert not decided(*entry_with(None, t0))
+
+
+# ---- the third review: the crash window -------------------------------------------------
+
+def test_a_crash_inside_check_close_leaves_the_order_open_for_the_next_process(tmp_path):
+    """check_close runs before the close is recorded: a process that dies there leaves the
+    order open in the journal, and the next process confirms it."""
+    import pytest
+    sim, j, clock, r, alerts, cid = partial_with_cancelled_legs(tmp_path)
+    sim.close_fills = False
+    r.pass_once()  # flattened; the close is working
+    sim.closes[-1].update(status="filled", filled_qty="4", filled_avg_price="718.79")
+    sim.positions.pop("SPY")
+
+    def dies(symbol):
+        raise RuntimeError("the process died here")
+
+    r.broker.check_close = dies
+    clock.step(15)
+    with pytest.raises(RuntimeError):
+        r.pass_once()
+    assert events(j, cid)[-1]["status"] != "closed"  # nothing recorded
+    del r.broker.check_close
+    again = fresh(r)
+    clock.step(15)
+    again.pass_once()
+    assert events(j, cid)[-1]["status"] == "closed" and kinds(j) == []
+    assert any("flatten is confirmed" in a for a in alerts)
+
+
+def test_an_unconfirmed_close_is_recorded_only_once_its_block_is_open(tmp_path, monkeypatch):
+    from journal.log import JournalLockTimeout
+    sim, j, clock, r, alerts, cid = partial_with_cancelled_legs(tmp_path)
+    sim.close_fills = False
+    r.pass_once()
+    sim.closes[-1].update(status="filled", filled_qty="4", filled_avg_price="718.79")
+    sim.positions.pop("SPY")
+
+    def unclear(symbol):
+        raise BrokerError("GET /v2/orders failed: HTTP 503", status=503, may_have_acted=True)
+
+    monkeypatch.setattr(r.broker, "check_close", unclear)
+    real = j.add_block
+
+    def busy(*a, **k):
+        raise JournalLockTimeout("journal lock timed out")
+
+    monkeypatch.setattr(j, "add_block", busy)
+    clock.step(15)
+    r.pass_once()
+    assert events(j, cid)[-1]["status"] != "closed" and kinds(j) == []  # still open
+    monkeypatch.setattr(j, "add_block", real)
+    restarted = fresh(r)  # a restart: the order is still followed
+    clock.step(15)
+    restarted.pass_once()
+    assert kinds(j) == ["unprotected"]
+    assert events(j, cid)[-1]["status"] == "closed"  # recorded once the block was open
+
+
+def test_a_close_already_working_returns_at_once_without_waiting():
+    from pipeline.flatten import CLOSING, flatten_symbol
+
+    class Broker:
+        def get_order_by_client_id(self, cid):
+            return None
+
+        def list_open_orders_checked(self):
+            return {"orders": [{"id": "c1", "symbol": "SPY", "side": "sell",
+                                "order_class": "simple", "type": "market",
+                                "status": "new"}], "unreadable": []}
+
+        def list_positions(self):
+            return [{"symbol": "SPY", "qty": "4"}]
+
+    slept = []
+    out = flatten_symbol(Broker(), "SPY", [], sleep=slept.append, monotonic=lambda: 0.0)
+    assert out.state == CLOSING and slept == []

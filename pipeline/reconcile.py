@@ -674,7 +674,7 @@ class Reconciler:
                     client_order_id=cid)
         self._flatten(sym, cids, verdict["reason"], now)
 
-    def _unconfirmed(self, cid: str, sym: str, why: str, what: str) -> None:
+    def _unconfirmed(self, cid: str, sym: str, why: str, what: str) -> bool:
         """The partial fill's flatten was not confirmed: block, as for any unprotected
         position (Ivan's decision on #251). Forgotten only once the block is open, so a
         block that could not be written is retried next pass."""
@@ -682,6 +682,8 @@ class Reconciler:
                        f"{why}; its flatten was not confirmed: {what}", symbol=sym,
                        client_order_id=cid):
             self.partial_flatten.pop(cid, None)
+            return True
+        return False
 
     def _confirm_partial_flattens(self, now: datetime, *, final: bool = False) -> None:
         """A pending partial-fill flatten still unconfirmed after LOUD_S, or at the end of a
@@ -810,21 +812,28 @@ class Reconciler:
         self.retry_since.pop(f"close:{o.client_order_id}", None)
         earliest = datetime.min.replace(tzinfo=NY)
         last = max(exits, key=lambda x: _when(x["at"]) or earliest)
-        recorded = self._event(o, CLOSED, closed_by=last["by"], realized_pnl=str(pnl),
-                               exits=exits, history_unreadable=bool(history["unreadable"]))
-        if partial_case and recorded:
-            # confirmed only when the journal recorded the close (its exits match the filled
-            # quantity exactly: realized_pnl) AND check_close says closed. Decided from the
-            # broker and the journal, so a restart or a --once pass cannot lose it.
+        confirmed = False
+        if partial_case:
+            # The decided case (#251): check_close FIRST, before the close is recorded, so
+            # the order stays open in the journal (followed by every later pass, also after
+            # a restart) until it is either confirmed or blocked: never neither.
             cid, why = o.client_order_id, f"{o.symbol}: a partial fill's flatten"
             try:
                 state = self.broker.check_close(o.symbol)["state"]
+                problem = None if state == "closed" else f"check_close says {state}"
             except BrokerError as exc:
-                self._unconfirmed(cid, o.symbol, why, f"check_close failed ({exc})")
-                return
-            if state != "closed":
-                self._unconfirmed(cid, o.symbol, why, f"check_close says {state}")
-                return
+                problem = f"check_close failed ({exc})"
+            if problem is not None:
+                if not self._unconfirmed(cid, o.symbol, why, problem):
+                    return  # no block written yet: nothing recorded, the next pass retries
+            else:
+                confirmed = True
+        recorded = self._event(o, CLOSED, closed_by=last["by"], realized_pnl=str(pnl),
+                               exits=exits, history_unreadable=bool(history["unreadable"]))
+        if partial_case and confirmed and recorded:
+            # confirmed: check_close says closed AND the journal recorded the close with
+            # matching quantities (realized_pnl)
+            cid = o.client_order_id
             self.partial_flatten.pop(cid, None)
             standing = self._block_open(f"unprotected:{cid}")
             self._alert(f"{o.symbol}: the partial fill's flatten is confirmed (check_close: "
