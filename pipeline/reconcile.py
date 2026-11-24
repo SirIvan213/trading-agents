@@ -21,7 +21,9 @@ One pass:
   4. every position must have a working stop for its full quantity, judged ONLY from the
      entry's lookup with legs (tools.protection; the listing hides a held stop, #196).
      A stop that triggered and is selling gets EXECUTING_WAIT_S; then alert and flatten.
-     Anything unprotected is blocked, alerted and flattened (pipeline.flatten);
+     Anything unprotected is blocked, alerted and flattened (pipeline.flatten), except
+     (Ivan's decision on #251) a partial fill whose legs Alpaca cancelled with the unfilled
+     remainder: flattened with an alert, and blocked only if the close is not confirmed;
   5. a trade whose position is gone is closed in the journal with its realized P&L
      (tools.realized) from the broker's exit fills;
   6. orphans (a position or order not traceable to the journal; the paper account is
@@ -156,6 +158,7 @@ class Reconciler:
         # remainder is flattened with an alert, and blocked only if that flatten is not
         # CONFIRMED (cid -> when the flatten started, its symbol, the reason)
         self.partial_flatten: dict[str, tuple[datetime, str, str]] = {}
+        self.final = False  # this pass is the last (pass_once(final=True))
         self.stuck_since: dict[str, datetime] = {}  # symbol -> a flatten not done since
         self.retry_since: dict[str, datetime] = {}
         self.latest: dict[str, dict | None] = {}  # a lookup made after acting (a cancel)
@@ -200,13 +203,13 @@ class Reconciler:
                         f"python -m journal.resolve {block_id}", symbol=fields.get("symbol"))
         return True
 
-    def _block_open(self, key: str) -> bool:
-        """An unresolved block with this key is in the journal."""
+    def _block_open(self, key: str) -> bool | None:
+        """An unresolved block with this key is in the journal (None: cannot tell). Read
+        without the journal's lock: never waits on it while holding ACTION_LOCK."""
         try:
-            entries = (self.journal._read_entries() if self.check_only  # noqa: SLF001
-                       else self.journal.entries())
+            entries = self.journal._read_entries()  # noqa: SLF001 - read only, lock-free
         except JournalError:
-            return False
+            return None
         return any(b.get("key") == key for b in unresolved_blocks(entries))
 
     def _event(self, o: OrderState, status: str, **fields: object) -> bool:
@@ -286,7 +289,11 @@ class Reconciler:
                        "complete": False, "orders": [], "positions": [], "unreadable": [],
                        "recorded": [], "actions": [], "would": [], "blocks": [],
                        "alerts": [], "errors": [], "read_errors": []}
-        self._run(now)
+        try:
+            self._run(now)
+        finally:
+            if not self.check_only:  # a failed read or an error never skips it
+                self._confirm_partial_flattens(now, final=self.final)
         reads = self.report["read_errors"]
         self.report["complete"] = not reads
         if reads:  # a pass that could not see everything is not a pass (run_day's health)
@@ -406,8 +413,7 @@ class Reconciler:
                     for o in trades:
                         self._close(o, looked.get(o.client_order_id), now)
 
-        if not self.check_only:
-            self._confirm_partial_flattens(now, final=getattr(self, "final", False))
+        # (the partial-fill check runs in _pass, whatever stops _run)
 
         # orphan orders: open, readable, and not ours (skipped when a lookup failed: an
         # order we could not look up would read as an orphan)
@@ -638,7 +644,7 @@ class Reconciler:
         why = (f"{sym} has no working stop for its {pos.get('qty')} shares: "
                f"{verdict['reason']}")
         if (_legs_cancelled_with_remainder(found, o)
-                and not self._block_open(f"unprotected:{cid}")):
+                and self._block_open(f"unprotected:{cid}") is False):
             # Ivan's decision on #251: alert and flatten; block only if not confirmed
             if self.check_only:
                 self._would(f"flatten {sym} ({why}): a partial fill whose legs were cancelled "
@@ -753,6 +759,11 @@ class Reconciler:
         if o.status == PARTIALLY_FILLED or found is None:
             return  # the entry may still fill, or it was not looked up this pass
         partial_case = _legs_cancelled_with_remainder(found, o)
+        if partial_case and not self.check_only:
+            # remembered until confirmed or blocked, also after a restart (#251 review)
+            self.partial_flatten.setdefault(o.client_order_id,
+                                            (now, o.symbol,
+                                             f"{o.symbol}: a partial fill's flatten"))
         exits = []
         for leg in found.get("legs") or []:
             if _dec(leg["filled_qty"]) and _dec(leg["filled_qty"]) > 0:
@@ -787,7 +798,7 @@ class Reconciler:
         except RealizedError as exc:
             first = self.retry_since.setdefault(f"close:{o.client_order_id}", now)
             if partial_case and (now - first >= timedelta(seconds=LOUD_S)
-                                 or getattr(self, "final", False)):
+                                 or self.final):
                 # the decided case (#251): quantities that do not match block
                 self._unconfirmed(o.client_order_id, o.symbol,
                                   f"{o.symbol}: a partial fill's flatten",
@@ -819,7 +830,9 @@ class Reconciler:
             self._alert(f"{o.symbol}: the partial fill's flatten is confirmed (check_close: "
                         f"closed; {o.filled_qty} shares closed, realized {pnl}); "
                         + ("its earlier block stays until resolved" if standing
-                           else "no block"), symbol=o.symbol)
+                           else "no block" if standing is False
+                           else "the block state cannot be read: check journal.resolve"),
+                        symbol=o.symbol)
 
 
 # ---- helpers --------------------------------------------------------------------------

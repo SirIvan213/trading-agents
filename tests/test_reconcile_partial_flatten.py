@@ -254,3 +254,124 @@ def test_check_mode_describes_the_decided_case_honestly(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert any("blocks only if the close is not confirmed" in w for w in report["would"])
     assert not any(w.startswith("block new entries (unprotected)") for w in report["would"])
+
+
+# ---- the second review of the decision ---------------------------------------------------
+
+def test_a_restart_whose_confirmation_and_block_both_fail_is_retried_until_blocked(
+        tmp_path, monkeypatch):
+    """The review's probe: after a restart, the close is recorded, check_close fails and
+    the block cannot be written once. The case is kept and blocked on a later pass."""
+    from journal.log import JournalLockTimeout
+    sim, j, clock, r, alerts, cid = partial_with_cancelled_legs(tmp_path)
+    sim.close_fills = False
+    r.pass_once()  # flattened; the close is working (the case is only in r's memory)
+    sim.closes[-1].update(status="filled", filled_qty="4", filled_avg_price="718.79")
+    sim.positions.pop("SPY")
+    restarted = fresh(r)
+
+    def unclear(symbol):
+        raise BrokerError("GET /v2/orders failed: HTTP 503", status=503, may_have_acted=True)
+
+    monkeypatch.setattr(restarted.broker, "check_close", unclear)
+    real = j.add_block
+    fails = {"n": 1}
+
+    def busy_once(*a, **k):
+        if fails["n"]:
+            fails["n"] -= 1
+            raise JournalLockTimeout("journal lock timed out")
+        return real(*a, **k)
+
+    monkeypatch.setattr(j, "add_block", busy_once)
+    clock.step(15)
+    restarted.pass_once()  # closed recorded; confirmation fails; the block write fails
+    assert kinds(j) == []
+    for _ in range(5):
+        clock.step(15)
+        restarted.pass_once()
+    assert kinds(j) == ["unprotected"]
+
+
+def test_a_final_pass_that_cannot_read_still_blocks_what_is_pending(tmp_path):
+    """The final check runs whatever stopped the pass (here: the account check fails)."""
+    import io
+    import urllib.error
+    sim, j, clock, r, alerts, cid = partial_with_cancelled_legs(tmp_path)
+    sim.close_fills = False
+    r.pass_once()
+    real = sim.__call__
+
+    def account_down(req, timeout=None):
+        if req.full_url.endswith("/v2/account"):
+            raise urllib.error.HTTPError(req.full_url, 503, "x", {}, io.BytesIO(b"{}"))
+        return real(req, timeout)
+
+    r.broker._open = account_down
+    clock.step(15)
+    report = r.pass_once(final=True)
+    assert report["complete"] is False
+    assert kinds(j) == ["unprotected"]
+
+
+def test_a_restart_then_a_final_pass_blocks_mismatched_quantities_at_once(tmp_path):
+    sim, j, clock, r, alerts, cid = partial_with_cancelled_legs(tmp_path)
+    real = sim._close
+
+    def short_close(symbol):
+        status, body = real(symbol)
+        sim.closes[-1]["filled_qty"] = "3"
+        return status, body
+
+    sim._close = short_close
+    r.pass_once()
+    clock.step(15)
+    fresh(r).pass_once(final=True)
+    assert kinds(j) == ["unprotected"]
+
+
+def test_run_days_last_pass_is_final(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    import pipeline.run_day as rd
+    from tests.test_run_day import LIMITS, QuietBroker, make_day
+    for name in rd.SENDING_PREREQUISITES:
+        mod = types.ModuleType(name)
+        mod.RUN_DAY_READY = True
+        monkeypatch.setitem(sys.modules, name, mod)
+    finals = []
+    real = rd.Reconciler.pass_once
+
+    def spy(self, **kw):
+        finals.append(kw.get("final", False))
+        return real(self, **kw)
+
+    monkeypatch.setattr(rd.Reconciler, "pass_once", spy)
+    day, clock, dec, out = make_day(tmp_path, monkeypatch, universe=["SA"],
+                                    broker=QuietBroker())
+    rd.run_day(day, limits=LIMITS)
+    assert finals[-1] is True and not any(finals[:-1])
+
+
+def entry_with(entry_at, leg_at, *, key="canceled_at", status="canceled"):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from journal.orders import OrderState
+    e = {"status": status, "filled_qty": "4", key: entry_at,
+         "legs": [{"status": status, key: leg_at}, {"status": status, key: leg_at}]}
+    o = OrderState(client_order_id="ta-x", symbol="SPY", run_id="r", plan_id="p",
+                   approved_at=datetime(2026, 11, 24, 10, tzinfo=ZoneInfo("America/New_York")),
+                   qty=10, max_loss=__import__("decimal").Decimal("1"))
+    return e, o
+
+
+def test_identification_edges():
+    from pipeline.reconcile import _legs_cancelled_with_remainder as decided
+    t0 = "2026-11-24T16:00:00Z"
+    assert decided(*entry_with(t0, "2026-11-24T16:00:05Z"))  # 5 s: together
+    assert not decided(*entry_with(t0, "2026-11-24T16:00:06Z"))  # 6 s: later
+    assert decided(*entry_with(t0, t0, key="expired_at", status="expired"))
+    assert not decided(*entry_with(t0, None))  # a leg without its time: not this case
+    assert not decided(*entry_with(None, t0))

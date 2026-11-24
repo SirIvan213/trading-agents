@@ -128,9 +128,8 @@ def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
             return FlattenResult(FAILED, f"could not read the positions ({exc})", actions)
         if position is None:
             return FlattenResult(FLAT, f"no position in {symbol}", actions)
-        if closing:
-            return _await_flat(broker, symbol, f"a close of {symbol} is already working",
-                               actions, sleep, monotonic)
+        if closing:  # already placed: the next pass looks again (no wait every pass)
+            return FlattenResult(CLOSING, f"a close of {symbol} is already working", actions)
         try:
             order = broker.close_position(symbol)
             actions.append(f"close {symbol} ({order['id']})")

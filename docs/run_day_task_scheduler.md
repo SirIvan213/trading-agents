@@ -119,7 +119,7 @@ alerts, and **no new entry is allowed until you resolve every block**:
 | `conflict` | The broker reported something the journal refuses (a fill after a close, an order the journal calls rejected that the broker holds ...). |
 | `unreadable_order` | An open order the broker client cannot read (for example, one placed by hand). Nothing acts on it. |
 | `orphan` | A position or order that is not in the journal. It is flattened, except in a symbol an earlier day's order may hold. |
-| `unprotected` | A position without a working stop for all its shares. It is flattened, except an earlier day's position: that is never closed automatically (check it in the dashboard). A partial fill whose stop and take-profit Alpaca cancelled with the unfilled rest is flattened with an alert and blocks only if that close is not confirmed (closed at Alpaca and recorded with matching quantities within 60 s). |
+| `unprotected` | A position without a working stop for all its shares. It is flattened, except an earlier day's position: that is never closed automatically (check it in the dashboard). A partial fill whose stop and take-profit Alpaca cancelled with the unfilled rest is flattened with an alert and blocks only if that close is not confirmed (closed at Alpaca and recorded with matching quantities within 60 s, or by the end of the last pass). Cancelling a partly filled entry by hand in the dashboard looks the same to it. |
 | `fill_above_limit` | An entry filled above its limit price. |
 
 List the open blocks, check the Alpaca paper dashboard, fix the cause, then resolve each one
