@@ -20,18 +20,37 @@ pass does not close ("skipped_unreadable"). That never becomes "never close": th
 (pipeline.reconcile) repeats the alert every pass and, 60 s later or at the flat-by time,
 raises a louder alert asking for manual action in the Alpaca paper dashboard.
 
-This module does not declare RUN_DAY_READY: run_day refuses a broker until PR 5 (the flat-by
-job, #135) adds it here.
+The flat-by job (PR 5, #135) is the reconciler's flat-by mode (pipeline.reconcile): at and
+after the day's flat-by time (flat_by_at: 15:55 ET, 12:55 on an early close, from the NYSE
+calendar), every reconcile pass cancels today's working entries and flattens today's
+positions with flatten_symbol, until the account is flat. run_day keeps the reconciler
+running until then (#248). A position from an earlier day is never closed automatically
+(decision 8): it is blocked and alerted, and waits for Ivan.
+
+    python -m pipeline.flatten --check   # read only: today's flat-by, and what --now would do
+    python -m pipeline.flatten --now     # flatten today's positions now (Ivan, or a backstop)
 """
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from tools.broker import ACTION_LOCK, FINAL_STATUSES, BrokerError, is_close_order
+from tools.market_calendar import CalendarError, closed_reason, day_times, session_hours
 
+# The flat-by job is here (#135): with pipeline.reconcile's own flag, run_day accepts a broker
+# (pipeline.run_day.broker_allowed), so approved orders can reach the PAPER account.
+RUN_DAY_READY = True
+
+NY = ZoneInfo("America/New_York")
 CONFIRM_WAIT_S = 15.0
 POLL_S = 1.0
 
@@ -40,6 +59,44 @@ CLOSING = "closing"  # a close is working (ours, or one we just placed)
 WAITING = "waiting"  # not done this pass (orders not gone yet, legs still holding shares)
 SKIPPED_UNREADABLE = "skipped_unreadable"  # an unreadable order may be a working close
 FAILED = "failed"  # a read failed: nothing was closed blindly; the next pass tries again
+OUTSIDE_SESSION = "outside_session"  # may_act said no: nothing more cancelled or closed
+
+
+def flat_by_at(day: date, limits: Any) -> datetime | None:
+    """`day`'s flat-by as a New York datetime: limits.flat_by (15:55), or 12:55 on an early
+    close (tools.market_calendar.day_times, #135). None on a day with no session. Raises
+    CalendarError for a year the calendar does not cover."""
+    if session_hours(day) is None:
+        return None
+    return datetime.combine(day, day_times(day, limits)[2], tzinfo=NY)
+
+
+def flat_by_reached(now: datetime, limits: Any) -> bool:
+    """`now` is at or after today's flat-by. A year the calendar does not cover counts as
+    reached (fails safe: flatten, never wait; risk_check already refuses every entry then).
+    A day with no session: False (nothing trades)."""
+    now = now.astimezone(NY)
+    try:
+        at = flat_by_at(now.date(), limits)
+    except CalendarError:
+        return True
+    return at is not None and now >= at
+
+
+def still_open(broker: Any) -> list[str] | None:
+    """What the broker still holds: one line per position, open order and unreadable open
+    order ([] when the account is flat). None when it cannot be read. Read only."""
+    try:
+        with ACTION_LOCK:
+            positions = broker.list_positions()
+            listing = broker.list_open_orders_checked()
+    except BrokerError:
+        return None
+    return ([f"{p['symbol']} position ({p.get('qty')} shares)" for p in positions]
+            + [f"open {o['type']} {o['side']} order in {o['symbol']}"
+               for o in listing["orders"]]
+            + [f"an open order that cannot be read (id {u.get('id')}, symbol "
+               f"{u.get('symbol')})" for u in listing["unreadable"]])
 
 
 @dataclass
@@ -85,17 +142,23 @@ def _leg_filled(broker: Any, cids: Iterable[str]) -> bool:
 
 def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
                    sleep: Callable[[float], None] = time.sleep,
-                   monotonic: Callable[[], float] = time.monotonic) -> FlattenResult:
+                   monotonic: Callable[[], float] = time.monotonic,
+                   may_act: Callable[[], bool] = lambda: True) -> FlattenResult:
     """One flatten pass for `symbol` (`cids`: its journaled entries' client_order_ids). Never
-    raises a BrokerError: the result says where it got to."""
+    raises a BrokerError: the result says where it got to. `may_act` is asked again right
+    before each cancel and before the close (the waits in between can cross the close, #135
+    review): False stops there (OUTSIDE_SESSION), with nothing more sent."""
     cids = list(cids)
     actions: list[str] = []
+    stopped = "the market is closed now: nothing more was cancelled or closed"
     with ACTION_LOCK:
         try:
             ids, closing, unreadable = _working_ids(broker, symbol, cids)
         except BrokerError as exc:
             return FlattenResult(FAILED, f"could not read {symbol}'s orders ({exc})", actions)
         for oid, what in ids.items():
+            if not may_act():
+                return FlattenResult(OUTSIDE_SESSION, stopped, actions)
             try:
                 broker.cancel_order(oid)
                 actions.append(f"cancel {what} ({oid})")
@@ -130,6 +193,8 @@ def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
             return FlattenResult(FLAT, f"no position in {symbol}", actions)
         if closing:  # already placed: the next pass looks again (no wait every pass)
             return FlattenResult(CLOSING, f"a close of {symbol} is already working", actions)
+        if not may_act():
+            return FlattenResult(OUTSIDE_SESSION, stopped, actions)
         try:
             order = broker.close_position(symbol)
             actions.append(f"close {symbol} ({order['id']})")
@@ -168,3 +233,221 @@ def _await_flat(broker: Any, symbol: str, detail: str, actions: list[str],
         if monotonic() >= deadline:
             return FlattenResult(CLOSING, detail, actions)
         sleep(POLL_S)
+
+
+# ---- the CLI: python -m pipeline.flatten --check | --now --------------------------------
+
+LOCK_REFUSED = 4  # run_day is running and watching: it flattens at the flat-by itself
+MARKET_CLOSED = 5  # outside the session (or the calendar cannot tell): nothing done
+NOT_FLAT = 1
+# run_day holds its lock and its reconciler made a pass within this: it is watching, --now
+# refuses. Wider than reconcile.STALE_S: one pass can take a minute (each symbol waits up to
+# CONFIRM_WAIT_S for its cancels and again for its fill), and a busy run_day is not a hung one.
+BACKSTOP_STALE_S = 120
+# a pass under way this long is a busy run_day (each symbol can wait 15 s for its cancels and
+# 15 s for its fill); longer, it is hung and the backstop acts
+PASS_RUNNING_S = 300
+
+
+def flat_by_line(today: date, limits: Any) -> str:
+    """Today's flat-by, for a person."""
+    try:
+        at = flat_by_at(today, limits)
+    except CalendarError:
+        return (f"the market calendar does not cover {today.year}: every entry is blocked "
+                "(risk_check); --now still flattens")
+    if at is None:
+        return f"no session today ({closed_reason(today)})"
+    hours = session_hours(today)
+    early = hours is not None and hours[1].hour < 16
+    return (f"flat-by today ({today.isoformat()}): {at:%H:%M} ET"
+            + (" (early close at 13:00)" if early else ""))
+
+
+def market_open(now: datetime) -> bool | None:
+    """The NYSE session is open at `now` (None: the calendar does not cover the year)."""
+    now = now.astimezone(NY)
+    try:
+        hours = session_hours(now.date())
+    except CalendarError:
+        return None
+    return hours is not None and hours[0] <= now.time() < hours[1]
+
+
+def _run_day_watching(state_dir: Path, now: datetime, stale_s: float) -> str | None:
+    """run_day holds its lock: is its reconciler watching (a pass in the last stale_s)?
+    A reason to refuse, or None (it is not watching: --now acts as the backstop)."""
+    beat = _read_heartbeat(state_dir / "run_day.heartbeat.json") or {}
+    running = _age(beat.get("reconcile_pass_started_at"), now)
+    if running is not None and running <= PASS_RUNNING_S:
+        return (f"run_day is running and its reconciler is in a pass that started "
+                f"{int(running)} s ago: it flattens at the flat-by itself. Use --check to "
+                "look, or stop run_day first")
+    age = _age(beat.get("reconciled_at"), now)
+    if age is not None and age <= stale_s:
+        return (f"run_day is running and its reconciler made a pass {int(age)} s ago: it "
+                "flattens at the flat-by itself. Use --check to look, or stop run_day first")
+    return None
+
+
+def _age(stamp: object, now: datetime) -> float | None:
+    """Seconds since an ISO time with a zone (None when missing or unreadable)."""
+    try:
+        when = datetime.fromisoformat(stamp) if isinstance(stamp, str) else None
+    except ValueError:
+        return None
+    if when is None or when.tzinfo is None:
+        return None
+    return (now - when).total_seconds()
+
+
+def _read_heartbeat(path: Path) -> dict | None:
+    """One short read, the handle closed at once. The heartbeat is best effort (run_day's
+    writes never stop on it), so this is not ui/api's share-delete open: a write that meets
+    this read only misses one beat."""
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _today_left(broker: Any, earlier_day: set[str]) -> tuple[list[str] | None, list[str]]:
+    """(what is still open outside an earlier day's symbols, or None when unreadable;
+    what is left alone: an earlier day's (decision 8), and open orders that cannot be read,
+    which nothing acts on (#246))."""
+    try:
+        with ACTION_LOCK:
+            positions = broker.list_positions()
+            listing = broker.list_open_orders_checked()
+    except BrokerError:
+        return None, []
+    left, alone = [], []
+    for line, sym in ([(f"{p['symbol']} position ({p.get('qty')} shares)", p["symbol"])
+                       for p in positions]
+                      + [(f"open {o['type']} {o['side']} order in {o['symbol']}", o["symbol"])
+                         for o in listing["orders"]]):
+        (alone if sym in earlier_day else left).append(line)
+    alone += [f"an open order that cannot be read (id {u.get('id')}, symbol "
+              f"{u.get('symbol')})" for u in listing["unreadable"]]
+    return left, alone
+
+
+def flatten_now(rec: Any, broker: Any, *, clock: Callable[[], datetime],
+                sleep: Callable[[float], None], poll_s: float,
+                write: Callable[[str], None] = print) -> int:
+    """Flat-by passes (rec has flat_now) every poll_s until everything of today's is flat
+    (0), or the session ends (NOT_FLAT, after a final pass that acts on nothing, the market
+    being closed). An earlier day's position, or an unreadable order, is left alone (NOT_FLAT:
+    Ivan checks it)."""
+    while True:
+        with ACTION_LOCK:
+            report = rec.pass_once()
+        for a in report.get("actions", []):
+            write(f"  {a}")
+        left, alone = _today_left(broker, rec.earlier_day)
+        if left == []:
+            if alone:
+                write("today's positions are flat; left alone (an earlier day's, decision 8, "
+                      "check them in the Alpaca paper dashboard): " + "; ".join(alone))
+                return NOT_FLAT
+            write("flat: no position and no open order")
+            return 0
+        write("not flat yet: " + ("the broker cannot be read" if left is None
+                                  else "; ".join(left)))
+        if market_open(clock()) is not True:
+            with ACTION_LOCK:
+                rec.pass_once(final=True)
+            write("the market has closed with something still open: MANUAL ACTION NEEDED in "
+                  "the Alpaca paper dashboard")
+            return NOT_FLAT
+        sleep(poll_s)
+
+
+def main(argv: list[str] | None = None, *, broker: Any = None, journal: Any = None,
+         clock: Callable[[], datetime] | None = None, state_dir: Path | None = None,
+         sleep: Callable[[float], None] = time.sleep) -> int:
+    from journal.log import Journal
+    from pipeline.reconcile import POLL_S, ReadOnlyBroker, Reconciler
+    from tools.config import load_limits
+
+    p = argparse.ArgumentParser(prog="python -m pipeline.flatten", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true",
+                      help="read only: print today's flat-by and what --now would do")
+    mode.add_argument("--now", action="store_true",
+                      help="flatten today's positions on the PAPER account now (Ivan only)")
+    env = p.add_mutually_exclusive_group()
+    env.add_argument("--env-file", type=Path, default=None, metavar="PATH")
+    env.add_argument("--no-dotenv", action="store_true")
+    args = p.parse_args(argv)
+    clock = clock or (lambda: datetime.now(NY))
+    try:
+        limits = load_limits()
+    except (ValueError, OSError) as exc:
+        print(f"refused: the limits config cannot be used ({exc})", file=sys.stderr)
+        return 2
+    if limits.paper is not True:
+        print("refused: paper must be true (CLAUDE.md rule 1)", file=sys.stderr)
+        return 2
+    now = clock().astimezone(NY)
+    print(flat_by_line(now.date(), limits))
+    is_open = market_open(now)
+    if args.now and is_open is not True:
+        why = ("the market calendar does not cover this year" if is_open is None
+               else "the market is closed, so a market close would wait for the next open")
+        print(f"refused: {why}. Nothing was done; use the Alpaca paper dashboard",
+              file=sys.stderr)
+        return MARKET_CLOSED
+    if broker is None:
+        from pipeline.smoke_common import load_env
+        from tools.broker import AlpacaPaperBroker
+        code = load_env(args)
+        if code is not None:
+            return code
+        try:
+            broker = AlpacaPaperBroker(limits)
+            broker.verify_paper_account()
+        except BrokerError as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+    if args.check:
+        rec = Reconciler(journal or Journal(), ReadOnlyBroker(broker), clock=clock,
+                         limits=limits, check_only=True, flat_now=True, today_only=True)
+        report = rec.pass_once()
+        print("--now would:" if report["would"] else "--now would do nothing: nothing of "
+              "today's is open")
+        for w in report["would"]:
+            print(f"  {w}")
+        for a in report["alerts"]:
+            print(f"  alert: {a}")
+        print(json.dumps({k: report[k] for k in ("positions", "orders", "unreadable",
+                                                 "read_errors")}, indent=1, default=str))
+        return 0 if report.get("complete") else NOT_FLAT
+    from pipeline.budget import STATE_DIR
+    from pipeline.filelock import LockTimeout, exclusive_file_lock
+    folder = state_dir or STATE_DIR
+    # today_only: no start-of-day broker check ran here, so anything no order sent today
+    # explains is an earlier day's: blocked, never closed (decision 8)
+    rec = Reconciler(journal or Journal(), broker, clock=clock, limits=limits, flat_now=True,
+                     today_only=True)
+    run = lambda: flatten_now(rec, broker, clock=clock, sleep=sleep,  # noqa: E731
+                              poll_s=POLL_S)
+    try:
+        # run_day's own lock: no acting beside a run_day that is watching
+        with exclusive_file_lock(folder / "run_day.lock", timeout_s=0):
+            return run()
+    except LockTimeout:
+        why = _run_day_watching(folder, clock(), BACKSTOP_STALE_S)
+        if why is not None:
+            print(f"refused: {why}", file=sys.stderr)
+            return LOCK_REFUSED
+        print("run_day holds its lock but its reconciler is not watching (no pass in the "
+              f"last {BACKSTOP_STALE_S} s): flattening anyway, as the backstop",
+              file=sys.stderr)
+        return run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

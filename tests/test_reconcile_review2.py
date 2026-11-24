@@ -161,17 +161,20 @@ def test_the_stuck_timer_clears_once_flat(tmp_path):
     assert "SPY" not in r.stuck_since
 
 
-def test_a_close_waiting_for_the_open_is_said_once_never_escalated(tmp_path):
+def test_before_the_open_nothing_is_queued_it_blocks_and_alerts(tmp_path):
+    """#256 (Ivan, replacing #251's "a close queued for the open"): before the open every
+    position is an earlier day's (decision 8), so nothing is cancelled or closed. One block,
+    and the alert repeats every pass."""
     sim, j, clock, r, alerts = world(tmp_path)
     clock.t = T0.replace(hour=8)  # before the open
-    sim.positions["SPY"] = 1  # an orphan: flattened, the close queued for the open
-    sim.close_fills = False
-    for _ in range(8):  # 2 minutes before the open
+    sim.positions["SPY"] = 1  # an orphan
+    for _ in range(8):  # 2 minutes, 8 passes
+        before = len(alerts)
         r.pass_once()
+        assert any("MANUAL ACTION NEEDED" in a for a in alerts[before:])
         clock.step(15)
-    waiting = [a for a in alerts if "fills when the market opens" in a]
-    assert len(waiting) == 1
-    assert not any("MANUAL ACTION" in a for a in alerts)
+    assert sim.writes == []
+    assert "outside-session:SPY" in [b["key"] for b in blocks(j)]
 
 
 # ---- smaller fixes -------------------------------------------------------------------------
