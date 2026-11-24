@@ -178,7 +178,8 @@ Without `--scheduled` it prints the day's plan and calls nothing.
   warning at every start.
 - **Start-of-day hold** (#209): the day is held, with a block and an alert, if:
   - an order from an earlier day may still hold a position;
-  - the broker holds a position or order that no order sent today explains.
+  - the broker holds a position or order that no order sent today explains, matched by
+    order, not by symbol (#257): a position larger than today's fills explain holds too.
 
   Nothing from an earlier day is closed automatically.
 

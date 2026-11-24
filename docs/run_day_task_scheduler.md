@@ -182,6 +182,14 @@ today explains, it:
 - alerts;
 - exits with code 5 (held), with no decisions that day.
 
+The broker check matches **by order, never by symbol** (#257). An open order counts as
+today's only if it is an order sent today or one of its bracket legs. A position counts as
+today's only up to the shares today's filled entries still hold, by the broker's own record.
+So a leftover in a symbol that was also traded today holds the day like any other, on a
+restart too, and a position larger than today's fills explain holds it in full. A flat-by
+close still working when run_day restarts holds the day as well, since nothing records its
+id.
+
 The same happens if the broker cannot be checked. Check the dashboard, close or cancel what is
 there by hand, then resolve the block with `journal.resolve`.
 
@@ -201,6 +209,9 @@ Neither command uses a billed API. The Alpaca paper API is free.
 - `--now` only closes what an order sent today explains. A position or order that no order
   sent today explains counts as an earlier day's, so `--now` blocks it, alerts and leaves it
   alone. So does an open order it cannot read. Close those in the dashboard yourself.
+- **Caution:** `--now` still matches by symbol. If a symbol holds both today's shares and an
+  earlier day's, `--now` would close or cancel both. Close that symbol in the dashboard
+  instead. run_day's held alert says so when it finds such a symbol.
 - `--now` refuses while run_day is running and watching (exit 4), because run_day flattens
   at the flat-by itself. To get out earlier, stop run_day first. If run_day is hung (no
   reconcile pass in the last 2 minutes), `--now` acts anyway.
