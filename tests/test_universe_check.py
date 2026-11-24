@@ -404,3 +404,92 @@ def test_the_live_data_object_is_never_asked_for_a_billed_source(tmp_path):
 
     code, _ = run(tmp_path, "--symbols", "AMD", data=Strict())
     assert code == 0
+
+
+# ---- review fixes -----------------------------------------------------------------------------
+
+def test_the_backup_file_is_git_ignored():
+    ignore = (Path(uc.__file__).resolve().parent.parent / ".gitignore").read_text("utf-8")
+    assert "config/*.bak" in ignore
+
+
+def test_a_failed_backup_changes_nothing_and_says_so(tmp_path, monkeypatch):
+    path, _ = make_config(tmp_path)
+    before = path.read_bytes()
+
+    def boom(*a, **k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(uc.shutil, "copy2", boom)
+    with pytest.raises(uc.RunDayConfigError, match="backup could not be made.*unchanged"):
+        uc.write_universe(path, ["AMD"])
+    assert path.read_bytes() == before
+
+
+def test_a_failed_write_leaves_the_config_and_the_backup(tmp_path, monkeypatch):
+    path, _ = make_config(tmp_path)
+    before = path.read_bytes()
+
+    def boom(*a, **k):
+        raise PermissionError("blocked")
+
+    monkeypatch.setattr(uc, "atomic_write_text", boom)
+    with pytest.raises(uc.RunDayConfigError, match="could not be written.*unchanged"):
+        uc.write_universe(path, ["AMD"])
+    assert path.read_bytes() == before and path.with_name("run_day.json.bak").read_bytes() == before
+
+
+def test_main_reports_a_failed_write_as_a_refusal_not_a_traceback(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(uc.shutil, "copy2", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
+    code, _ = run(tmp_path, "--write", "--symbols", "AMD")
+    assert code == uc.REFUSED and "backup could not be made" in capsys.readouterr().err
+
+
+def test_bars_stamped_at_midnight_new_york_map_to_their_session_date():
+    """In winter Alpaca stamps a daily bar 05:00Z: the NY date is the same day. The fixture's
+    last completed session is Friday 2026-11-20 and Monday's bar is today's partial one."""
+    assert BARS["bars"][-1]["t"] == "2026-11-20T05:00:00Z"
+    assert BARS["bars"][0]["t"] == "2026-10-12T04:00:00Z"  # summer time
+    assert str(uc._bar_day(BARS["bars"][-1])) == "2026-11-20"
+    today = {"t": "2026-11-23T05:00:00Z", "o": 5, "h": 5, "l": 5, "c": 5, "v": 10}
+    stats = uc.daily_stats(bars_for(extra=[today])["bars"], NOW.date())
+    assert stats["close"] == D("130") and stats["days"] == 20
+
+
+def test_the_live_path_builds_livedata_and_calls_only_free_sources(tmp_path, monkeypatch,
+                                                                    capsys):
+    import pipeline.data as pd
+    for k in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "SEC_USER_AGENT"):
+        monkeypatch.setenv(k, "fixture-value")
+    calls = []
+    monkeypatch.setattr(pd, "fetch_asset", lambda s: calls.append(("asset", s)) or
+                        {**ASSET, "symbol": s})
+    monkeypatch.setattr(pd, "fetch_cik_map", lambda: calls.append(("cikmap",)) or {"AMD": "1"})
+    monkeypatch.setattr(pd, "fetch_submissions",
+                        lambda cik: calls.append(("subs", cik)) or
+                        submissions_202(NOW, 30, symbol="AMD"))
+    monkeypatch.setattr(uc, "fetch_bars", lambda s, a, b, **k: calls.append(("bars", s)) or
+                        bars_for())
+    path, _ = make_config(tmp_path)
+    code = uc.main(["--no-dotenv", "--symbols", "AMD"], now=NOW, config_path=path)
+    assert code == 0, capsys.readouterr()
+    assert [c[0] for c in calls] == ["asset", "cikmap", "subs", "bars"]
+
+
+def test_missing_keys_are_one_clear_refusal_before_any_request(tmp_path, monkeypatch, capsys):
+    for k in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "SEC_USER_AGENT"):
+        monkeypatch.delenv(k, raising=False)
+    code = uc.main(["--no-dotenv", "--symbols", "AMD"], now=NOW,
+                   config_path=tmp_path / "x.json")
+    err = capsys.readouterr().err
+    assert code == uc.REFUSED and "ALPACA_API_KEY" in err and "SEC_USER_AGENT" in err
+
+
+def test_write_prints_what_was_added_and_removed(tmp_path, capsys):
+    path, cfg = make_config(tmp_path)
+    old = cfg["universe"]
+    run_code = uc.main(["--no-dotenv", "--write", "--symbols", "AMD", "ZZZZ"],
+                       data=FakeData(), fetch_daily=daily(), now=NOW, config_path=path)
+    out = capsys.readouterr().out
+    assert run_code == 0 and f"universe: {len(old)} -> 2" in out
+    assert "added: ZZZZ" in out and "removed: " in out and "AAPL" in out

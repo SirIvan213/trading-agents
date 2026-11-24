@@ -9,6 +9,7 @@ __pycache__/
 .env
 config/*.json
 !config/*.example.json
+config/*.bak
 
 # runtime data
 journal/*.db

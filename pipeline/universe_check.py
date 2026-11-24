@@ -32,6 +32,13 @@ changed): a symbol must never drop out of the list because a request hiccuped. R
 The scan logic (tools/scan.py, pipeline/market.py) is not touched, and nothing here is used
 by the scan.
 
+Limits worth knowing. Bars are requested with Alpaca's raw (unadjusted) prices, so a split
+inside the 20-session window distorts the volume average (a reverse split inflates it, a
+forward split shrinks it); the last close is right as raw. A run after 16:00 still skips
+today's just-finished session, so "last close" is then the session before. Each --write
+overwrites the previous .bak (copy it away if you hand-edited the universe). --symbols with
+--write replaces the WHOLE universe with the passing subset of the symbols given.
+
 Exit codes: 0 done (a clean table; with --write, written); 1 refused: nothing passed; 2
 refused before any request (bad config or option); 4 at least one ERROR (with --write:
 nothing written).
@@ -40,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timedelta
@@ -53,6 +61,7 @@ from pipeline.events import _failure, listing_input, reporting_check
 from pipeline.smoke_common import load_env
 from tools.atomic_write import atomic_write_text
 from tools.bars import fetch_bars
+from tools.event_gate import COVERAGE_DAYS
 from tools.listing import ALLOWED_LISTINGS
 from tools.symbols import validate_symbols
 
@@ -137,7 +146,8 @@ def check_symbol(data: Any, fetch_daily: Any, symbol: str, now: datetime, feed: 
         if reporting.get("fetch_failed"):
             errors.append(f"SEC request failed: {reporting.get('reason')}")
         else:
-            reasons.append(f"no 8-K item 2.02 in the last 100 days ({reporting.get('reason')})")
+            reasons.append(f"no 8-K item 2.02 in the last {COVERAGE_DAYS} days "
+                           f"({reporting.get('reason')})")
 
     try:
         start = (now - timedelta(days=BARS_LOOKBACK_DAYS)).replace(microsecond=0)
@@ -168,7 +178,8 @@ def check_symbol(data: Any, fetch_daily: Any, symbol: str, now: datetime, feed: 
 def render(rows: list[dict], feed: str, now: datetime) -> str:
     """The pass/fail table, as text."""
     lines = [f"universe_check at {now:%Y-%m-%d %H:%M} ET, daily bars feed: {feed}",
-             f"criteria: NASDAQ/NYSE/AMEX listing; 8-K item 2.02 in 100 days; last close "
+             f"criteria: NASDAQ/NYSE/AMEX listing; 8-K item 2.02 in {COVERAGE_DAYS} days; "
+             f"last close "
              f"${MIN_CLOSE}-${MAX_CLOSE}; {VOLUME_DAYS}-day average volume >= "
              f"{MIN_AVG_VOLUME:,}", "",
              f"{'SYMBOL':<7}{'RESULT':<7}{'EXCH':<8}{'CLOSE':>9}{'AVG VOLUME':>13}  REASON"]
@@ -200,8 +211,17 @@ def write_universe(config_path: Path, symbols: list[str]) -> Path:
     new = {**raw, "universe": list(symbols)}  # every other key, in its place
     config_from_dict(new)  # caps, ceilings, universe size: run_day's own rules
     backup = config_path.with_name(config_path.name + ".bak")
-    shutil.copy2(config_path, backup)
-    atomic_write_text(config_path, json.dumps(new, indent=2) + "\n")
+    try:
+        shutil.copy2(config_path, backup)
+    except OSError as exc:
+        raise RunDayConfigError(f"the backup could not be made ({type(exc).__name__}); "
+                                f"{config_path.name} is unchanged") from None
+    try:
+        atomic_write_text(config_path, json.dumps(new, indent=2) + "\n")
+    except OSError as exc:
+        raise RunDayConfigError(f"{config_path.name} could not be written "
+                                f"({type(exc).__name__}); it is unchanged, and {backup.name} "
+                                "is a copy of it") from None
     return backup
 
 
@@ -220,7 +240,8 @@ def main(argv: list[str] | None = None, *, data: Any = None, fetch_daily: Any = 
                    help="daily bars feed (default sip: IEX volumes are a few percent of the "
                         "consolidated tape)")
     p.add_argument("--symbols", nargs="+", metavar="SYM", default=None,
-                   help="check these instead of the built-in candidate list")
+                   help="check these instead of the built-in candidate list (with --write "
+                        "the universe becomes ONLY the passing ones among them)")
     env = p.add_mutually_exclusive_group()
     env.add_argument("--env-file", type=Path, default=None, metavar="PATH")
     env.add_argument("--no-dotenv", action="store_true")
@@ -239,6 +260,12 @@ def main(argv: list[str] | None = None, *, data: Any = None, fetch_daily: Any = 
         code = load_env(args)
         if code is not None:
             return code
+        missing = [k for k in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "SEC_USER_AGENT")
+                   if not (os.environ.get(k) or "").strip()]
+        if missing:  # one clear refusal instead of the same ERROR on every row
+            print(f"refused: set {', '.join(missing)} in the environment or .env",
+                  file=sys.stderr)
+            return REFUSED
         from pipeline.data import LiveData  # only listing, submissions and the CIK map run
         data = LiveData()
     fetch_daily = fetch_daily or live_fetch_daily
@@ -259,6 +286,14 @@ def main(argv: list[str] | None = None, *, data: Any = None, fetch_daily: Any = 
         print("\nrefused: no symbol passed, so the universe is left as it is",
               file=sys.stderr)
         return NOTHING_PASSED
+    try:
+        old = json.loads(path.read_text(encoding="utf-8")).get("universe") or []
+        added = [s for s in passing if s not in old]
+        removed = [s for s in old if s not in passing]
+        print(f"\nuniverse: {len(old)} -> {len(passing)}; added: {', '.join(added) or '-'}; "
+              f"removed: {', '.join(removed) or '-'}")
+    except (OSError, ValueError, AttributeError):
+        pass  # write_universe reports an unreadable config
     try:
         backup = write_universe(path, passing)
     except RunDayConfigError as exc:
