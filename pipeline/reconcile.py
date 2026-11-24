@@ -87,6 +87,7 @@ from journal.orders import (
 from pipeline.flatten import (
     CLOSING,
     FLAT,
+    SESSION_OVER,
     SKIPPED_UNREADABLE,
     FlattenResult,
     flat_by_reached,
@@ -108,7 +109,6 @@ from tools.realized import RealizedError, realized_pnl
 RUN_DAY_READY = True
 FINAL = FINAL_STATUSES
 DONE_THIS_PASS = "done this pass"  # _flatten: the symbol was already flattened this pass
-MARKET_CLOSED = "market_closed"  # _flatten: after the close, nothing is cancelled or closed
 
 NY = ZoneInfo("America/New_York")
 POLL_S = 15
@@ -749,23 +749,30 @@ class Reconciler:
                         f"{sym} would be flattened ({why}), but an order from an earlier day "
                         f"may hold it: {EARLIER_DAY}", symbol=sym)
             return FlattenResult("held", "an earlier day's position: not acted on")
-        if self._session_over(now):
-            # #135 review: a market close now would wait for the next open and fill then,
-            # with nobody deciding: cancel nothing, close nothing; a person acts
-            why_not = ("the market is closed, so a market close would wait for the next open: "
-                       "nothing was cancelled or closed")
+        # #135 review: after the close a market close would wait for the next open and fill
+        # then, with nobody deciding: cancel nothing, close nothing; a person acts. Judged by
+        # the time NOW (a pass can run long), and again inside flatten_symbol before each
+        # cancel and before the close.
+        why_not = ("the market is closed, so a market close would wait for the next open: "
+                   "nothing was cancelled or closed")
+        if self._session_over(self._now()):
             if self.check_only:
                 self._would(f"flatten {sym} ({why}): not now, {why_not}")
                 return FlattenResult("check", "check only")
             self._alert(MANUAL.format(symbol=sym) + f" ({why}; {why_not})", symbol=sym)
             self.stuck_since.setdefault(sym, now)
-            return FlattenResult(MARKET_CLOSED, why_not)
+            return FlattenResult(SESSION_OVER, why_not)
         if self.check_only:
             self._would(f"flatten {sym} ({why}): cancel its legs and orders, confirm, close")
             return FlattenResult("check", "check only")
         result = flatten_symbol(self.broker, sym, cids, sleep=self.sleep,
-                                monotonic=self.monotonic)
+                                monotonic=self.monotonic,
+                                may_act=lambda: not self._session_over(self._now()))
         self.report["actions"].extend(result.actions)
+        if result.state == SESSION_OVER:
+            self._alert(MANUAL.format(symbol=sym) + f" ({why}; {result.detail})", symbol=sym)
+            self.stuck_since.setdefault(sym, now)
+            return result
         if result.state == FLAT:
             self.stuck_since.pop(sym, None)
             return result

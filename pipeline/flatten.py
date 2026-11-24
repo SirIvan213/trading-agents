@@ -59,6 +59,7 @@ CLOSING = "closing"  # a close is working (ours, or one we just placed)
 WAITING = "waiting"  # not done this pass (orders not gone yet, legs still holding shares)
 SKIPPED_UNREADABLE = "skipped_unreadable"  # an unreadable order may be a working close
 FAILED = "failed"  # a read failed: nothing was closed blindly; the next pass tries again
+SESSION_OVER = "market_closed"  # may_act said no: nothing more was cancelled or closed
 
 
 def flat_by_at(day: date, limits: Any) -> datetime | None:
@@ -141,17 +142,23 @@ def _leg_filled(broker: Any, cids: Iterable[str]) -> bool:
 
 def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
                    sleep: Callable[[float], None] = time.sleep,
-                   monotonic: Callable[[], float] = time.monotonic) -> FlattenResult:
+                   monotonic: Callable[[], float] = time.monotonic,
+                   may_act: Callable[[], bool] = lambda: True) -> FlattenResult:
     """One flatten pass for `symbol` (`cids`: its journaled entries' client_order_ids). Never
-    raises a BrokerError: the result says where it got to."""
+    raises a BrokerError: the result says where it got to. `may_act` is asked again right
+    before each cancel and before the close (the waits in between can cross the close, #135
+    review): False stops there (SESSION_OVER), with nothing more sent."""
     cids = list(cids)
     actions: list[str] = []
+    stopped = "the market has closed: nothing more was cancelled or closed"
     with ACTION_LOCK:
         try:
             ids, closing, unreadable = _working_ids(broker, symbol, cids)
         except BrokerError as exc:
             return FlattenResult(FAILED, f"could not read {symbol}'s orders ({exc})", actions)
         for oid, what in ids.items():
+            if not may_act():
+                return FlattenResult(SESSION_OVER, stopped, actions)
             try:
                 broker.cancel_order(oid)
                 actions.append(f"cancel {what} ({oid})")
@@ -186,6 +193,8 @@ def flatten_symbol(broker: Any, symbol: str, cids: Iterable[str] = (), *,
             return FlattenResult(FLAT, f"no position in {symbol}", actions)
         if closing:  # already placed: the next pass looks again (no wait every pass)
             return FlattenResult(CLOSING, f"a close of {symbol} is already working", actions)
+        if not may_act():
+            return FlattenResult(SESSION_OVER, stopped, actions)
         try:
             order = broker.close_position(symbol)
             actions.append(f"close {symbol} ({order['id']})")
@@ -235,6 +244,9 @@ NOT_FLAT = 1
 # refuses. Wider than reconcile.STALE_S: one pass can take a minute (each symbol waits up to
 # CONFIRM_WAIT_S for its cancels and again for its fill), and a busy run_day is not a hung one.
 BACKSTOP_STALE_S = 120
+# a pass under way this long is a busy run_day (each symbol can wait 15 s for its cancels and
+# 15 s for its fill); longer, it is hung and the backstop acts
+PASS_RUNNING_S = 300
 MAX_NOW_S = 1800  # --now gives up after this when the calendar cannot say when the close is
 
 
@@ -266,19 +278,28 @@ def market_open(now: datetime) -> bool | None:
 def _run_day_watching(state_dir: Path, now: datetime, stale_s: float) -> str | None:
     """run_day holds its lock: is its reconciler watching (a pass in the last stale_s)?
     A reason to refuse, or None (it is not watching: --now acts as the backstop)."""
-    beat = _read_heartbeat(state_dir / "run_day.heartbeat.json")
-    last = beat.get("reconciled_at") if beat else None
-    try:
-        when = datetime.fromisoformat(last) if isinstance(last, str) else None
-    except ValueError:
-        when = None
-    if when is None or when.tzinfo is None:
-        return None
-    age = (now - when).total_seconds()
-    if age <= stale_s:
+    beat = _read_heartbeat(state_dir / "run_day.heartbeat.json") or {}
+    running = _age(beat.get("reconcile_pass_started_at"), now)
+    if running is not None and running <= PASS_RUNNING_S:
+        return (f"run_day is running and its reconciler is in a pass that started "
+                f"{int(running)} s ago: it flattens at the flat-by itself. Use --check to "
+                "look, or stop run_day first")
+    age = _age(beat.get("reconciled_at"), now)
+    if age is not None and age <= stale_s:
         return (f"run_day is running and its reconciler made a pass {int(age)} s ago: it "
                 "flattens at the flat-by itself. Use --check to look, or stop run_day first")
     return None
+
+
+def _age(stamp: object, now: datetime) -> float | None:
+    """Seconds since an ISO time with a zone (None when missing or unreadable)."""
+    try:
+        when = datetime.fromisoformat(stamp) if isinstance(stamp, str) else None
+    except ValueError:
+        return None
+    if when is None or when.tzinfo is None:
+        return None
+    return (now - when).total_seconds()
 
 
 def _read_heartbeat(path: Path) -> dict | None:

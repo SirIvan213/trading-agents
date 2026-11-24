@@ -171,6 +171,7 @@ def test_a_broker_that_cannot_be_checked_holds_the_day(tmp_path, monkeypatch):
     assert rd.run_day(day, limits=LIMITS) == rd.HELD
     assert dec.calls == [] and day.reconcile_thread is None
     assert any("start-of-day broker check failed" in a for a in alerts(day))
+    assert not any("will not watch" in a for a in alerts(day))  # nothing was sent today
 
 
 def test_a_restart_with_todays_position_is_not_held(tmp_path, monkeypatch):

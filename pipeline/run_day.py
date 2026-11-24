@@ -201,6 +201,10 @@ class Day:
         if getattr(self, "reconciler", None) is not None:  # with a broker (#155)
             last = getattr(self, "reconciled_at", None)
             body["reconciled_at"] = last.astimezone(NY).isoformat() if last else None
+            # a pass under way (pipeline.flatten --now never acts beside a busy run_day)
+            running = getattr(self, "pass_started_at", None)
+            body["reconcile_pass_started_at"] = (running.astimezone(NY).isoformat()
+                                                 if running else None)
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             atomic_write_text(self.heartbeat_path, json.dumps(body, sort_keys=True))  # #213
@@ -338,6 +342,7 @@ def reconcile_pass(day: Day, *, final: bool = False) -> bool:
     try:
         with ACTION_LOCK:
             day.pass_started_at = day.clock()
+            day.beat()  # the pass start is in the heartbeat (pipeline.flatten --now)
             try:
                 report = day.reconciler.pass_once(final=final)
             finally:
@@ -504,6 +509,14 @@ def _held_unwatched(day: Day, todays: list[str] | None = None) -> None:
     some."""
     if todays == []:
         return
+    if todays is None:  # the broker could not be read: only if an order was sent today
+        try:
+            today = day.clock().astimezone(NY).date()
+            if not any(o.sent and o.approved_at.astimezone(NY).date() == today
+                       for o in day.journal.orders().values()):
+                return
+        except JournalError:
+            pass  # cannot tell: say it
     what = ("; ".join(todays) if todays else
             "any position of today's (the broker could not be read)")
     day.alert(f"held: run_day will not watch or flatten {what}. MANUAL ACTION NEEDED: check "

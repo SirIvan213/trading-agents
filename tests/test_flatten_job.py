@@ -535,3 +535,53 @@ def test_now_makes_no_close_in_its_final_pass_after_the_close(cli, tmp_path):
                    state_dir=tmp_path / "state", sleep=clock.step)
     sim._cancel = real
     assert code == fl.NOT_FLAT and CLOSE not in sim.writes
+
+
+def test_a_close_is_never_sent_once_a_long_pass_crosses_the_close(tmp_path):
+    """B2 residual: the pass starts at 15:59:59, the legs take one poll to go, and by then it
+    is 16:00: no close is sent (it would fill at tomorrow's open)."""
+    sim, faulty, j, clock, r, alerts = world(tmp_path, at=T0.replace(hour=15, minute=59,
+                                                                     second=59))
+    holding(sim, j, clock)
+    real, pending = sim._cancel, []
+
+    def slow_cancel(oid):
+        pending.append(oid)
+        return 204, None
+
+    def sleep(s):  # the clock moves during the confirm; the cancels land meanwhile
+        clock.step(s)
+        for oid in pending:
+            real(oid)
+        pending.clear()
+
+    sim._cancel = slow_cancel
+    r.sleep = sleep
+    r.pass_once()
+    assert clock.t >= T0.replace(hour=16)
+    assert CLOSE not in sim.writes
+    assert any("MANUAL ACTION NEEDED" in a and "market has closed" in a for a in alerts)
+
+
+def test_now_refuses_while_run_days_pass_is_under_way(cli, tmp_path):
+    from pipeline.filelock import exclusive_file_lock
+    sim, j, clock, broker = cli
+    holding(sim, j, clock)
+    state = tmp_path / "state"
+    state.mkdir()
+    beat = state / "run_day.heartbeat.json"
+
+    def stamp(pass_age, last_age):
+        beat.write_text(json.dumps({
+            "reconciled_at": (clock.t - timedelta(seconds=last_age)).isoformat(),
+            "reconcile_pass_started_at": (clock.t - timedelta(seconds=pass_age)).isoformat()}),
+            encoding="utf-8")
+
+    with exclusive_file_lock(state / "run_day.lock", timeout_s=0):
+        stamp(200, 400)  # a long flat-by pass: busy, not hung
+        assert fl.main(["--now"], broker=broker, journal=j, clock=clock, state_dir=state,
+                       sleep=clock.step) == fl.LOCK_REFUSED
+        assert sim.writes == []
+        stamp(400, 600)  # stuck in one pass for 400 s: hung, the backstop acts
+        assert fl.main(["--now"], broker=broker, journal=j, clock=clock, state_dir=state,
+                       sleep=clock.step) == 0
