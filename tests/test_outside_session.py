@@ -136,8 +136,9 @@ def test_reconcile_once_outside_the_session_sends_nothing(tmp_path, monkeypatch,
     assert rc.main(["--once"], broker=r.broker, journal=j, clock=clock,
                    state_dir=tmp_path / "state") in (0, 1)
     assert sim.writes == []
-    keys_ = [b["key"] for b in blocks(j)]
-    assert "outside-session:MSFT" in keys_ and "outside-session:SPY" in keys_
+    assert "outside-session:SPY" in [b["key"] for b in blocks(j)]
+    # MSFT (no order sent today, #258) is blocked as an earlier day's before the time is asked
+    assert "MSFT" in {b.get("symbol") for b in blocks(j)}
 
 
 class NoBroker:
@@ -167,3 +168,29 @@ def test_run_day_starting_before_the_open_sends_nothing(tmp_path, monkeypatch):
                                     start=datetime(2026, 11, 24, 8, 0, tzinfo=NY))
     assert rd.run_day(day, limits=LIMITS) == rd.HELD
     assert sim.writes == [] and day.reconcile_thread is None
+
+
+@pytest.mark.parametrize("check", [False, True], ids=["once", "check"])
+def test_reconcile_by_hand_in_session_never_acts_on_what_no_order_today_explains(
+        tmp_path, monkeypatch, check):
+    """#258: `pipeline.reconcile --once` (and --check) has no start-of-day broker check, so
+    a position or order no order sent today explains is an earlier day's: blocked and
+    alerted, never closed or cancelled. Today's own trade is still reconciled."""
+    monkeypatch.setattr(tc, "load_limits", lambda path=None: LIMITS)
+    sim, j, clock, r, alerts = world(tmp_path, INSIDE)
+    orphan_position(sim, j, clock)  # MSFT, not in the journal
+    orphan_order(sim, j, clock)  # AAPL, not in the journal
+    unprotected_position(sim, j, clock)  # today's SPY without a stop: flattened
+    before = j.path.read_bytes()
+    assert rc.main(["--check" if check else "--once"], broker=r.broker, journal=j,
+                   clock=clock, state_dir=tmp_path / "state") in (0, 1)
+    untouched = [w for w in sim.writes if "MSFT" in w[1] or w[1].endswith(
+        sim.entries["hidden"]["id"])]
+    assert untouched == []
+    if check:
+        assert sim.writes == [] and j.path.read_bytes() == before
+    else:
+        assert ("DELETE", "/v2/positions/SPY") in sim.writes
+        assert sim.positions.get("MSFT") == 5
+        held = {b["symbol"] for b in blocks(j) if "earlier day" in b["reason"]}
+        assert {"MSFT", "AAPL"} <= held

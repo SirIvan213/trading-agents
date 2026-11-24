@@ -1038,8 +1038,11 @@ def main(argv: list[str] | None = None, *, broker: Any = None, journal: Journal 
             return 2
     if args.check:
         broker = ReadOnlyBroker(broker)
+    # today_only (#258): run by hand, with no start-of-day broker check, it cannot tell an
+    # earlier day's leftover from anything else: what no order sent today explains is
+    # blocked and alerted, never closed or cancelled (decision 8)
     rec = Reconciler(journal or Journal(), broker, limits=limits, check_only=args.check,
-                     clock=clock or (lambda: datetime.now(NY)))
+                     clock=clock or (lambda: datetime.now(NY)), today_only=True)
     if args.check:
         report = rec.pass_once()
     else:

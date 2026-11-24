@@ -117,6 +117,12 @@ cancels or closes anything, and writes nothing):
 .venv\Scripts\python.exe -m pipeline.reconcile --check
 ```
 
+`--check` and `--once` (one acting pass, run by hand) have no start-of-day broker check. So
+anything at the broker that no order sent today explains counts as an earlier day's: they
+block it and alert, and never close or cancel it. Inside run_day, the start-of-day check has
+already held the day for anything like that. So run_day's own reconciler treats something
+untraceable that turns up during the day as an orphan, and flattens it.
+
 **Blocks.** When the reconciler finds something it cannot square, it writes a block and
 alerts, and **no new entry is allowed until you resolve every block**:
 

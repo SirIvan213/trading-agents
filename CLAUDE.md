@@ -218,7 +218,6 @@ The setup and the first paper day checklist are in `docs/run_day_task_scheduler.
 **Left in Phase 5** (milestone "Phase 5"):
 - **risk-sensitive:**
   - #257 the start-of-day check matches by symbol on a restart;
-  - #258 `reconcile --once` in session flattens an orphan whose age it cannot know;
   - #262 an end-to-end test of a send after the flat-by;
   - #250 the paper probe's stop-leg size after a partial take-profit fill;
   - #156 and #136 are still open.
