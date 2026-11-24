@@ -30,6 +30,14 @@ One pass:
      dedicated to this project, no hand-placed orders) and unreadable orders block new
      entries and alert; orphans are flattened, an unreadable order is never acted on.
 
+The flat-by (PR 5, #135): at and after the day's flat-by time (pipeline.flatten.flat_by_at:
+15:55 ET, 12:55 on an early close), or with flat_now (python -m pipeline.flatten --now),
+every pass also cancels each of today's working entries (and confirms it), and flattens each
+of today's positions with pipeline.flatten.flatten_symbol, whatever its stop. Legs the
+flat-by cancelled itself are no reason for an "unprotected" block. Not flat yet: the alert
+repeats every pass, and after LOUD_S it says MANUAL ACTION NEEDED. An earlier day's position
+is never closed: blocked and alerted (decision 8).
+
 Blocks (journal "reconcile_block", #189) stop every new entry (DayState.reconcile_blocks,
 risk_check) until a human resolves each one: `python -m journal.resolve`.
 
@@ -77,6 +85,7 @@ from pipeline.flatten import (
     FLAT,
     SKIPPED_UNREADABLE,
     FlattenResult,
+    flat_by_reached,
     flatten_symbol,
 )
 from tools.broker import ACTION_LOCK, FINAL_STATUSES, BrokerError, is_close_order
@@ -91,8 +100,7 @@ from tools.protection import (
 )
 from tools.realized import RealizedError, realized_pnl
 
-# The reconciler is ready for run_day. run_day still refuses a broker until pipeline.flatten
-# (PR 5, the flat-by job, #135) declares RUN_DAY_READY too (pipeline.run_day.broker_allowed).
+# The reconciler is ready for run_day (with pipeline.flatten's flag: run_day.broker_allowed).
 RUN_DAY_READY = True
 FINAL = FINAL_STATUSES
 DONE_THIS_PASS = "done this pass"  # _flatten: the symbol was already flattened this pass
@@ -142,12 +150,15 @@ class Reconciler:
     journal and never sends, cancels or closes; the report lists what it WOULD do."""
 
     def __init__(self, journal: Journal, broker: Any, *, clock: Callable[[], datetime],
-                 limits: Any = None, check_only: bool = False,
+                 limits: Any = None, check_only: bool = False, flat_now: bool = False,
                  alert: Callable[[str], None] = _alert_print,
                  sleep: Callable[[float], None] = time.sleep,
                  monotonic: Callable[[], float] = time.monotonic) -> None:
         self.journal, self.broker, self.clock, self.limits = journal, broker, clock, limits
         self.check_only = check_only
+        # flat_now: every pass is a flat-by pass, whatever the time (pipeline.flatten --now)
+        self.flat_now = flat_now
+        self.flat_by_mode = False  # this pass flattens today's positions (#135)
         self._print_alert, self.sleep, self.monotonic = alert, sleep, monotonic
         # timers that span passes (in memory: a restart only waits longer, never less)
         self.not_found: dict[str, int] = {}  # cid -> consecutive 404 lookups
@@ -285,10 +296,12 @@ class Reconciler:
 
     def _pass(self) -> dict:
         now = self._now()
+        self.flat_by_mode = self.flat_now or (self.limits is not None
+                                              and flat_by_reached(now, self.limits))
         self.report = {"at": now.isoformat(), "mode": "check" if self.check_only else "act",
-                       "complete": False, "orders": [], "positions": [], "unreadable": [],
-                       "recorded": [], "actions": [], "would": [], "blocks": [],
-                       "alerts": [], "errors": [], "read_errors": []}
+                       "flat_by": self.flat_by_mode, "complete": False, "orders": [],
+                       "positions": [], "unreadable": [], "recorded": [], "actions": [],
+                       "would": [], "blocks": [], "alerts": [], "errors": [], "read_errors": []}
         try:
             self._run(now)
         finally:
@@ -374,6 +387,10 @@ class Reconciler:
                                           "broker": found["status"] if found else None,
                                           "filled_qty": found["filled_qty"] if found else None})
             self._settle(o, found, now, self.limits_by_cid.get(o.client_order_id))
+            if self.flat_by_mode:  # #135: no new entries from the flat-by on
+                current = self.latest.get(o.client_order_id, found)
+                if current is not None and entry_can_fill(current):
+                    self._cancel_entry(o, current, "the flat-by time: no new entries (#135)")
             # after a cancel, judge by what the broker shows now, not before it
             looked[o.client_order_id] = self.latest.pop(o.client_order_id, found)
 
@@ -584,6 +601,13 @@ class Reconciler:
                         "in the journal", symbol=sym)
             self._flatten(sym, cids, "more than one open trade", now)
             return
+        if self.flat_by_mode:
+            # #135: every position of today's is closed at the flat-by, whatever its stop.
+            # The legs the flat-by cancels itself are no reason for an "unprotected" block
+            # (it would stop tomorrow's entries). An earlier day's position: _flatten blocks
+            # it and acts on nothing (decision 8).
+            self._flatten(sym, cids, "the flat-by time (#135)", now)
+            return
         o = trades[0]
         cid = o.client_order_id
         found = looked.get(cid)
@@ -723,13 +747,16 @@ class Reconciler:
                             symbol=sym)
             self.stuck_since.setdefault(sym, now)
             return result
-        # not flat yet: alert every pass, never quiet; loud after LOUD_S or at the flat-by
+        # not flat yet: alert every pass, never quiet; loud after LOUD_S, or at the flat-by
+        # for a skipped close (it never closes by itself) or a flatten stuck since before it.
+        # A flatten the flat-by itself started gets its LOUD_S like any other (#135).
         first = self.stuck_since.setdefault(sym, now)
         flat_by = self._flat_by(now)
         what = ("the close was skipped this pass" if result.state == SKIPPED_UNREADABLE
                 else f"flatten not done ({result.state})")
-        if now - first >= timedelta(seconds=LOUD_S) or (flat_by is not None
-                                                         and now >= flat_by):
+        at_flat_by = flat_by is not None and now >= flat_by and (
+            result.state == SKIPPED_UNREADABLE or first < flat_by)
+        if now - first >= timedelta(seconds=LOUD_S) or at_flat_by:
             self._alert(MANUAL.format(symbol=sym) + f" ({what}: {result.detail}; unresolved "
                         f"since {first:%H:%M:%S})", symbol=sym)
         else:

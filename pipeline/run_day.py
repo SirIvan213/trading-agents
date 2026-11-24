@@ -9,23 +9,29 @@ Ivan set up launched it, `paper` is true, and all four daily caps are enforced i
     prints its plan and exits (NOT_SCHEDULED), touching no data source and no client;
   - it refuses to start (REFUSED) for a missing or invalid config/run_day.json or cap
     (pipeline/budget.py), an invalid limits config, or `paper` not true;
-  - it never sends an order in this PR: a broker is refused until the reconciler (#155) and
-    the flatten job (#135) are merged (`broker_allowed`, enforced in code).
+  - a broker (--send, Alpaca PAPER only) is allowed only while the reconciler (#155) and the
+    flat-by job (#135) both declare RUN_DAY_READY (`broker_allowed`, enforced in code).
 
 The day (New York time, the NYSE calendar in tools/market_calendar.py):
   1. start: the calendar coverage warning (#141), the single-instance lock, the daily budget
      (continued if run_day restarts the same day), a `run_day_start` journal entry;
   2. a weekend, holiday or uncovered year: journaled, no decisions;
   3. start-of-day check (decision 8): an order sent on an earlier day that may still hold a
-     position alerts and holds the day (HELD): no decisions, nothing closed;
+     position blocks, alerts and holds the day (HELD): no decisions, nothing closed. With a
+     broker (#209), so does any position or open order AT THE BROKER that no order sent
+     today explains, and a broker that cannot be checked (fail closed);
   4. the scan at scan_time (09:40 by default, #131: trades and quotes are fresh by then, so
      the 120 s staleness rule applies unchanged), over the configured universe, with the
      listing (#168) and quarterly-reporting (#170) checks;
   5. a decision cycle every cycle_minutes from the day's entry start until its entry_end
      (an early close moves entry_end, tools.market_calendar.day_times): a fresh scan, then at
      most candidates_per_cycle decisions, one at a time, one per symbol per day;
-  6. it stops making decisions when a cap is reached (or the budget cannot be trusted), and
-     journals `run_day_end` with the day's counts.
+  6. it stops making decisions when a cap is reached (or the budget cannot be trusted);
+  7. with a broker (#248): it keeps the reconciler running until the account is flat or the
+     market closes; at the flat-by (15:55 ET, 12:55 on an early close) the reconciler
+     cancels today's working entries and flattens today's positions (#135). Not flat 3
+     minutes before the close alerts; then a final pass, and exiting with anything still
+     open alerts. It journals `run_day_end` with the day's counts.
 A decision counts when it starts (run_decision's before_analysts hook, after the free SEC
 check). Each ticket is asked in the watched terminal until the moment the decision was
 counted + max_plan_age_s (never after the plan's expiry); no answer by then is declined.
@@ -35,12 +41,13 @@ background thread, at least every HEARTBEAT_S seconds of real time, during decis
 heartbeat older than that means run_day stopped. Alerts are a console line and a journal
 entry (desktop notifications are a follow-up).
 
-With a broker (once #155 and #135 are merged), the reconciler (pipeline/reconcile.py) runs in
-a thread every reconcile.POLL_S seconds and once before each decision, and writes its
-last-pass time to the heartbeat ("reconciled_at"). If that is more than reconcile.STALE_S
-old, or the thread died, run_day starts no decision and refuses every send (the broker's
-paper-account check fails first), and alerts. One in-process lock (tools.broker.ACTION_LOCK)
-wraps every broker action, so the reconciler and a decision never act at once.
+With a broker, the reconciler (pipeline/reconcile.py) runs in a thread every reconcile.POLL_S
+seconds and once before each decision, and writes its last-pass time to the heartbeat
+("reconciled_at"). If that is more than reconcile.STALE_S old, or the thread died, run_day
+starts no decision and refuses every send (the broker's paper-account check fails first),
+and alerts. Every send is also refused from the flat-by on. One in-process lock
+(tools.broker.ACTION_LOCK) wraps every broker action, so the reconciler and a decision never
+act at once.
 """
 from __future__ import annotations
 
@@ -72,6 +79,7 @@ from pipeline.budget import (
 from pipeline.decide import SymbolSkipped, run_decision
 from pipeline.events import listing_input, reporting_check
 from pipeline.filelock import LockTimeout, exclusive_file_lock
+from pipeline.flatten import flat_by_reached, still_open
 from pipeline.market import NY, run_scan
 from pipeline.order_flow import wall_clock
 from pipeline.reconcile import POLL_S as RECONCILE_POLL_S
@@ -96,8 +104,9 @@ ALREADY_RUNNING = 4
 HELD = 5
 
 HEARTBEAT_S = 30.0
-# The reconciler (#155) and the flatten job (#135): until both are merged and declare
-# RUN_DAY_READY = True, run_day refuses a broker (the #199 runner-ordering note on #156).
+CLOSE_WARNING = timedelta(minutes=3)  # not flat this long before the close: alert (#135)
+# The reconciler (#155) and the flat-by job (#135): run_day refuses a broker unless both
+# declare RUN_DAY_READY = True (the #199 runner-ordering note on #156).
 SENDING_PREREQUISITES = ("pipeline.reconcile", "pipeline.flatten")
 # Stop starting decisions when fewer tokens than this are left: a decision could not even
 # make one call at the default max_tokens (16,000) doubled for a fallback.
@@ -149,6 +158,8 @@ class Day:
     reconcile_broker: Any | None = None
     reconciled_at: datetime | None = None  # the end of its last completed pass
     reconcile_thread: Any | None = None
+    limits: Any | None = None  # the checked limits (the flat-by guard on sends, #135)
+    closed_out: bool = False  # the reconciler's final pass ran and what is open was checked
 
     @property
     def heartbeat_path(self) -> Path:
@@ -382,6 +393,9 @@ class GuardedBroker:
 
     def verify_paper_account(self) -> dict:
         why = reconcile_problem(self._day)
+        limits = self._day.limits
+        if why is None and limits is not None and flat_by_reached(self._day.clock(), limits):
+            why = "the flat-by time has passed: no new entries (#135)"
         if why is not None:
             self._day.alert(f"send refused: {why}")
             raise BrokerError(f"send refused: {why}")
@@ -399,6 +413,78 @@ def held_from_earlier_days(day: Day, now: datetime) -> list[str]:
     return [cid for cid, o in day.journal.orders().items()
             if o.open and o.sent and o.status != APPROVED
             and o.approved_at.astimezone(NY).date() < today]
+
+
+EARLIER_DAY = ("from an earlier day: not closed automatically (decision 8). Check it in the "
+               "Alpaca paper dashboard, then resolve the block: python -m journal.resolve")
+
+
+def block(day: Day, kind: str, key: str, reason: str, **fields: Any) -> None:
+    """Open a reconcile block (once per key): every new entry stops until Ivan resolves it
+    (risk_check). This is decision 8's kill switch. A block that cannot be written alerts;
+    the day is held either way."""
+    try:
+        day.journal.add_block(kind, key, reason, day.clock(), **fields)
+    except JournalError as exc:
+        day.alert(f"could not journal a block ({kind}: {reason}): {exc}")
+
+
+def block_held(day: Day, held: list[str]) -> None:
+    """Decision 8: block each order from an earlier day that may still hold a position (the
+    same key the reconciler uses for one, so never twice)."""
+    try:
+        orders = day.journal.orders()
+    except JournalError:
+        orders = {}
+    for cid in held:
+        sym = orders[cid].symbol if cid in orders else None
+        block(day, "unprotected", f"earlier-day:{cid}",
+              f"{sym}: an order sent on an earlier day ({cid}) may still hold a position, "
+              + EARLIER_DAY, symbol=sym, client_order_id=cid)
+
+
+def broker_start_check(day: Day, today: date) -> list[str] | None:
+    """#209: before the reconciler starts, what AT THE BROKER no order sent today explains:
+    a position or an open order (from an earlier day, or placed by hand), or an open order
+    that cannot be read. Each is blocked. [] when clean; None when the broker cannot be
+    checked (the caller holds the day: fail closed). Reads only: nothing is closed or
+    cancelled (decision 8). The account flags are the paper-account check's."""
+    broker = day.reconcile_broker or day.broker
+    try:
+        with ACTION_LOCK:
+            broker.verify_paper_account()  # active, not blocked or suspended, no shorting
+            positions = broker.list_positions()
+            listing = broker.list_open_orders_checked()
+        orders = day.journal.orders()
+    except (BrokerError, JournalError) as exc:
+        day.alert(f"the start-of-day broker check failed ({exc}): no decisions today "
+                  "(fail closed)")
+        return None
+    sent_today = {cid: o for cid, o in orders.items()
+                  if o.sent and o.approved_at.astimezone(NY).date() == today}
+    symbols_today = {o.symbol for o in sent_today.values()}
+    found: list[str] = []
+    for pos in positions:
+        if pos["symbol"] not in symbols_today:
+            what = f"a {pos.get('side')} position in {pos['symbol']} ({pos.get('qty')} shares)"
+            found.append(what)
+            block(day, "orphan", f"start-of-day:{pos['symbol']}",
+                  f"{what} at the start of the day, not from an order sent today: "
+                  + EARLIER_DAY, symbol=pos["symbol"])
+    for o in listing["orders"]:
+        if o["symbol"] not in symbols_today and o.get("client_order_id") not in sent_today:
+            what = f"an open {o['type']} {o['side']} order in {o['symbol']} ({o['id']})"
+            found.append(what)
+            block(day, "orphan", f"start-of-day-order:{o['id']}",
+                  f"{what} at the start of the day, not from an order sent today: "
+                  + EARLIER_DAY, symbol=o["symbol"])
+    for u in listing["unreadable"]:
+        what = f"an open order that cannot be read (id {u.get('id')}, symbol {u.get('symbol')})"
+        found.append(what)
+        block(day, "unreadable_order",
+              f"unreadable:{u.get('id') or u.get('symbol') or u.get('why')}",
+              f"{what} at the start of the day: " + EARLIER_DAY, symbol=u.get("symbol"))
+    return found
 
 
 def started_today(journal: Journal, today: date) -> bool:
@@ -442,6 +528,7 @@ def run_day(day: Day, *, limits: Any | None = None) -> int:
     if limits.paper is not True:
         day.write("refused: paper must be true (CLAUDE.md rule 6)")
         return REFUSED
+    day.limits = limits
     now = day.clock()
     today = now.astimezone(NY).date()
     warning = coverage_warning(today)  # #141: on the real path, every run
@@ -503,9 +590,7 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
         day.alert(f"run_day stopped on an unexpected error ({type(exc).__name__})")
         return _end(day, today, f"error: {type(exc).__name__}")
     finally:
-        if day.reconcile_thread is not None:  # never on a held day: it never started
-            day.reconcile_thread.stop()
-            reconcile_pass(day, final=True)  # one last pass at the end of the day
+        close_out(day)  # never on a held day: the thread never started
         pulse.stop()
 
 
@@ -545,11 +630,22 @@ def _the_day(day: Day, limits: Any, now: datetime, today: date, budget: DailyBud
         day.alert(f"journal unreadable at the start of day: {exc}")
         return HELD
     if held:
+        block_held(day, held)
         day.alert("an order from an earlier day may still hold a position: no decisions "
                   "today until Ivan checks it (nothing is closed automatically)", orders=held)
         _end(day, today, "held: position from an earlier day")
         return HELD
-    if day.reconciler is not None:  # not held: watch from now on (#155)
+    if day.reconciler is not None:  # not held: check the broker, then watch (#209, #155)
+        found = broker_start_check(day, today)
+        if found is None:
+            _end(day, today, "held: the start-of-day broker check failed")
+            return HELD
+        if found:
+            day.alert("at the broker, not from an order sent today: " + "; ".join(found)
+                      + ". No decisions today until Ivan checks it (nothing is closed "
+                      "automatically)")
+            _end(day, today, "held: the broker holds something from an earlier day")
+            return HELD
         day.reconcile_thread = _Reconcile(day)
         day.reconcile_thread.start()
     entry_start, entry_end, _flat = day_times(today, limits)
@@ -591,7 +687,70 @@ def _the_day(day: Day, limits: Any, now: datetime, today: date, budget: DailyBud
     return _end(day, today, "entry window closed")
 
 
+def watch_until_flat(day: Day, today: date) -> None:
+    """#248: after the decisions, keep the reconciler running (it flattens at the flat-by,
+    #135) until the account is flat or the market closes, keeping its health rule (a pass
+    older than STALE_S or a dead thread alerts; run_day then makes the pass itself). Not
+    flat CLOSE_WARNING before the close alerts. At the close: close_out. Never raises."""
+    if day.reconcile_thread is None or day.closed_out:
+        return
+    try:
+        hours = session_hours(today)
+    except CalendarError:
+        hours = None
+    close_at = datetime.combine(today, hours[1], tzinfo=NY) if hours else None
+    warned = False
+    day.beat("watching until flat")
+    while True:
+        try:
+            left = still_open(day.reconcile_broker or day.broker)
+            if left == []:
+                day.write("the paper account is flat: no position and no open order")
+                return
+            now = day.clock()
+            if close_at is None or now >= close_at:
+                break
+            if not warned and now >= close_at - CLOSE_WARNING:
+                warned = True
+                day.alert("not flat 3 minutes before the close: " + (
+                    "; ".join(left) if left is not None else "the broker cannot be read"))
+            why = reconcile_problem(day)
+            if why is not None:
+                day.alert(f"after the entry window: {why}; run_day makes the pass itself")
+                reconcile_pass(day)
+            day.sleep(max(1.0, min(float(RECONCILE_POLL_S),
+                                   (close_at - day.clock()).total_seconds())))
+            day.beat()
+        except Exception as exc:  # noqa: BLE001 - the watch never ends the day early
+            day.alert(f"watching until flat: {type(exc).__name__}: {exc}")
+            day.sleep(float(RECONCILE_POLL_S))
+    close_out(day)
+
+
+def close_out(day: Day) -> None:
+    """Stop the reconcile thread, make one last (final) pass, and alert if anything is still
+    open at the broker: run_day exits with it (MANUAL ACTION NEEDED). Once."""
+    if day.reconcile_thread is None or day.closed_out:
+        return
+    day.closed_out = True
+    try:
+        day.reconcile_thread.stop()
+        reconcile_pass(day, final=True)  # one last pass at the end of the day
+        left = still_open(day.reconcile_broker or day.broker)
+    except Exception as exc:  # noqa: BLE001 - the exit check is always made
+        day.alert(f"the last reconcile pass failed ({type(exc).__name__}): {exc}")
+        left = None
+    if left:
+        day.alert("run_day exits with this still open at the broker: " + "; ".join(left)
+                  + ". MANUAL ACTION NEEDED in the Alpaca paper dashboard (tomorrow it is an "
+                  "earlier day's position: held, never closed automatically)", open=left)
+    elif left is None:
+        day.alert("run_day exits and the broker cannot be read: check the Alpaca paper "
+                  "dashboard for open positions and orders")
+
+
 def _end(day: Day, today: date, reason: str) -> int:
+    watch_until_flat(day, today)  # #248: with a broker, never before flat or the close
     counts: dict[str, Any] = {}
     if day.budget is not None:
         try:
@@ -627,8 +786,8 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] = wall_
     p.add_argument("--scheduled", action="store_true",
                    help="make billed calls (only the Windows Task Scheduler task passes it)")
     p.add_argument("--send", action="store_true",
-                   help="send approved orders to the paper broker (refused until #155 and "
-                        "#135 are merged)")
+                   help="send approved orders to the Alpaca PAPER account (refused unless the "
+                        "reconciler and the flat-by job declare RUN_DAY_READY)")
     args = p.parse_args(argv)
     try:
         config = load_run_day_config()
@@ -661,7 +820,7 @@ def _build_live(config: RunDayConfig, *, clock: Callable[[], datetime], send: bo
     from agents.llm import make_client
     client = MeteredClient(make_client(max_retries=0), budget)
     broker = reconcile_broker = None
-    if send:  # unreachable today: main refuses --send until broker_allowed()
+    if send:  # main refuses --send unless broker_allowed()
         from tools.broker import AlpacaPaperBroker
         broker = AlpacaPaperBroker(load_checked_limits())
         reconcile_broker = AlpacaPaperBroker(load_checked_limits())  # its own client

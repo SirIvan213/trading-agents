@@ -308,8 +308,14 @@ def test_blocked_a_cap_reached_inside_the_hook_ends_the_day(tmp_path, monkeypatc
 
 # ======================= starting up =======================
 
+def flatten_not_ready(monkeypatch):
+    """pipeline.flatten as it was before PR 5 (#135): no RUN_DAY_READY."""
+    monkeypatch.setitem(sys.modules, "pipeline.flatten", types.ModuleType("pipeline.flatten"))
+
+
 def test_blocked_a_broker_is_refused_until_the_reconciler_and_flatten_are_merged(tmp_path,
                                                                                monkeypatch):
+    flatten_not_ready(monkeypatch)
     day, clock, dec, out = make_day(tmp_path, monkeypatch, broker=object())
     assert rd.run_day(day, limits=LIMITS) == rd.REFUSED
     assert "no broker until the reconciler and flatten job are merged" in out[-1]
@@ -357,13 +363,13 @@ class QuietBroker:
         return None
 
 
-def test_today_the_flatten_job_is_not_merged():
-    """PR 4 (#155) merged the reconciler; run_day still refuses a broker until PR 5's flatten
-    job (#135) declares RUN_DAY_READY."""
+def test_the_reconciler_and_the_flat_by_job_are_both_ready():
+    """PR 5 (#135): pipeline.flatten declares RUN_DAY_READY, so run_day accepts a broker
+    (the PAPER account) with --send."""
+    import pipeline.flatten as fl
     import pipeline.reconcile as rc
-    assert rc.RUN_DAY_READY is True
-    allowed, why = rd.broker_allowed()
-    assert allowed is False and "pipeline.flatten does not declare RUN_DAY_READY" in why
+    assert rc.RUN_DAY_READY is True and fl.RUN_DAY_READY is True
+    assert rd.broker_allowed() == (True, "")
 
 
 def test_blocked_paper_false_is_refused(tmp_path, monkeypatch):
@@ -467,6 +473,7 @@ def test_blocked_main_refuses_a_missing_config(tmp_path, monkeypatch, capsys):
 
 def test_blocked_main_refuses_send(tmp_path, monkeypatch, capsys):
     import pipeline.budget as pb
+    flatten_not_ready(monkeypatch)
     (tmp_path / "run_day.json").write_text(json.dumps(EXAMPLE), encoding="utf-8")
     monkeypatch.setattr(pb, "CONFIG_PATH", tmp_path / "run_day.json")
     assert rd.main(["--scheduled", "--send"],
