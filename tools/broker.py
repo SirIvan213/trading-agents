@@ -46,8 +46,10 @@ are tests/fixtures/broker/):
     reconciler (PR 4) flattens one that doesn't, at market, and alerts.
   - Errors: {"code": number, "message": string}; POST /v2/orders documents 403 (buying power
     or shares not sufficient) and 422 (input parameters not recognized).
-  - DELETE /v2/positions?cancel_orders=true answers 207 with one {"symbol", "status", "body"}
-    per position; DELETE /v2/positions/{symbol} answers the closing order.
+  - DELETE /v2/positions/{symbol} answers the closing order. There is deliberately no
+    close-everything call (DELETE /v2/positions): nothing here may close or cancel what an
+    earlier day left (decision 8), so every close is one symbol's, decided by the caller
+    (#257 removed close_all, which had no caller).
 
 The entry is a marketable LIMIT order at entry + slippage allowance (#136), so the exchange
 enforces the price that sizing assumed; the bracket legs are the plan's target and stop,
@@ -668,38 +670,6 @@ class AlpacaPaperBroker:
         working = [o for o in closes if o["status"] not in FINAL_STATUSES]
         state = "closed" if position is None else "closing" if working else "open"
         return {"state": state, "position": position, "close_orders": closes}
-
-    def close_all(self) -> list[dict]:
-        """DELETE /v2/positions?cancel_orders=true: cancel every open order, then close every
-        position. One {"symbol", "status", "order"} or {"symbol", "status", "error_code"} per
-        position (Alpaca answers 207, multi-status)."""
-        self._require_verified()
-        reply = self._call("DELETE", "/v2/positions", query={"cancel_orders": "true"},
-                           ok=(200, 207))
-        if reply is None:
-            return []
-        if not isinstance(reply, list):
-            raise BrokerError("broker reply is not a list of results")
-        out = []
-        for item in reply:
-            if not isinstance(item, dict) or not isinstance(item.get("status"), int):
-                raise BrokerError("broker close-all result is malformed")
-            sym = _text(item.get("symbol"), "symbol")
-            if item["status"] == 200:
-                # one unreadable order must not lose the other positions' results: the
-                # positions are already being closed at the broker
-                try:
-                    out.append({"symbol": sym, "status": 200,
-                                "order": parse_order(item.get("body"))})
-                except BrokerError as exc:
-                    out.append({"symbol": sym, "status": 200, "order": None,
-                                "error": str(exc)[:120]})
-            else:
-                body = item.get("body")
-                code = body.get("code") if isinstance(body, dict) else None
-                out.append({"symbol": sym, "status": item["status"],
-                            "error_code": code if isinstance(code, int) else None})
-        return out
 
     # ---- account and clock ----
     def account(self) -> dict:

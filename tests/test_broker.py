@@ -134,10 +134,9 @@ def test_blocked_missing_keys_refuse_without_a_request(monkeypatch, unset):
 @pytest.mark.parametrize("call", [
     lambda b: b.submit_bracket(order_for(), CID), lambda b: b.get_order_by_client_id(CID),
     lambda b: b.list_open_orders(), lambda b: b.cancel_order("ord-1"),
-    lambda b: b.list_positions(), lambda b: b.close_position("TSLA"), lambda b: b.close_all(),
+    lambda b: b.list_positions(), lambda b: b.close_position("TSLA"),
     lambda b: b.account(), lambda b: b.clock(),
-], ids=["submit", "get", "open", "cancel", "positions", "close", "close_all", "account",
-        "clock"])
+], ids=["submit", "get", "open", "cancel", "positions", "close", "account", "clock"])
 def test_blocked_every_call_refuses_before_the_paper_account_is_verified(call):
     b, fake = client(verified=False)
     with pytest.raises(BrokerError, match="verify_paper_account"):
@@ -330,15 +329,6 @@ def test_close_position_deletes_that_symbol():
     assert out["side"] == "sell" and out["type"] == "market"
 
 
-def test_close_all_cancels_orders_and_reports_each_position():
-    b, fake = client({("DELETE", "/v2/positions"): (207, fx("close_all_207.json"))})
-    out = b.close_all()
-    q = urllib.parse.parse_qs(urllib.parse.urlsplit(fake.requests[-1].full_url).query)
-    assert q == {"cancel_orders": ["true"]}
-    assert out[0]["symbol"] == "TSLA" and out[0]["order"]["id"] == "ord-close-1"
-    assert out[1] == {"symbol": "NVDA", "status": 403, "error_code": 40310000}
-
-
 def test_clock():
     b, _ = client({("GET", "/v2/clock"): (200, fx("clock.json"))})
     assert b.clock() == {"timestamp": "2026-11-16T10:30:00-05:00", "is_open": True,
@@ -491,22 +481,6 @@ def test_a_position_with_odd_display_fields_still_lists():
     assert out["qty"] == "8" and out["market_value"] is None and out["unrealized_pl"] is None
 
 
-def test_close_all_keeps_every_result_when_one_order_reply_is_unreadable():
-    results = fx("close_all_207.json")
-    results[0]["body"]["status"] = "teleported"
-    b, _ = client({("DELETE", "/v2/positions"): (207, results)})
-    out = b.close_all()
-    assert out[0]["symbol"] == "TSLA" and out[0]["order"] is None
-    assert "unknown order status" in out[0]["error"]
-    assert out[1] == {"symbol": "NVDA", "status": 403, "error_code": 40310000}
-
-
-@pytest.mark.parametrize("body", [None, []], ids=["empty", "list"])
-def test_close_all_with_nothing_to_close(body):
-    b, _ = client({("DELETE", "/v2/positions"): (207, body)})
-    assert b.close_all() == []
-
-
 def test_a_not_cancelable_order_is_a_broker_error():
     b, _ = client({("DELETE", "/v2/orders/ord-1"): (422, {"code": 42210000})})
     with pytest.raises(BrokerError, match="HTTP 422") as exc:
@@ -530,3 +504,11 @@ def test_errors_carry_no_chained_exception():
     with pytest.raises(BrokerError) as exc:
         b.list_positions()
     assert exc.value.__cause__ is None and exc.value.__suppress_context__ is True
+
+
+def test_there_is_no_close_everything_call():
+    """#257: nothing may close or cancel what an earlier day left (decision 8), so the client
+    has no DELETE /v2/positions (close_all had no caller and was removed)."""
+    assert not hasattr(AlpacaPaperBroker, "close_all")
+    src = Path(broker_mod.__file__).read_text(encoding="utf-8")
+    assert '"/v2/positions", query' not in src and "cancel_orders" not in src
