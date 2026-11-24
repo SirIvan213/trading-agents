@@ -75,16 +75,23 @@ import http.client
 import json
 import os
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
 
 from tools.http import _default_open, _origin
 from tools.symbols import normalize_symbol
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+# One in-process lock around every broker ACTION (a POST, a DELETE: send, cancel, close), so
+# the reconciler and a decision never act at once (Ivan's decision on #155). Re-entrant: the
+# reconciler and flatten hold it across a whole cancel-confirm-close sequence, and each
+# action inside takes it again. Reads (GET) do not take it.
+ACTION_LOCK = threading.RLock()
 MAX_BODY_BYTES = 2_000_000
 CENT = Decimal("0.01")
 MIN_PRICE = Decimal("1.00")  # sub-dollar prices take 4 decimals; not traded here
@@ -436,8 +443,9 @@ class AlpacaPaperBroker:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         where = f"{method} {path}"
+        guard = ACTION_LOCK if method != "GET" else nullcontext()
         try:
-            with self._open(req, timeout=self._timeout) as resp:
+            with guard, self._open(req, timeout=self._timeout) as resp:
                 final = resp.geturl() if hasattr(resp, "geturl") else None
                 if isinstance(final, str) and _origin(final) != _origin(url):
                     raise BrokerError(f"{where}: response came from a different origin")

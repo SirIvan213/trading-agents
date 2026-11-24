@@ -243,8 +243,8 @@ def render_ticket(p: Proposal, *, sends: bool = False) -> str:
         head,
         f"  Buy {qty} shares of {o['symbol']} with a LIMIT order at {limit_price(p)} "
         f"(planned entry {o['entry']} + slippage allowance {o.get('slippage', 'n/a')}), "
-        "as a bracket order, time in force day: it fills at that price or lower. Nothing "
-        "cancels an unfilled entry yet: it stays working until the close.",
+        "as a bracket order, time in force day: it fills at that price or lower. If it is "
+        "still unfilled 60 s after it is sent, the reconciler cancels it.",
         f"  Stop-loss: sell all {qty} if the price falls to {o['stop_loss']}.",
         f"  Take-profit: sell all {qty} if the price reaches {o['take_profit']}.",
         f"  Planned risk per share {sized['risk_per_share']} "

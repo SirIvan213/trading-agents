@@ -34,6 +34,13 @@ A heartbeat file (journal/state/run_day.heartbeat.json) is rewritten at every st
 background thread, at least every HEARTBEAT_S seconds of real time, during decisions too: a
 heartbeat older than that means run_day stopped. Alerts are a console line and a journal
 entry (desktop notifications are a follow-up).
+
+With a broker (once #155 and #135 are merged), the reconciler (pipeline/reconcile.py) runs in
+a thread every reconcile.POLL_S seconds and once before each decision, and writes its
+last-pass time to the heartbeat ("reconciled_at"). If that is more than reconcile.STALE_S
+old, or the thread died, run_day starts no decision and refuses every send (the broker's
+paper-account check fails first), and alerts. One in-process lock (tools.broker.ACTION_LOCK)
+wraps every broker action, so the reconciler and a decision never act at once.
 """
 from __future__ import annotations
 
@@ -67,8 +74,12 @@ from pipeline.events import listing_input, reporting_check
 from pipeline.filelock import LockTimeout, exclusive_file_lock
 from pipeline.market import NY, run_scan
 from pipeline.order_flow import wall_clock
+from pipeline.reconcile import POLL_S as RECONCILE_POLL_S
+from pipeline.reconcile import STALE_S as RECONCILE_STALE_S
+from pipeline.reconcile import Reconciler
 from pipeline.terminal import WatchedTerminal
 from tools.atomic_write import atomic_write_text
+from tools.broker import ACTION_LOCK, BrokerError
 from tools.market_calendar import (
     CalendarError,
     closed_reason,
@@ -132,6 +143,12 @@ class Day:
     listings: dict[str, dict] = field(default_factory=dict)
     reporting: dict[str, dict] = field(default_factory=dict)
     skipped: set[str] = field(default_factory=set)  # SymbolSkipped today (#170): not retried
+    reconciler: Any | None = None  # with a broker: pipeline.reconcile.Reconciler (#155)
+    # the reconciler's own client (verified every pass), so a decision's verify never blinds
+    # it; None: it shares `broker` (tests)
+    reconcile_broker: Any | None = None
+    reconciled_at: datetime | None = None  # the end of its last completed pass
+    reconcile_thread: Any | None = None
 
     @property
     def heartbeat_path(self) -> Path:
@@ -169,6 +186,9 @@ class Day:
                           else f"unreadable ({type(exc).__name__})"}
         body = {"pid": os.getpid(), "at": self.clock().astimezone(NY).isoformat(),
                 "phase": self.phase, **counts}
+        if getattr(self, "reconciler", None) is not None:  # with a broker (#155)
+            last = getattr(self, "reconciled_at", None)
+            body["reconciled_at"] = last.astimezone(NY).isoformat() if last else None
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             atomic_write_text(self.heartbeat_path, json.dumps(body, sort_keys=True))  # #213
@@ -265,7 +285,8 @@ def decide_one(day: Day, symbol: str, limits: Any) -> str | None:
     day.write(f"\n=== decision: {symbol} at {start.astimezone(NY):%H:%M:%S} ET ===")
     try:
         result = run_decision(symbol, data=day.data, clients=day.clients, journal=day.journal,
-                              clock=day.clock, ask=ask, broker=day.broker,
+                              clock=day.clock, ask=ask,
+                              broker=GuardedBroker(day) if day.broker is not None else None,
                               before_analysts=count_it)
     except SymbolSkipped as exc:  # #170: not a decision, nothing counted, not retried today
         day.skipped.add(symbol)
@@ -291,6 +312,83 @@ def decide_one(day: Day, symbol: str, limits: Any) -> str | None:
         day.write(f"{symbol}: {outcome.status}" + (f" ({outcome.reason})"
                                                    if outcome.reason else ""))
     return None
+
+
+# ------------------------------------------------------------------------------------------
+# The reconciler (#155): a thread, its health, and the guard on sends
+# ------------------------------------------------------------------------------------------
+
+def reconcile_pass(day: Day, *, final: bool = False) -> bool:
+    """One reconcile pass under the broker's action lock; records its end time. False when it
+    failed (the reconciler's own alerts say why; an unexpected error is alerted here)."""
+    if day.reconciler is None:
+        return True
+    try:
+        with ACTION_LOCK:
+            report = day.reconciler.pass_once(final=final)
+    except Exception as exc:  # noqa: BLE001 - never kill the thread; staleness tells run_day
+        day.alert(f"the reconcile pass failed ({type(exc).__name__}): {exc}")
+        return False
+    if not report.get("complete"):
+        return False  # it could not see everything (it alerted): not a pass for health
+    day.reconciled_at = day.clock()
+    day.beat()
+    return True
+
+
+def reconcile_problem(day: Day) -> str | None:
+    """Why new entries must stop because the reconciler is not watching, or None. No broker:
+    nothing to watch."""
+    if day.reconciler is None:
+        return None
+    thread = day.reconcile_thread
+    if thread is not None and not thread.is_alive():
+        return "the reconciler thread has stopped"
+    last = day.reconciled_at
+    if last is None:
+        return "the reconciler has not completed a pass yet"
+    age = (day.clock() - last).total_seconds()
+    if age > RECONCILE_STALE_S:
+        return f"the reconciler's last pass was {int(age)} s ago (more than {RECONCILE_STALE_S})"
+    return None
+
+
+class _Reconcile(threading.Thread):
+    """Runs a reconcile pass every `period` (reconcile.POLL_S) seconds."""
+
+    def __init__(self, day: Day, period: float = RECONCILE_POLL_S) -> None:
+        super().__init__(daemon=True, name="run-day-reconcile")
+        self.day, self.period = day, period
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop_event.is_set():
+            reconcile_pass(self.day)
+            if self._stop_event.wait(self.period):
+                return
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self.join(timeout=30)
+
+
+class GuardedBroker:
+    """The broker a decision sends through: its paper-account check (which pipeline/send.py
+    makes before any POST) refuses while the reconciler is not watching, so nothing is sent
+    then (the order is journaled not sent). Everything else passes through."""
+
+    def __init__(self, day: Day) -> None:
+        self._day = day
+
+    def verify_paper_account(self) -> dict:
+        why = reconcile_problem(self._day)
+        if why is not None:
+            self._day.alert(f"send refused: {why}")
+            raise BrokerError(f"send refused: {why}")
+        return self._day.broker.verify_paper_account()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._day.broker, name)
 
 
 def held_from_earlier_days(day: Day, now: datetime) -> list[str]:
@@ -391,6 +489,12 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
         return REFUSED
     pulse = _Pulse(day)
     pulse.start()
+    if day.broker is not None:  # the thread starts after the held check (_the_day)
+        # its alerts through run_day's console, with the bell (the reconciler journals
+        # them itself as reconcile_alert)
+        day.reconciler = Reconciler(day.journal, day.reconcile_broker or day.broker,
+                                    clock=day.clock, limits=limits,
+                                    alert=lambda m: day.write(f"\aALERT: {m}"))
     try:
         return _the_day(day, limits, now, today, budget)
     except CapReached as exc:  # S9: a budget doubt anywhere ends the day cleanly
@@ -399,6 +503,9 @@ def _locked_day(day: Day, limits: Any, now: datetime, today: date) -> int:
         day.alert(f"run_day stopped on an unexpected error ({type(exc).__name__})")
         return _end(day, today, f"error: {type(exc).__name__}")
     finally:
+        if day.reconcile_thread is not None:  # never on a held day: it never started
+            day.reconcile_thread.stop()
+            reconcile_pass(day, final=True)  # one last pass at the end of the day
         pulse.stop()
 
 
@@ -442,6 +549,9 @@ def _the_day(day: Day, limits: Any, now: datetime, today: date, budget: DailyBud
                   "today until Ivan checks it (nothing is closed automatically)", orders=held)
         _end(day, today, "held: position from an earlier day")
         return HELD
+    if day.reconciler is not None:  # not held: watch from now on (#155)
+        day.reconcile_thread = _Reconcile(day)
+        day.reconcile_thread.start()
     entry_start, entry_end, _flat = day_times(today, limits)
     at = lambda t: datetime.combine(today, t, tzinfo=NY)  # noqa: E731
     scan_at, end_at = at(day.config.scan_time), at(entry_end)
@@ -467,6 +577,12 @@ def _the_day(day: Day, limits: Any, now: datetime, today: date, budget: DailyBud
         for sym in picked:
             if day.clock() >= end_at:
                 break
+            if day.reconciler is not None:  # a pass before each decision, then its health
+                reconcile_pass(day)
+                why = reconcile_problem(day)
+                if why is not None:
+                    day.alert(f"no new decision: {why}")
+                    break  # the next cycle tries again; the thread keeps watching
             stop = _stop_reason(budget) or decide_one(day, sym, limits)
             if stop:
                 return _end(day, today, stop)
@@ -544,14 +660,16 @@ def _build_live(config: RunDayConfig, *, clock: Callable[[], datetime], send: bo
     budget = DailyBudget(config.caps, today, STATE_DIR)
     from agents.llm import make_client
     client = MeteredClient(make_client(max_retries=0), budget)
-    broker = None
+    broker = reconcile_broker = None
     if send:  # unreachable today: main refuses --send until broker_allowed()
         from tools.broker import AlpacaPaperBroker
         broker = AlpacaPaperBroker(load_checked_limits())
+        reconcile_broker = AlpacaPaperBroker(load_checked_limits())  # its own client
     # ONE budget (S5): the metered client, the metered data and the day's loop share it
     return Day(config=config, data=metered_live_data(budget), clients=client,
                journal=Journal(), clock=clock, sleep=time.sleep, terminal=WatchedTerminal(),
-               state_dir=STATE_DIR, broker=broker, budget=budget)
+               state_dir=STATE_DIR, broker=broker, budget=budget,
+               reconcile_broker=reconcile_broker)
 
 
 if __name__ == "__main__":

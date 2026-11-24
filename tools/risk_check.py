@@ -33,6 +33,9 @@ class DayState:
     open_positions: int = 0  # orders that may hold a position now (any day)
     realized_loss_today: Decimal = Decimal("0")  # today's closed trades' losses, positive
     stopped_out_symbols: frozenset[str] = frozenset()  # symbols stopped out today
+    # Phase 5 PR 4 (#155, #189): the reconciler's unresolved blocks ("<id> <kind>: <reason>").
+    # Any one stops every new entry until a human resolves it (python -m journal.resolve).
+    reconcile_blocks: tuple[str, ...] = ()
 
 
 def _state_problem(state: object) -> str | None:
@@ -55,6 +58,9 @@ def _state_problem(state: object) -> str | None:
     stopped = state.stopped_out_symbols
     if not isinstance(stopped, frozenset) or not all(isinstance(s, str) for s in stopped):
         return "day state stopped_out_symbols must be a frozenset of symbols"
+    blocks = state.reconcile_blocks
+    if not isinstance(blocks, tuple) or not all(isinstance(b, str) for b in blocks):
+        return "day state reconcile_blocks must be a tuple of texts"
     return None
 
 
@@ -246,6 +252,14 @@ def check_order(
             f"the daily limit {limits.daily_loss_limit}; no new entries")
     if symbol and symbol in state.stopped_out_symbols:
         reasons.append(f"{symbol} was stopped out today: no re-entry")
+    # Phase 5 PR 4 (#155, #189): the reconciler found something it cannot square (a broker
+    # event the journal refuses, an order it cannot read, an orphan, an unprotected position,
+    # a fill above the limit price). No new entry until a human resolves every one.
+    if state.reconcile_blocks:
+        n = len(state.reconcile_blocks)
+        reasons.append(f"the reconciler blocked new entries ({n} unresolved: "
+                       f"{state.reconcile_blocks[0][:160]}); resolve with "
+                       "`python -m journal.resolve`")
 
     # NYSE calendar (#11): holidays, early closes (13:00, entry window ending before the
     # 12:55 flat-by) and an uncovered year all BLOCK.

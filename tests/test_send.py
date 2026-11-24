@@ -8,6 +8,7 @@ import threading
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal as D
+from pathlib import Path
 
 import pytest
 
@@ -533,8 +534,9 @@ def test_the_ticket_shows_the_limit_price_and_says_it_is_sent(ledger, journal):
     assert ("Buy 8 shares of TSLA with a LIMIT order at 364.55 (planned entry 364.18 + "
             "slippage allowance 0.37)") in sent
     assert "fills at that price or lower" in sent
-    # honest until the reconciler's 60 s cancel exists (PR 4)
-    assert "Nothing cancels an unfilled entry yet: it stays working until the close." in sent
+    # the reconciler's 60 s cancel (#136, PR 4)
+    assert ("If it is still unfilled 60 s after it is sent, the reconciler cancels it."
+            in sent)
     assert "at market" not in sent and "NOT sent" not in sent
     kept = render_ticket(p)
     assert "NOT sent to a broker" in kept and "LIMIT order at 364.55" in kept
@@ -899,3 +901,43 @@ def test_matches_needs_both_legs_at_the_plans_prices(ledger, journal, how):
     body = bracket_request(out.recheck.order, cid_of(out))
     assert _matches(broker_reply(body), body)
     assert not _matches(_with_bad_legs(body, how), body)
+
+
+# ======================= #155 plan item 4: a 422 is confirmed by lookup =======================
+
+def test_a_recorded_422_whose_lookup_finds_the_order_with_its_legs_is_submitted(
+        journal, monkeypatch):
+    """422 code 40010001 is a general validation code (#196 finding 3), never "duplicate"
+    by itself: the lookup decides. Found with its legs -> submitted."""
+    import io
+    import urllib.error
+    recorded = json.loads((Path(__file__).parent / "fixtures" / "broker" / "resend_422.json")
+                          .read_text(encoding="utf-8"))
+    out = approved_qty(journal, monkeypatch, 10)
+    body = bracket_request(out.recheck.order, cid_of(out))
+
+    def refuse(_body):
+        raise urllib.error.HTTPError("https://paper-api.alpaca.markets/v2/orders",
+                                     recorded["status"], "x", {},
+                                     io.BytesIO(json.dumps(recorded["body"]).encode()))
+
+    broker, calls = real_broker(monkeypatch, post=refuse, lookup=lambda: alpaca_reply(body))
+    r = send(out, journal, broker)
+    assert r.status == "submitted" and "broker holds the order" in r.reason
+    assert calls == ["POST", "LOOKUP"]
+
+
+def test_a_recorded_422_whose_lookup_finds_nothing_is_rejected(journal, monkeypatch):
+    import io
+    import urllib.error
+    recorded = json.loads((Path(__file__).parent / "fixtures" / "broker" / "resend_422.json")
+                          .read_text(encoding="utf-8"))
+    out = approved_qty(journal, monkeypatch, 10)
+
+    def refuse(_body):
+        raise urllib.error.HTTPError("https://paper-api.alpaca.markets/v2/orders", 422, "x",
+                                     {}, io.BytesIO(json.dumps(recorded["body"]).encode()))
+
+    broker, calls = real_broker(monkeypatch, post=refuse)
+    r = send(out, journal, broker)
+    assert r.status == "rejected" and r.details["error_code"] == 40010001
