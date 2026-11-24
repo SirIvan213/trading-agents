@@ -25,7 +25,8 @@ time on the same dates, so 6:30 AM Pacific is always 9:30 AM New York.
 ## Keep the PC awake
 
 The PC must not sleep while the task runs (6:30 AM to 1:30 PM Pacific on weekdays). A sleeping
-PC stops the decision loop and leaves tickets unanswered.
+PC stops the decision loop, leaves tickets unanswered, and stops the flat-by: positions would
+stay open with no one watching them.
 
 - **Settings, System, Power**: set "When plugged in, put my device to sleep after" to
   **Never** (at least on trading days).
@@ -50,16 +51,21 @@ Open **Task Scheduler**, then **Create Task...** (not "Create Basic Task").
 
 `run_day` itself waits for the 9:40 AM New York scan (6:40 AM Pacific), makes no decisions
 after the day's entry end (12:30 PM New York, 9:30 AM Pacific, on an early close), and exits on
-a weekend or market holiday, so the weekday trigger does not need a holiday list.
+a weekend or market holiday, so the weekday trigger does not need a holiday list. With
+`--send`, it keeps running after the entry window until the paper account is flat or the
+market closes (4:00 PM New York, 1:00 PM Pacific; 1:00 PM New York on an early close), so the
+7 hours always cover it.
 
 **Actions**: New...
 - Action: **Start a program**.
 - Program/script: `C:\Users\ivanp\trading-agents\.venv\Scripts\python.exe`
-- Add arguments: `-m pipeline.run_day --scheduled`
+- Add arguments: `-m pipeline.run_day --scheduled --send`
 - Start in: `C:\Users\ivanp\trading-agents`
 
-Only the task passes `--scheduled`. Never add `--send`: it is refused until the reconciler
-(#155) and the flatten job (#135) are merged.
+Only the task passes `--scheduled`. `--send` lets approved orders reach the Alpaca **paper**
+account. It is accepted only while the reconciler (#155) and the flat-by job (#135) are both
+in the code (`RUN_DAY_READY`). Without `--send`, run_day decides and journals each approval
+as "approved, not sent".
 
 **Conditions**
 - Uncheck **Start the task only if the computer is on AC power** (or keep the PC plugged in).
@@ -97,8 +103,8 @@ is running: its orders would be flattened as orphans.
 
 ## The reconciler and its blocks
 
-Once sending is enabled (#155, #135), the reconciler (`pipeline/reconcile.py`) runs inside
-run_day every 15 seconds and before each decision. It records fills and closes, cancels an
+With `--send`, the reconciler (`pipeline/reconcile.py`) runs inside run_day every 15 seconds
+and before each decision. It records fills and closes, cancels an
 entry still unfilled after 60 seconds, and makes sure every position has a working stop for
 all of its shares. A position without one is flattened at market and alerted. Its last pass
 time is in the heartbeat (`reconciled_at`). If that is more than 45 seconds old, or the
@@ -137,6 +143,86 @@ that is already working, so the reconciler skips closing that symbol and alerts 
 If that lasts 60 seconds, or reaches the flat-by time, the alert says **MANUAL ACTION NEEDED**:
 in the Alpaca paper dashboard, cancel that symbol's orders and close the position.
 
+## The flat-by and the end of the day
+
+Nothing is held overnight. Each day has a **flat-by** time from the NYSE calendar:
+
+- **3:55 PM New York** (12:55 PM Pacific) on a normal day;
+- **12:55 PM New York** (9:55 AM Pacific) on an early close (13:00), for example the day after
+  Thanksgiving or Christmas Eve.
+
+From the flat-by on, no order is sent. Every reconcile pass, every 15 seconds:
+
+1. cancels each of today's entries that is still working, and confirms it is gone;
+2. for each of today's positions: cancels its stop and take-profit, confirms they are gone,
+   closes the position at market, and checks the close again after any unclear reply (it
+   never sends a second close blindly).
+
+A symbol that is not flat yet alerts on every pass. After 60 seconds the alert says
+**MANUAL ACTION NEEDED** in the Alpaca paper dashboard. If the account is still not flat
+3 minutes before the close, run_day alerts again.
+
+After the entry window, run_day keeps the reconciler running until the account is flat (no
+position, no open order) or the market closes, then makes one last pass and exits. If it exits
+with anything still open, it alerts: close it in the dashboard. Tomorrow it would be an
+earlier day's position (below).
+
+**A position from an earlier day is never closed automatically** (decision 8). At the start of
+the day, run_day checks the journal and the broker. If it finds an order sent on an earlier
+day that may still hold shares, or a position or open order at the broker that no order sent
+today explains, it:
+
+- writes a block, which works as a kill switch: no new entry until you resolve it;
+- alerts;
+- exits with code 5 (held), with no decisions that day.
+
+The same happens if the broker cannot be checked. Check the dashboard, close or cancel what is
+there by hand, then resolve the block with `journal.resolve`.
+
+### Look, or flatten by hand
+
+Neither command uses a billed API. The Alpaca paper API is free.
+
+```
+.venv\Scripts\python.exe -m pipeline.flatten --check
+.venv\Scripts\python.exe -m pipeline.flatten --now
+```
+
+- `--check` is read only: it prints today's flat-by time and what `--now` would cancel and
+  close. It works while run_day runs.
+- `--now` flattens today's positions immediately, repeating every 15 seconds until they are
+  flat or the market closes. It never touches an earlier day's position. It refuses while
+  run_day is running and watching (exit 4): run_day flattens at the flat-by itself, so stop
+  run_day first if you want out earlier. If run_day is hung (no reconcile pass in the last
+  45 seconds), `--now` acts anyway. It refuses with the market closed (exit 5), because a
+  market close would wait for the next open.
+
+| `--now` exit code | Meaning |
+|---|---|
+| 0 | Flat: no position and no open order. |
+| 1 | Not flat: something is left (an earlier day's position, or the market closed first). Check the dashboard. |
+| 2 | Refused: config, `paper`, keys, or the paper account check. |
+| 4 | Refused: run_day is running and watching. |
+| 5 | Refused: the market is closed. |
+
+### Optional backstop task
+
+If run_day dies in the afternoon, nothing flattens at the flat-by. You can create a second
+task yourself that runs `--now` two minutes after the flat-by. A Claude Code session never
+creates or changes it.
+
+- **Create Task...**, name `trading-agents flatten backstop`, **Run only when user is logged
+  on**.
+- **Triggers**: Weekly, Monday to Friday, at **12:57:00 PM** Pacific (3:57 PM New York). For
+  each early close, add a **One time** trigger at **9:57:00 AM** Pacific (12:57 PM New York):
+  2026-11-27, 2026-12-24, 2027-11-26, 2028-07-03, 2028-11-24 (`tools/market_calendar.py`,
+  `EARLY_CLOSES`). Check **Stop task if it runs longer than 10 minutes**.
+- **Actions**: Program `C:\Users\ivanp\trading-agents\.venv\Scripts\python.exe`, arguments
+  `-m pipeline.flatten --now`, start in `C:\Users\ivanp\trading-agents`.
+
+On a normal day its "Last Run Result" is 0x4 (run_day was watching) or 0x0 (already flat).
+0x1 means look at the dashboard. On a holiday it is 0x5.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -145,6 +231,69 @@ in the Alpaca paper dashboard, cancel that symbol's orders and close the positio
 | 2 | Refused to start: config, a cap, limits, `paper`, or `--send`. |
 | 3 | Dry run (no `--scheduled`): nothing was called. |
 | 4 | Another run_day is already running. |
-| 5 | Held: an order from an earlier day may still hold a position. Nothing was closed. |
+| 5 | Held: an order from an earlier day may still hold a position, the broker holds a position or order no order sent today explains, or the broker could not be checked. A block was written. Nothing was closed. |
 
 Task Scheduler shows the last exit code as "Last Run Result" (0x0, 0x2 ...).
+
+## First paper day checklist
+
+**The day before**
+
+1. `config\limits.json`: `"paper": true` and `"trading_enabled": true`. run_day refuses
+   without `paper: true`.
+2. `config\run_day.json`: `universe` is your list (check it with
+   `python -m pipeline.universe_check`), and the caps are unchanged.
+3. `.env` has the Alpaca **paper** keys, plus Anthropic, FMP, Alpha Vantage and the SEC user
+   agent.
+4. The Task Scheduler task (above):
+   - **Run only when user is logged on**, so you see the console;
+   - arguments `-m pipeline.run_day --scheduled --send`;
+   - weekdays at 6:30 AM Pacific;
+   - wake the computer to run it;
+   - do not start a new instance.
+
+   Optionally, add the backstop task.
+5. The PC is plugged in, set never to sleep, and you are signed in.
+6. In the Alpaca paper dashboard, there is no position and no open order. The account belongs
+   to this project alone.
+
+**Before the open** (in a terminal in the repo folder)
+
+```
+.venv\Scripts\python.exe -m journal.resolve              # no open blocks
+.venv\Scripts\python.exe -m pipeline.reconcile --check   # sees the account, would do nothing
+.venv\Scripts\python.exe -m pipeline.flatten --check     # today's flat-by; --now would do nothing
+.venv\Scripts\python.exe -m pipeline.run_day             # dry run: the day's plan, calls nothing
+```
+
+Start the UI and keep **http://127.0.0.1:8765/#/live** open:
+`.venv\Scripts\python.exe -m ui.api` (it only reads, and calls nothing; see `ui/README.md`).
+
+**During the day**
+
+- **Approve** in the run_day console window only. When a ticket appears (with a bell), read
+  it and type `yes` and Enter before the deadline it shows. Anything else, or no answer, is
+  declined.
+- **An ALERT line** in the console (also a `run_day_alert` or `reconcile_alert` in the
+  journal, and on the Live page) needs a look.
+- **A block** stops every new entry. Run `python -m journal.resolve` to see it, then check
+  the Alpaca paper dashboard and fix the cause (cancel the stray order, close the position).
+  Then resolve it with a note:
+  `python -m journal.resolve rb-1a2b3c4d --note "what you checked and did"`.
+  See "The reconciler and its blocks" above.
+- **MANUAL ACTION NEEDED**: in the Alpaca paper dashboard, cancel that symbol's orders and
+  close its position.
+- **At the flat-by** (12:55 PM Pacific, 9:55 AM on an early close), run_day flattens today's
+  positions and exits once the account is flat. Check the dashboard after it exits: no
+  position, no open order.
+
+**Stop everything (the kill switch)**
+
+1. **Stop new orders:** set `"trading_enabled": false` in `config\limits.json`. risk_check
+   then refuses every order, from the next decision on and at the send.
+2. **Close what is open:** `python -m pipeline.flatten --now` (stop run_day first, or it
+   refuses while run_day is watching), or close it in the Alpaca paper dashboard.
+3. **Stop run_day** only after that: press Ctrl+C in its window, or End the task in Task
+   Scheduler. A stopped run_day flattens nothing at the flat-by. Nothing is held overnight on
+   purpose, so make sure the account is flat.
+4. Before the next day, set `"trading_enabled": true` again and resolve any open block.

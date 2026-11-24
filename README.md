@@ -167,11 +167,20 @@ Without `--scheduled` it prints the day's plan and calls nothing.
   They are kept in `journal/state/` and shared across processes. A cap that is missing,
   invalid or above CLAUDE.md's value refuses to start. A lost or unreadable budget file
   closes the day.
-- **No orders are sent yet.** A broker is refused until the reconciler (#155) and the
-  flatten job (#135) are merged.
-- **Housekeeping:** a single-instance lock, a heartbeat file, the calendar coverage warning
-  at every start, and a hold on the day if an order from an earlier day may still hold a
-  position.
+- **Paper orders with `--send`.** Approved orders go to the Alpaca **paper** account only
+  with `--send`. That flag is accepted while the reconciler (#155) and the flat-by job
+  (#135) both declare `RUN_DAY_READY`.
+- **Flat by the end of the day** (#135, #248): at the flat-by (15:55 ET, or 12:55 ET on an
+  early close), the reconciler cancels today's working entries and flattens today's
+  positions. run_day keeps it running until the account is flat or the market closes.
+  `python -m pipeline.flatten --check | --now` lets you look, or flatten by hand.
+- **Housekeeping:** a single-instance lock, a heartbeat file, and the calendar coverage
+  warning at every start.
+- **Start-of-day hold** (#209): the day is held, with a block and an alert, if:
+  - an order from an earlier day may still hold a position;
+  - the broker holds a position or order that no order sent today explains.
+
+  Nothing from an earlier day is closed automatically.
 
 ## Paper broker
 
