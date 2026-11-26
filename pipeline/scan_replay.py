@@ -4,6 +4,17 @@ did it come?
     python -m pipeline.scan_replay --date 2026-11-25
     python -m pipeline.scan_replay --date 2026-11-25 --times 09:40 11:00 --symbols AMD TSLA
     python -m pipeline.scan_replay --date 2026-11-25 --json
+    python -m pipeline.scan_replay --date 2026-11-25 --compare-sip
+
+--compare-sip also rebuilds every snapshot from SIP (consolidated tape) history and runs it
+through the same scan, so each time shows IEX and SIP side by side: previous close, open, gap,
+volume so far, spread (IEX quote vs the SIP quote at that time) and the verdict. The summary
+adds, per time, how many symbols pass each criterion on IEX and on SIP and how many
+candidates each would give; the median and max IEX/SIP spread ratio; and every symbol whose
+two gaps differ by more than 0.5 points. Free: SIP history older than 15 minutes is in the
+free plan, so every SIP request ends at least SIP_DELAY (16 min) before now, and a time less
+than that ago is refused. It is a comparison only: the live scan still reads IEX (real-time
+SIP is a paid plan).
 
 Only Ivan runs it. READ-ONLY and FREE data only (CLAUDE.md rule 6): Alpaca market data on the
 IEX feed, the feed the live scan reads (daily bars, minute bars, historical trades and quotes),
@@ -87,6 +98,14 @@ OK, REFUSED, INCOMPLETE = 0, 2, 4
 # The live scan's feed: tools.scan.fetch_snapshots' default, which pipeline.data.LiveData uses
 # (a test keeps the two equal).
 FEED = "iex"
+SIP = "sip"
+FEEDS = (FEED, SIP)
+# The free plan serves SIP history only when it is older than 15 minutes (as in
+# pipeline.universe_check): every SIP request ends at least this long before now.
+SIP_DELAY = timedelta(minutes=16)
+# The criteria a feed can change (listing and blocked symbols are the same on both).
+MARKET_CRITERIA = ("gap", "volume", "spread", "trade_age", "quote_age", "price", "daily_bar")
+GAP_DIFF_POINTS = Decimal("0.5")  # --compare-sip lists symbols whose two gaps differ by more
 DEFAULT_TIMES = ("09:40", "10:30", "12:00", "14:00", "15:20")
 LOOKBACK = timedelta(hours=1)  # how far back the last trade / quote is looked for
 DAILY_LOOKBACK = timedelta(days=14)  # calendar days: finds the previous session's bar
@@ -146,42 +165,61 @@ def _utc(dt: datetime) -> str:
     return dt.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class LiveReplayData:
-    """Alpaca market data (IEX feed) and the asset endpoint, paced and with one retry after an
-    HTTP 429. Keys from ALPACA_API_KEY / ALPACA_SECRET_KEY, never printed."""
+class _Pacer:
+    """At most one request per min_interval_s, shared by every feed of one replay, with one
+    retry after an HTTP 429."""
 
-    def __init__(self, opener: Callable | None = None, sleep: Callable[[float], None] = _time.sleep,
-                 clock: Callable[[], float] = _time.monotonic,
-                 min_interval_s: float = MIN_INTERVAL_S) -> None:
-        self._opener = opener
-        self._sleep = sleep
-        self._clock = clock
-        self._min_interval = min_interval_s
-        self._last: float | None = None
+    def __init__(self, sleep: Callable[[float], None], clock: Callable[[], float],
+                 min_interval_s: float) -> None:
+        self.sleep, self.clock, self.min_interval = sleep, clock, min_interval_s
+        self.last: float | None = None
 
-    def _call(self, fn: Callable[[], Any]) -> Any:
+    def call(self, fn: Callable[[], Any]) -> Any:
         for attempt in (1, 2):
-            if self._last is not None:
-                wait = self._min_interval - (self._clock() - self._last)
+            if self.last is not None:
+                wait = self.min_interval - (self.clock() - self.last)
                 if wait > 0:
-                    self._sleep(wait)
-            self._last = self._clock()
+                    self.sleep(wait)
+            self.last = self.clock()
             try:
                 return fn()
             except RuntimeError as exc:
                 if attempt == 1 and str(exc).startswith("HTTP 429"):
-                    self._sleep(RETRY_WAIT_S)
+                    self.sleep(RETRY_WAIT_S)
                     continue
                 raise
         raise AssertionError("unreachable")  # pragma: no cover
 
+
+class LiveReplayData:
+    """Alpaca market data on one feed (IEX by default) and the asset endpoint, paced and with
+    one retry after an HTTP 429. Keys from ALPACA_API_KEY / ALPACA_SECRET_KEY, never printed.
+    with_feed("sip") gives the same source on SIP, sharing this one's pacing."""
+
+    def __init__(self, opener: Callable | None = None, sleep: Callable[[float], None] = _time.sleep,
+                 clock: Callable[[], float] = _time.monotonic,
+                 min_interval_s: float = MIN_INTERVAL_S, feed: str = FEED) -> None:
+        if feed not in FEEDS:
+            raise ValueError(f"feed must be one of {', '.join(FEEDS)}")
+        self._opener = opener
+        self._pacer = _Pacer(sleep, clock, min_interval_s)
+        self.feed = feed
+
+    def with_feed(self, feed: str) -> LiveReplayData:
+        twin = LiveReplayData(opener=self._opener, feed=feed)
+        twin._pacer = self._pacer  # one budget of requests per minute for both feeds
+        return twin
+
+    def _call(self, fn: Callable[[], Any]) -> Any:
+        return self._pacer.call(fn)
+
     def daily_bars(self, symbol: str, start: datetime, end: datetime) -> dict:
-        return self._call(lambda: fetch_bars(symbol, start, end, timeframe="1Day", feed=FEED,
-                                             opener=self._opener))
+        return self._call(lambda: fetch_bars(symbol, start, end, timeframe="1Day",
+                                             feed=self.feed, opener=self._opener))
 
     def minute_bars(self, symbol: str, start: datetime, end: datetime) -> dict:
-        return self._call(lambda: fetch_bars(symbol, start, end, timeframe="1Min", feed=FEED,
-                                             opener=self._opener))
+        return self._call(lambda: fetch_bars(symbol, start, end, timeframe="1Min",
+                                             feed=self.feed, opener=self._opener))
 
     def _latest(self, kind: str, symbol: str, at: datetime) -> dict | None:
         key = (os.environ.get("ALPACA_API_KEY") or "").strip()
@@ -190,7 +228,7 @@ class LiveReplayData:
             raise RuntimeError("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in the "
                                "environment")
         params = {"start": _utc(at - LOOKBACK), "end": _utc(at), "limit": "2",
-                  "sort": "desc", "feed": FEED}
+                  "sort": "desc", "feed": self.feed}
         url = (f"{BASE_URL}/{urllib.parse.quote(symbol.upper(), safe='.')}/{kind}?"
                f"{urllib.parse.urlencode(params)}")
         headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret,
@@ -254,7 +292,7 @@ def _bar_list(reply: object, what: str) -> list[dict]:
 def snapshot_at(day: date, at: datetime, daily: list[dict], minutes: list[dict],
                 trade: dict | None, quote: dict | None) -> dict:
     """The snapshot Alpaca would have served at `at`, in its own shape, from the date's raw
-    IEX bars and the last trade and quote at or before `at` (see the module docstring).
+    bars (on one feed) and the last trade and quote at or before `at` (see the module docstring).
     ValueError when no daily bar on or before `day` exists, or a bar is malformed."""
     dated = []
     for b in daily:
@@ -265,7 +303,7 @@ def snapshot_at(day: date, at: datetime, daily: list[dict], minutes: list[dict],
             dated.append((d, b))
     dated.sort(key=lambda x: x[0])
     if not dated:
-        raise ValueError(f"no IEX daily bar on or before {day}")
+        raise ValueError(f"no daily bar on or before {day}")
     last_day, last = dated[-1]
     prev = dated[-2][1] if len(dated) > 1 else None
     if last_day != day:  # no bar on the date: a live snapshot shows the older one (stale)
@@ -350,11 +388,12 @@ def _row(sym: str, hhmm: str, at: datetime, snap: dict, verdict: dict | None,
         k = reason_key(r)
         if k not in failed:
             failed.append(k)
-    row: dict = {"time": hhmm, "result": REJECTED if reasons else CANDIDATE,
-                 "failed": failed, "reasons": reasons, "price": None, "gap_pct": None,
-                 "gap_of_min_pct": None, "volume": None, "volume_of_min_pct": None,
-                 "spread_pct": None, "spread_of_max_pct": None, "trade_age_s": None,
-                 "quote_age_s": None, "rvol": None}
+    row = _error_row(hhmm, "")
+    row.update({"result": REJECTED if reasons else CANDIDATE, "failed": failed,
+                "reasons": reasons})
+    prev, bar = snap.get("prevDailyBar"), snap.get("dailyBar")
+    row["prev_close"] = _s(prev.get("c")) if isinstance(prev, dict) else None
+    row["open"] = _s(bar.get("o")) if isinstance(bar, dict) else None
     if m is None:
         return row
     row.update({
@@ -372,6 +411,7 @@ def _row(sym: str, hhmm: str, at: datetime, snap: dict, verdict: dict | None,
 
 def _error_row(hhmm: str, why: str) -> dict:
     return {"time": hhmm, "result": ERROR, "failed": [], "reasons": [why], "price": None,
+            "prev_close": None, "open": None,
             "gap_pct": None, "gap_of_min_pct": None, "volume": None,
             "volume_of_min_pct": None, "spread_pct": None, "spread_of_max_pct": None,
             "trade_age_s": None, "quote_age_s": None, "rvol": None}
@@ -386,53 +426,34 @@ def _most(rows: list[dict]) -> tuple[str | None, int]:
     return (best, counts[best]) if counts[best] else (None, 0)
 
 
-def replay(data: ReplayData, day: date, times: list[str], symbols: list[str], limits: Any,
-           criteria: ScanCriteria | None = None,
-           progress: Callable[[str], None] | None = None,
-           now: datetime | None = None) -> dict:
-    """The replay report (JSON-serializable). `times` are "HH:MM" ET inside a finished
-    session (main checks). The scan runs once per time over every symbol fetched without an
-    error, through pipeline.market.run_scan. Minute bars are fetched to DAY_END (or `now`, if
-    earlier) for the volume check; each snapshot uses only those ended by its time."""
-    criteria = criteria or ScanCriteria()
-    say = progress or (lambda _m: None)
-    ats = {h: datetime.combine(day, time.fromisoformat(h), tzinfo=NY) for h in times}
-    minutes_end = datetime.combine(day, DAY_END, tzinfo=NY)
-    if now is not None:
-        minutes_end = max(min(minutes_end, now), max(ats.values()))
+def _fetch(data: ReplayData, sym: str, day: date, ats: dict[str, datetime],
+           bars_end: datetime | None, minutes_end: datetime) -> tuple[list, list, dict]:
+    """(daily bars, minute bars, {"HH:MM": snapshot or an error text}) for one symbol on
+    `data`'s feed. Raises when a bars request fails (the caller makes it an ERROR row)."""
     day_start = datetime.combine(day, time(0, 0), tzinfo=NY)
-    sym_error: dict[str, str] = {}
-    raw: dict[str, dict] = {}
-    listings: dict[str, dict] = {}
-    checks: dict[str, dict] = {}
-    for i, sym in enumerate(symbols, 1):
-        say(f"fetching {sym} ({i}/{len(symbols)})")
+    daily_end = day_start + timedelta(days=1)
+    if bars_end is not None:
+        daily_end = min(daily_end, bars_end)
+    daily = _bar_list(data.daily_bars(sym, day_start - DAILY_LOOKBACK, daily_end), "daily bars")
+    minutes = _bar_list(data.minute_bars(sym, datetime.combine(day, DAY_START, tzinfo=NY),
+                                         minutes_end), "minute bars")
+    at_snaps: dict[str, dict | str] = {}
+    for hhmm, at in ats.items():
         try:
-            daily = _bar_list(data.daily_bars(sym, day_start - DAILY_LOOKBACK,
-                                              day_start + timedelta(days=1)), "daily bars")
-            minutes = _bar_list(data.minute_bars(
-                sym, datetime.combine(day, DAY_START, tzinfo=NY), minutes_end), "minute bars")
+            trade, quote = data.last_trade(sym, at), data.last_quote(sym, at)
+            at_snaps[hhmm] = snapshot_at(day, at, daily, minutes, trade, quote)
         except Exception as exc:  # noqa: BLE001 - a failed request is an ERROR row, never a pass
-            sym_error[sym] = f"bars request failed: {_why(exc)}"
-            continue
-        listing = listing_input(data, sym)
-        if listing.get("fetch_failed") and not str(listing.get("reason", "")).startswith(
-                "HTTP 404"):
-            sym_error[sym] = f"listing request failed: {listing.get('reason')}"
-            continue
-        checks[sym] = _volume_check(day, daily, minutes)
-        listings[sym] = listing
-        raw[sym] = {"daily": daily, "minutes": minutes, "at": {}}
-        for hhmm, at in ats.items():
-            try:
-                trade, quote = data.last_trade(sym, at), data.last_quote(sym, at)
-                raw[sym]["at"][hhmm] = snapshot_at(day, at, daily, minutes, trade, quote)
-            except Exception as exc:  # noqa: BLE001
-                raw[sym]["at"][hhmm] = f"data at {hhmm} failed: {_why(exc)}"
+            at_snaps[hhmm] = f"data at {hhmm} failed: {_why(exc)}"
+    return daily, minutes, at_snaps
 
+
+def _scan_rows(raw: dict[str, dict], sym_error: dict[str, str], symbols: list[str],
+               ats: dict[str, datetime], criteria: ScanCriteria, limits: Any,
+               listings: dict[str, dict]) -> dict[str, list[dict]]:
+    """{symbol: [row per time]}: run_scan once per time over the symbols with a snapshot."""
     rows: dict[str, list[dict]] = {s: [] for s in symbols}
     for hhmm, at in ats.items():
-        snaps = {s: v["at"][hhmm] for s, v in raw.items() if isinstance(v["at"][hhmm], dict)}
+        snaps = {s: v[hhmm] for s, v in raw.items() if isinstance(v[hhmm], dict)}
         out = run_scan(snaps, criteria, limits, at, avg_volume=None, listings=listings,
                        reporting=None)
         verdicts = {r["symbol"]: r for r in out["rejected"]}
@@ -440,14 +461,89 @@ def replay(data: ReplayData, day: date, times: list[str], symbols: list[str], li
         for s in symbols:
             if s in sym_error:
                 rows[s].append(_error_row(hhmm, sym_error[s]))
-            elif not isinstance(raw[s]["at"][hhmm], dict):
-                rows[s].append(_error_row(hhmm, raw[s]["at"][hhmm]))
+            elif not isinstance(raw[s][hhmm], dict):
+                rows[s].append(_error_row(hhmm, raw[s][hhmm]))
             elif s in verdicts:
                 rows[s].append(_row(s, hhmm, at, snaps[s], verdicts[s], criteria))
             elif s in passed:
                 rows[s].append(_row(s, hhmm, at, snaps[s], None, criteria))
             else:  # never shown as a pass by default
                 rows[s].append(_error_row(hhmm, "the scan returned no verdict for it"))
+    return rows
+
+
+def _spread_ratio(iex: object, sip: object, sym: str) -> Decimal | None:
+    """IEX spread / SIP spread (unrounded, to 0.01), None unless both are usable and the SIP
+    spread is above zero."""
+    if not (isinstance(iex, dict) and isinstance(sip, dict)):
+        return None
+    a, b = _metrics(iex, None, sym)[0], _metrics(sip, None, sym)[0]
+    if a is None or b is None or a["spread_raw"] is None or not b["spread_raw"]:
+        return None
+    return (a["spread_raw"] / b["spread_raw"]).quantize(Decimal("0.01"))
+
+
+def replay(data: ReplayData, day: date, times: list[str], symbols: list[str], limits: Any,
+           criteria: ScanCriteria | None = None,
+           progress: Callable[[str], None] | None = None,
+           now: datetime | None = None, sip: ReplayData | None = None) -> dict:
+    """The replay report (JSON-serializable). `times` are "HH:MM" ET inside a finished
+    session (main checks). The scan runs once per time over every symbol fetched without an
+    error, through pipeline.market.run_scan. Minute bars are fetched to DAY_END (or `now`, if
+    earlier) for the volume check; each snapshot uses only those ended by its time.
+
+    With `sip` (the same source on the SIP feed), every snapshot is rebuilt from SIP data too
+    and scanned the same way (with the listing from `data`); each IEX row then carries a
+    "sip" row and a "spread_ratio", and the report a "sip_summary". SIP requests end at least
+    SIP_DELAY before `now` (the free plan's rule)."""
+    criteria = criteria or ScanCriteria()
+    say = progress or (lambda _m: None)
+    ats = {h: datetime.combine(day, time.fromisoformat(h), tzinfo=NY) for h in times}
+    last_at = max(ats.values())
+    if sip is not None and (now is None or last_at > now - SIP_DELAY):
+        raise ValueError("a SIP comparison needs `now`, and every replay time more than "
+                         "15 minutes before it (the free plan's SIP rule)")
+    minutes_end = datetime.combine(day, DAY_END, tzinfo=NY)
+    sip_end = None
+    if now is not None:
+        sip_end = now - SIP_DELAY
+        minutes_end = max(min(minutes_end, now), last_at)
+    sip_minutes_end = max(min(minutes_end, sip_end), last_at) if sip_end else minutes_end
+    sym_error: dict[str, str] = {}
+    sip_error: dict[str, str] = {}
+    raw: dict[str, dict] = {}
+    sip_raw: dict[str, dict] = {}
+    listings: dict[str, dict] = {}
+    checks: dict[str, dict] = {}
+    for i, sym in enumerate(symbols, 1):
+        say(f"fetching {sym} ({i}/{len(symbols)})")
+        listing = listing_input(data, sym)
+        if listing.get("fetch_failed") and not str(listing.get("reason", "")).startswith(
+                "HTTP 404"):
+            sym_error[sym] = f"listing request failed: {listing.get('reason')}"
+            continue
+        try:
+            daily, minutes, raw[sym] = _fetch(data, sym, day, ats, None, minutes_end)
+        except Exception as exc:  # noqa: BLE001 - a failed request is an ERROR row, never a pass
+            sym_error[sym] = f"bars request failed: {_why(exc)}"
+            continue
+        checks[sym] = _volume_check(day, daily, minutes)
+        listings[sym] = listing
+        if sip is not None:
+            try:
+                _d, _m, sip_raw[sym] = _fetch(sip, sym, day, ats, sip_end, sip_minutes_end)
+            except Exception as exc:  # noqa: BLE001
+                sip_error[sym] = f"SIP bars request failed: {_why(exc)}"
+
+    rows = _scan_rows(raw, sym_error, symbols, ats, criteria, limits, listings)
+    if sip is not None:
+        sip_rows = _scan_rows(sip_raw, {**sip_error, **sym_error}, symbols, ats, criteria,
+                              limits, listings)
+        for s in symbols:
+            for j, hhmm in enumerate(ats):
+                rows[s][j]["sip"] = sip_rows[s][j]
+                ratio = _spread_ratio(raw.get(s, {}).get(hhmm), sip_raw.get(s, {}).get(hhmm), s)
+                rows[s][j]["spread_ratio"] = _s(ratio)
 
     per_symbol = []
     for s in symbols:
@@ -455,7 +551,8 @@ def replay(data: ReplayData, day: date, times: list[str], symbols: list[str], li
         per_symbol.append({"symbol": s, "most_often": most, "most_often_count": n,
                            "times_checked": sum(1 for r in rows[s] if r["result"] != ERROR),
                            "volume_check": checks.get(s), "rows": rows[s]})
-    return {"date": day.isoformat(), "feed": FEED, "times": list(times),
+    return {"date": day.isoformat(), "feed": FEED, "compare_sip": sip is not None,
+            "times": list(times),
             "criteria": {"min_price": str(criteria.min_price),
                          "max_price": str(criteria.max_price),
                          "min_volume": criteria.min_volume,
@@ -464,7 +561,69 @@ def replay(data: ReplayData, day: date, times: list[str], symbols: list[str], li
                          "direction": criteria.direction,
                          "max_quote_age_s": criteria.max_quote_age_s},
             "not_replayed": ["quarterly reporting (SEC EDGAR): see pipeline.universe_check"],
-            "symbols": per_symbol, "summary": summarize(per_symbol, list(times))}
+            "symbols": per_symbol, "summary": summarize(per_symbol, list(times)),
+            "sip_summary": summarize_sip(per_symbol, list(times)) if sip is not None else None}
+
+
+def _median(values: list[Decimal]) -> Decimal:
+    v = sorted(values)
+    mid = len(v) // 2
+    return v[mid] if len(v) % 2 else ((v[mid - 1] + v[mid]) / 2).quantize(Decimal("0.01"))
+
+
+def summarize_sip(per_symbol: list[dict], times: list[str]) -> dict:
+    """IEX against SIP:
+    - "passing": {time: {criterion: {"iex": n, "sip": n}}} symbols checked on that feed at
+      that time that did NOT fail the criterion (MARKET_CRITERIA only), with "checked" and
+      "candidates" counts in the same shape;
+    - "spread_ratio": median and max of IEX spread / SIP spread over every symbol and time
+      where both are usable (SIP above zero), the max's symbol and time, how many pairs, and
+      "not_comparable": the checked IEX rows without a ratio (a spread missing, crossed or
+      zero on either feed, or a SIP ERROR);
+    - "gap_differs": symbols whose IEX and SIP gaps differ by more than GAP_DIFF_POINTS, from
+      the first time both feeds were checked (the gap does not change during the day).
+    A row the scan could not evaluate ("data") counts as checked but passes no criterion."""
+    passing = {h: {k: {"iex": 0, "sip": 0} for k in MARKET_CRITERIA} for h in times}
+    checked = {h: {"iex": 0, "sip": 0} for h in times}
+    cands = {h: {"iex": 0, "sip": 0} for h in times}
+    ratios: list[tuple[Decimal, str, str]] = []
+    no_ratio = 0
+    gaps = []
+    for p in per_symbol:
+        gap_done = False
+        for r in p["rows"]:
+            h = r["time"]
+            for feed, row in (("iex", r), ("sip", r.get("sip"))):
+                if not isinstance(row, dict) or row["result"] == ERROR:
+                    continue
+                checked[h][feed] += 1
+                cands[h][feed] += row["result"] == CANDIDATE
+                if "data" in row["failed"]:  # not evaluated: passes nothing
+                    continue
+                for k in MARKET_CRITERIA:
+                    passing[h][k][feed] += k not in row["failed"]
+            if r.get("spread_ratio") is not None:
+                ratios.append((Decimal(r["spread_ratio"]), p["symbol"], h))
+            elif r["result"] != ERROR:
+                no_ratio += 1
+            sip_row = r.get("sip") or {}
+            if (not gap_done and r["gap_pct"] is not None
+                    and sip_row.get("gap_pct") is not None):
+                gap_done = True
+                a, b = Decimal(r["gap_pct"]), Decimal(sip_row["gap_pct"])
+                if abs(a - b) > GAP_DIFF_POINTS:
+                    gaps.append({"symbol": p["symbol"], "iex_gap_pct": str(a),
+                                 "sip_gap_pct": str(b), "difference": str(a - b)})
+    top = max(ratios, key=lambda x: x[0]) if ratios else None
+    return {
+        "passing": passing, "checked": checked, "candidates": cands,
+        "spread_ratio": {
+            "pairs": len(ratios), "not_comparable": no_ratio,
+            "median": str(_median([x[0] for x in ratios])) if ratios else None,
+            "max": str(top[0]) if top else None,
+            "max_at": {"symbol": top[1], "time": top[2]} if top else None},
+        "gap_differs": gaps,
+    }
 
 
 def summarize(per_symbol: list[dict], times: list[str]) -> dict:
@@ -540,6 +699,10 @@ def render(report: dict) -> str:
         "or at volume: the replay counts pre-market minute bars, which the live daily bar "
         "may leave out.",
     ]
+    if report.get("compare_sip"):
+        lines.append("--compare-sip: every snapshot is also rebuilt from SIP (consolidated) "
+                     "history and run through the same scan; IEX/SIP is the IEX spread over "
+                     "the SIP spread.")
     head = (f"  {'ET':<6}{'RESULT':<10}{'PRICE':>9}  {'GAP%':<14}{'IEX VOLUME':<20}"
             f"{'SPREAD%':<13}{'TRADE':>6}{'QUOTE':>6}{'RVOL':>6}  FAILED")
     for p in report["symbols"]:
@@ -552,6 +715,9 @@ def render(report: dict) -> str:
         if vc:
             lines.append(f"  IEX volume for the day: daily bar {_vol(vc['daily_bar'])}, "
                          f"minute bars from 04:00 ET {_vol(vc['minute_sum'])}")
+        if report.get("compare_sip"):
+            lines += _render_pair(p["rows"])
+            continue
         lines.append(head)
         for r in p["rows"]:
             if r["result"] == ERROR:
@@ -592,7 +758,72 @@ def render(report: dict) -> str:
         f"({', '.join(short)}): their replayed volume may be lower than the live scan's"
         if short else "no symbol's daily bar holds more volume than its minute bars: no sign "
         "that the replayed volume is lower than the live scan's"))
+    if report.get("sip_summary"):
+        lines += _render_sip(report["sip_summary"], times)
     return "\n".join(lines)
+
+
+PAIR_HEAD = (f"  {'ET':<6}{'FEED':<5}{'RESULT':<10}{'PREV CLOSE':>11}{'OPEN':>10}  "
+             f"{'GAP%':<14}{'VOLUME SO FAR':<22}{'SPREAD%':<13}{'TRADE':>6}{'QUOTE':>6}"
+             f"{'IEX/SIP':>8}  FAILED")
+
+
+def _pair_line(label: str, feed: str, r: dict, ratio: str | None) -> str:
+    if r["result"] == ERROR:
+        return f"  {label:<6}{feed:<5}{ERROR:<10}  {'; '.join(r['reasons'])}"
+    vol = _vol(r["volume"]) if r["volume"] is not None else None
+    return (f"  {label:<6}{feed:<5}{r['result']:<10}{_cell(r['prev_close']):>11}"
+            f"{_cell(r['open']):>10}  {_cell(r['gap_pct'], r['gap_of_min_pct']):<14}"
+            f"{_cell(vol, r['volume_of_min_pct']):<22}"
+            f"{_cell(r['spread_pct'], r['spread_of_max_pct']):<13}"
+            f"{_age(r['trade_age_s']):>6}{_age(r['quote_age_s']):>6}"
+            f"{(ratio + 'x') if ratio else '':>8}  "
+            + (", ".join(LABELS[k] for k in r["failed"]) or "-"))
+
+
+def _render_pair(rows: list[dict]) -> list[str]:
+    """One IEX line and one SIP line per time; IEX/SIP is the spread ratio."""
+    out = [PAIR_HEAD]
+    for r in rows:
+        out.append(_pair_line(r["time"], "IEX", r, None))
+        sip = r.get("sip")
+        if isinstance(sip, dict):
+            out.append(_pair_line("", "SIP", sip, r.get("spread_ratio")))
+    return out
+
+
+def _render_sip(s: dict, times: list[str]) -> list[str]:
+    def pair(d: dict) -> str:
+        return f"{d['iex']}/{d['sip']}"
+
+    lines = ["", "IEX vs SIP: symbols PASSING each criterion at each time (IEX/SIP)",
+             f"  {'CRITERION':<11}" + "".join(f"{h:>9}" for h in times)]
+    for k in MARKET_CRITERIA:
+        lines.append(f"  {LABELS[k]:<11}"
+                     + "".join(f"{pair(s['passing'][h][k]):>9}" for h in times))
+    lines.append(f"  {'checked':<11}" + "".join(f"{pair(s['checked'][h]):>9}" for h in times))
+    lines.append(f"  {'candidates':<11}"
+                 + "".join(f"{pair(s['candidates'][h]):>9}" for h in times))
+    sr = s["spread_ratio"]
+    if sr["pairs"]:
+        at = sr["max_at"]
+        lines.append(f"spread ratio IEX/SIP over {sr['pairs']} symbol-times: median "
+                     f"{sr['median']}x, max {sr['max']}x ({at['symbol']} at {at['time']})"
+                     + (f"; {sr['not_comparable']} without a usable pair of spreads"
+                        if sr["not_comparable"] else ""))
+    else:
+        lines.append("spread ratio IEX/SIP: no symbol-time had a usable pair of spreads")
+    if s["gap_differs"]:
+        lines.append(f"IEX and SIP gaps differ by more than {GAP_DIFF_POINTS} points:")
+        for g in s["gap_differs"]:
+            lines.append(f"  {g['symbol']}: IEX {g['iex_gap_pct']}%, SIP {g['sip_gap_pct']}% "
+                         f"(IEX - SIP = {g['difference']})")
+    else:
+        lines.append(f"no symbol's IEX and SIP gaps differ by more than {GAP_DIFF_POINTS} "
+                     "points")
+    lines.append("Read-only comparison: the live scan still reads IEX; SIP would need a paid "
+                 "real-time plan.")
+    return lines
 
 
 # ------------------------------------------------------------------------------------------
@@ -640,7 +871,7 @@ def _session_busy(clock: datetime) -> str | None:
 
 def main(argv: list[str] | None = None, *, data: ReplayData | None = None,
          now: datetime | None = None, config_path: Path | None = None,
-         limits: Any = None) -> int:
+         limits: Any = None, sip_data: ReplayData | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m pipeline.scan_replay", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--date", required=True, metavar="YYYY-MM-DD",
@@ -650,6 +881,10 @@ def main(argv: list[str] | None = None, *, data: ReplayData | None = None,
     p.add_argument("--symbols", nargs="+", metavar="SYM", default=None,
                    help="replay these instead of config/run_day.json's universe")
     p.add_argument("--json", action="store_true", help="print the report as JSON")
+    p.add_argument("--compare-sip", action="store_true",
+                   help="also rebuild every snapshot from SIP (consolidated) history, free "
+                        "when older than 15 minutes, and compare it with IEX (about twice "
+                        "the requests)")
     env = p.add_mutually_exclusive_group()
     env.add_argument("--env-file", type=Path, default=None, metavar="PATH")
     env.add_argument("--no-dotenv", action="store_true")
@@ -687,6 +922,12 @@ def main(argv: list[str] | None = None, *, data: ReplayData | None = None,
     if not times:
         print("refused: no time left to replay", file=sys.stderr)
         return REFUSED
+    if args.compare_sip:
+        latest = datetime.combine(day, time.fromisoformat(times[-1]), tzinfo=NY)
+        if latest > clock - SIP_DELAY:
+            print(f"refused: SIP history at {times[-1]} is free only once it is more than 15 "
+                  f"minutes old: run after {latest + SIP_DELAY:%H:%M} ET", file=sys.stderr)
+            return REFUSED
     try:
         if args.symbols:
             symbols = validate_symbols(args.symbols)
@@ -713,11 +954,20 @@ def main(argv: list[str] | None = None, *, data: ReplayData | None = None,
                   file=sys.stderr)
             return REFUSED
         data = LiveReplayData()
+    if args.compare_sip and sip_data is None:
+        with_feed = getattr(data, "with_feed", None)
+        if not callable(with_feed):
+            print("refused: this data source has no SIP feed", file=sys.stderr)
+            return REFUSED
+        sip_data = with_feed(SIP)
 
     report = replay(data, day, times, symbols, limits,
-                    progress=lambda m: print(m, file=sys.stderr), now=clock)
+                    progress=lambda m: print(m, file=sys.stderr), now=clock,
+                    sip=sip_data if args.compare_sip else None)
     print(json.dumps(report, indent=2) if args.json else render(report))
-    return INCOMPLETE if report["summary"]["symbols_with_errors"] else OK
+    sip_errors = any(isinstance(r.get("sip"), dict) and r["sip"]["result"] == ERROR
+                     for p in report["symbols"] for r in p["rows"])
+    return INCOMPLETE if report["summary"]["symbols_with_errors"] or sip_errors else OK
 
 
 if __name__ == "__main__":

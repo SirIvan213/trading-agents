@@ -185,7 +185,7 @@ def test_verdicts_equal_the_scans_own():
 # --- snapshot_at -----------------------------------------------------------------------------
 
 def test_snapshot_needs_a_daily_bar():
-    with pytest.raises(ValueError, match="no IEX daily bar"):
+    with pytest.raises(ValueError, match="no daily bar on or before"):
         sr.snapshot_at(DAY, datetime(2026, 11, 25, 10, 0, tzinfo=NY), [], [], None, None)
 
 
@@ -618,3 +618,213 @@ def test_minute_bars_are_fetched_to_the_evening_for_the_volume_check():
               now=datetime(2026, 11, 25, 16, 5, tzinfo=NY))
     assert seen == [datetime(2026, 11, 25, 20, 0, tzinfo=NY),
                     datetime(2026, 11, 25, 16, 5, tzinfo=NY)]
+
+
+# --- --compare-sip ---------------------------------------------------------------------------
+# tests/fixtures/scan_replay/day_sip.json is the SIP side of day.json:
+#   GAPR  40x the volume (passes at 09:40), a 1-cent quote: IEX/SIP spread 5x
+#   FLAT  official open 51.25: SIP gap 2.50% vs IEX 0.50% (2 points apart); a SIP candidate
+#   THIN  50x the volume and a fresh 12:00 trade: a SIP candidate every time
+#   WIDE  NBBO 10.04 x 10.06: spread 0.20%, a SIP candidate (IEX/SIP 5x)
+#   DOWN  the same -3% gap; NOBAR has the day's bar on SIP, but gap 0% and low volume
+
+SIPFIX = json.loads((Path(__file__).parent / "fixtures" / "scan_replay" / "day_sip.json")
+                    .read_text(encoding="utf-8"))
+
+
+def _sip_report(sip=None, symbols=SYMS, data=None):
+    return sr.replay(data or FakeData(), DAY, TIMES, symbols, LIMITS, now=AFTER_CLOSE,
+                     sip=sip or FakeData(SIPFIX))
+
+
+@pytest.mark.parametrize("now", [None, datetime(2026, 11, 25, 12, 15, tzinfo=NY)])
+def test_replay_refuses_recent_sip_itself(now):
+    """The free plan's 15-minute rule holds in replay(), not only in main()."""
+    sip = FakeData(SIPFIX)
+    with pytest.raises(ValueError, match="15 minutes"):
+        sr.replay(FakeData(), DAY, TIMES, ["GAPR"], LIMITS, now=now, sip=sip)
+    assert sip.calls == []
+
+
+def test_replay_sip_boundary_is_16_minutes():
+    with pytest.raises(ValueError, match="15 minutes"):
+        sr.replay(FakeData(), DAY, ["12:00"], ["GAPR"], LIMITS,
+                  now=datetime(2026, 11, 25, 12, 15, tzinfo=NY), sip=FakeData(SIPFIX))
+    rep = sr.replay(FakeData(), DAY, ["12:00"], ["GAPR"], LIMITS,
+                    now=datetime(2026, 11, 25, 12, 16, tzinfo=NY), sip=FakeData(SIPFIX))
+    assert rep["compare_sip"] is True
+
+
+def test_a_row_the_scan_could_not_evaluate_passes_nothing():
+    sip = copy.deepcopy(SIPFIX)
+    sip["symbols"]["GAPR"]["daily"] = [b for b in sip["symbols"]["GAPR"]["daily"]
+                                       if b["t"].startswith("2026-11-25")]  # no previous bar
+    rep = _sip_report(FakeData(sip), ["GAPR"])
+    row = _rows(rep, "GAPR")["09:40"]["sip"]
+    assert row["failed"] == ["data"]
+    s = rep["sip_summary"]
+    assert s["checked"]["09:40"]["sip"] == 1
+    assert all(s["passing"]["09:40"][k]["sip"] == 0 for k in sr.MARKET_CRITERIA)
+
+
+def test_a_sip_quote_failure_at_one_time():
+    sip = FakeData(SIPFIX, fail={("last_quote", "WIDE", "10:30"): RuntimeError("HTTP 500 /q")})
+    rows = _rows(_sip_report(sip, ["WIDE"]), "WIDE")
+    assert rows["10:30"]["sip"]["result"] == sr.ERROR
+    assert "data at 10:30 failed" in rows["10:30"]["sip"]["reasons"][0]
+    assert rows["12:00"]["sip"]["result"] == sr.CANDIDATE
+
+
+def test_main_exit_4_when_only_sip_errors(capsys):
+    sip = FakeData(SIPFIX, fail={("daily_bars", "GAPR"): RuntimeError("HTTP 403 from /b")})
+    code, _out, _err = _main(["--date", "2026-11-25", "--symbols", "GAPR", "--times", "10:30",
+                              "--compare-sip"], capsys, sip_data=sip)
+    assert code == sr.INCOMPLETE
+
+
+def test_without_compare_sip_nothing_changes():
+    rep = _report()
+    assert rep["compare_sip"] is False and rep["sip_summary"] is None
+    assert all("sip" not in r for p in rep["symbols"] for r in p["rows"])
+    assert "IEX vs SIP" not in sr.render(rep)
+
+
+def test_sip_rows_sit_beside_iex_rows():
+    rep = _sip_report()
+    gapr = _rows(rep, "GAPR")["09:40"]
+    assert gapr["result"] == sr.REJECTED and gapr["failed"] == ["volume"]
+    assert gapr["sip"]["result"] == sr.CANDIDATE and gapr["sip"]["volume"] == 2_040_000
+    assert (gapr["prev_close"], gapr["open"]) == ("100.0", "103.0")
+    assert (gapr["sip"]["prev_close"], gapr["sip"]["open"]) == ("100.0", "103.0")
+    assert gapr["spread_ratio"] == "5.00"
+    flat = _rows(rep, "FLAT")["10:30"]
+    assert (flat["gap_pct"], flat["sip"]["gap_pct"]) == ("0.50", "2.50")
+    assert flat["sip"]["open"] == "51.25" and flat["sip"]["result"] == sr.CANDIDATE
+    wide = _rows(rep, "WIDE")["12:00"]
+    assert wide["failed"] == ["spread"] and wide["sip"]["failed"] == []
+    assert _rows(rep, "THIN")["12:00"]["sip"]["result"] == sr.CANDIDATE
+    nobar = _rows(rep, "NOBAR")["10:30"]
+    assert nobar["spread_ratio"] is None  # no IEX quote: no pair
+    assert "daily_bar" not in nobar["sip"]["failed"]
+
+
+def test_sip_summary():
+    s = _sip_report()["sip_summary"]
+    assert s["candidates"] == {"09:40": {"iex": 0, "sip": 4}, "10:30": {"iex": 1, "sip": 4},
+                               "12:00": {"iex": 1, "sip": 4}}
+    assert s["checked"]["09:40"] == {"iex": 6, "sip": 6}
+    assert s["passing"]["09:40"]["gap"] == {"iex": 3, "sip": 4}  # FLAT passes on SIP
+    assert s["passing"]["09:40"]["volume"] == {"iex": 4, "sip": 5}
+    assert s["passing"]["12:00"]["trade_age"] == {"iex": 4, "sip": 6}
+    assert set(s["passing"]["09:40"]) == set(sr.MARKET_CRITERIA)
+    # 15 pairs: GAPR and WIDE 5x, DOWN 2x, FLAT and THIN about 1x; NOBAR has no IEX quote
+    assert s["spread_ratio"] == {"pairs": 15, "not_comparable": 3, "median": "2.00",
+                                 "max": "5.00", "max_at": {"symbol": "GAPR", "time": "09:40"}}
+    assert s["gap_differs"] == [{"symbol": "FLAT", "iex_gap_pct": "0.50",
+                                 "sip_gap_pct": "2.50", "difference": "-2.00"}]
+
+
+def test_median_of_an_even_count():
+    assert sr._median([Decimal("1"), Decimal("4"), Decimal("2"), Decimal("3")]) == Decimal(
+        "2.50")
+    assert sr._median([Decimal("3")]) == Decimal("3")
+
+
+def test_a_sip_failure_is_a_sip_error_row_only():
+    sip = FakeData(SIPFIX, fail={("minute_bars", "GAPR"): RuntimeError("HTTP 403 from /b")})
+    rep = _sip_report(sip)
+    rows = _rows(rep, "GAPR")
+    assert rows["10:30"]["result"] == sr.CANDIDATE  # IEX unaffected
+    assert rows["10:30"]["sip"]["result"] == sr.ERROR
+    assert "SIP bars request failed: HTTP 403 from /b" in rows["10:30"]["sip"]["reasons"][0]
+    assert rows["10:30"]["spread_ratio"] is None
+    assert rep["sip_summary"]["checked"]["10:30"] == {"iex": 6, "sip": 5}
+
+
+def test_an_iex_error_is_an_error_on_both_sides():
+    data = FakeData(fail={("listing", "FLAT"): RuntimeError("HTTP 503 from /a")})
+    sip = FakeData(SIPFIX)
+    row = _rows(_sip_report(sip, ["FLAT"], data), "FLAT")["09:40"]
+    assert row["result"] == sr.ERROR and row["sip"]["result"] == sr.ERROR
+    assert sip.calls == []  # nothing is asked of SIP for a symbol that failed on IEX
+
+
+def test_sip_requests_end_16_minutes_before_now():
+    ends: dict[str, list] = {"daily": [], "minute": []}
+
+    class Spy(FakeData):
+        def daily_bars(self, symbol, start, end):
+            ends["daily"].append(end)
+            return super().daily_bars(symbol, start, end)
+
+        def minute_bars(self, symbol, start, end):
+            ends["minute"].append(end)
+            return super().minute_bars(symbol, start, end)
+
+    now = datetime(2026, 11, 25, 16, 30, tzinfo=NY)
+    sr.replay(FakeData(), DAY, ["10:30"], ["GAPR"], LIMITS, now=now, sip=Spy(SIPFIX))
+    assert ends == {"daily": [datetime(2026, 11, 25, 16, 14, tzinfo=NY)],
+                    "minute": [datetime(2026, 11, 25, 16, 14, tzinfo=NY)]}
+    ends["daily"].clear()
+    ends["minute"].clear()
+    later = datetime(2026, 11, 27, 9, 0, tzinfo=NY)  # a past date: nothing to cap
+    sr.replay(FakeData(), DAY, ["10:30"], ["GAPR"], LIMITS, now=later, sip=Spy(SIPFIX))
+    assert ends == {"daily": [datetime(2026, 11, 26, 0, 0, tzinfo=NY)],
+                    "minute": [datetime(2026, 11, 25, 20, 0, tzinfo=NY)]}
+
+
+def test_render_compare_sip():
+    text = sr.render(_sip_report())
+    assert "--compare-sip:" in text and "PREV CLOSE" in text and "IEX/SIP" in text
+    assert "        SIP  candidate" in text
+    assert "5.00x" in text
+    assert "candidates       0/4      1/4      1/4" in text
+    assert ("spread ratio IEX/SIP over 15 symbol-times: median 2.00x, max 5.00x (GAPR at "
+            "09:40); 3 without a usable pair of spreads") in text
+    assert "FLAT: IEX 0.50%, SIP 2.50% (IEX - SIP = -2.00)" in text
+    assert "the live scan still reads IEX" in text
+
+
+def test_main_compare_sip(capsys):
+    code, out, _ = _main(["--date", "2026-11-25", "--symbols", *SYMS, "--times", *TIMES,
+                          "--compare-sip"], capsys, sip_data=FakeData(SIPFIX))
+    assert code == sr.OK and "IEX vs SIP" in out
+    code, out, _ = _main(["--date", "2026-11-25", "--symbols", "FLAT", "--times", "10:30",
+                          "--compare-sip", "--json"], capsys, sip_data=FakeData(SIPFIX))
+    assert json.loads(out)["sip_summary"]["gap_differs"][0]["symbol"] == "FLAT"
+
+
+def test_main_compare_sip_refuses_a_time_less_than_16_minutes_old(capsys):
+    data, sip = FakeData(), FakeData(SIPFIX)
+    code, _out, err = _main(["--date", "2026-11-25", "--symbols", "GAPR", "--times", "16:00",
+                             "--compare-sip"], capsys, data=data, sip_data=sip,
+                            now=datetime(2026, 11, 25, 16, 15, tzinfo=NY))
+    assert code == sr.REFUSED and "run after 16:16 ET" in err
+    assert data.calls == [] and sip.calls == []
+    code, _out, _err = _main(["--date", "2026-11-25", "--symbols", "GAPR", "--times", "16:00",
+                              "--compare-sip"], capsys, sip_data=FakeData(SIPFIX),
+                             now=datetime(2026, 11, 25, 16, 16, tzinfo=NY))
+    assert code == sr.INCOMPLETE  # it ran: the fixture just has no prints for 16:00
+
+
+def test_main_compare_sip_needs_a_sip_source(capsys):
+    code, _out, err = _main(["--date", "2026-11-25", "--symbols", "GAPR", "--compare-sip"],
+                            capsys)
+    assert code == sr.REFUSED and "no SIP feed" in err
+
+
+def test_with_feed_asks_sip_and_shares_the_pacing(keys):
+    op = Opener([{"bars": [], "symbol": "X"}, {"bars": [], "symbol": "X"},
+                 {"quotes": [], "symbol": "X"}])
+    iex, slept = _live(op)
+    sip = iex.with_feed("sip")
+    at = datetime(2026, 11, 25, 10, 30, tzinfo=NY)
+    iex.daily_bars("X", at, at)
+    sip.daily_bars("X", at, at)
+    sip.last_quote("X", at)
+    feeds = [dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query))["feed"]
+             for u in op.urls]
+    assert feeds == ["iex", "sip", "sip"] and iex.feed == "iex" and sip.feed == "sip"
+    assert slept == [sr.MIN_INTERVAL_S, sr.MIN_INTERVAL_S]  # one pace across both feeds
+    with pytest.raises(ValueError, match="feed must be"):
+        sr.LiveReplayData(feed="otc")
